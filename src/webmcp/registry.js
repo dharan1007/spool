@@ -95,28 +95,56 @@ export class TemporalRegistry {
     this.onChange = onChange;
     this.controllers = new Map();
     this.phase = null;
+    this.syncGeneration = 0;
+    this.syncTail = Promise.resolve();
   }
 
-  async sync(phase) {
-    const desired = new Set(toolNamesForPhase(phase));
-    for (const [name, controller] of this.controllers) {
-      if (!desired.has(name)) {
-        controller.abort(new DOMException(`Tool ${name} is no longer valid in phase ${phase}`, 'AbortError'));
-        this.controllers.delete(name);
+  sync(phase) {
+    const generation = ++this.syncGeneration;
+    const run = async () => {
+      if (generation !== this.syncGeneration) return [...this.controllers.keys()].sort();
+
+      const desired = new Set(toolNamesForPhase(phase));
+      for (const [name, controller] of this.controllers) {
+        if (!desired.has(name)) {
+          controller.abort(new DOMException(`Tool ${name} is no longer valid in phase ${phase}`, 'AbortError'));
+          this.controllers.delete(name);
+        }
       }
-    }
-    for (const name of desired) {
-      if (this.controllers.has(name)) continue;
-      const controller = new AbortController();
-      await this.modelContext.registerTool(makeTool(name, this.kernel), { signal: controller.signal });
-      this.controllers.set(name, controller);
-    }
-    this.phase = phase;
-    this.onChange({ phase, tools: [...desired].sort() });
-    return [...desired].sort();
+
+      for (const name of desired) {
+        if (generation !== this.syncGeneration) return [...this.controllers.keys()].sort();
+        if (this.controllers.has(name)) continue;
+
+        const controller = new AbortController();
+        try {
+          await this.modelContext.registerTool(makeTool(name, this.kernel), { signal: controller.signal });
+        } catch (error) {
+          controller.abort();
+          throw error;
+        }
+
+        if (generation !== this.syncGeneration) {
+          controller.abort(new DOMException(`Tool ${name} registration was superseded by a newer phase`, 'AbortError'));
+          return [...this.controllers.keys()].sort();
+        }
+        this.controllers.set(name, controller);
+      }
+
+      if (generation !== this.syncGeneration) return [...this.controllers.keys()].sort();
+      this.phase = phase;
+      const tools = [...desired].sort();
+      this.onChange({ phase, tools });
+      return tools;
+    };
+
+    const pending = this.syncTail.then(run, run);
+    this.syncTail = pending.catch(() => {});
+    return pending;
   }
 
   dispose() {
+    this.syncGeneration++;
     for (const controller of this.controllers.values()) controller.abort();
     this.controllers.clear();
   }
