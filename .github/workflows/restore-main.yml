@@ -1,0 +1,69 @@
+name: Restore verified SPOOL source to main
+
+on:
+  push:
+    branches: [spool-prod-recovery]
+    paths:
+      - '.github/workflows/restore-main.yml'
+      - '.source-recovery/recovered-src-tests.tgz'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate recovered archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/spool-recovered
+          mkdir -p /tmp/spool-recovered
+          tar -xzf .source-recovery/recovered-src-tests.tgz -C /tmp/spool-recovered
+          test -s /tmp/spool-recovered/src/app.js
+          test -s /tmp/spool-recovered/src/core/command-kernel.js
+          test -s /tmp/spool-recovered/src/worker/migration.worker.js
+          test -s /tmp/spool-recovered/tests/release-contract.test.js
+          test -s /tmp/spool-recovered/docs/superpowers/specs/2026-09-04-autopilot-product-rebuild-design.md
+          echo 'Recovered source archive validated.'
+      - name: Restore canonical main source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B main origin/main
+          rm -rf src tests docs/superpowers .bootstrap
+          rm -f .github/workflows/bootstrap-source.yml
+          mkdir -p docs
+          cp -a /tmp/spool-recovered/src ./src
+          cp -a /tmp/spool-recovered/tests ./tests
+          cp -a /tmp/spool-recovered/docs/superpowers ./docs/superpowers
+          test -s src/app.js
+          test -s tests/release-contract.test.js
+          ! find . -maxdepth 2 -type f -name 'payload-*.js' | grep -q .
+          ! grep -R "DecompressionStream" index.html boot-watchdog.js src scripts vercel.json
+      - name: Run complete release gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm run check
+      - name: Commit verified source to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Restore verified same-origin SPOOL production source'
+          git push origin HEAD:main
