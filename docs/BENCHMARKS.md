@@ -1,14 +1,14 @@
 # SPOOL Benchmarks
 
-Generated: 2026-09-04T08:07:01.677Z
+Generated: 2026-09-04T15:17:10.279Z
 
 ## Deterministic migration engine
 
 | Rows | CSV parse | Transform + target validation | Rows/sec | Valid | Invalid |
 |---:|---:|---:|---:|---:|---:|
-| 1,000 | 6.1 ms | 8.44 ms | 118,461 | 999 | 1 |
-| 10,000 | 35.91 ms | 57.72 ms | 173,246 | 9,982 | 18 |
-| 50,000 | 114.37 ms | 275.38 ms | 181,569 | 49,910 | 90 |
+| 1,000 | 7.63 ms | 12.46 ms | 80,241 | 999 | 1 |
+| 10,000 | 37.45 ms | 70.77 ms | 141,300 | 9,982 | 18 |
+| 50,000 | 138.29 ms | 334.26 ms | 149,584 | 49,910 | 90 |
 
 ## Temporal WebMCP surface
 

@@ -1,32 +1,32 @@
 {
-  "generatedAt": "2026-09-04T08:07:01.677Z",
+  "generatedAt": "2026-09-04T15:17:10.279Z",
   "environment": {
-    "node": "v22.16.0",
+    "node": "v22.23.2",
     "platform": "linux",
     "arch": "x64"
   },
   "migration": [
     {
       "rows": 1000,
-      "parseMs": 6.1,
-      "transformMs": 8.44,
-      "transformRowsPerSecond": 118461,
+      "parseMs": 7.63,
+      "transformMs": 12.46,
+      "transformRowsPerSecond": 80241,
       "validRows": 999,
       "invalidRows": 1
     },
     {
       "rows": 10000,
-      "parseMs": 35.91,
-      "transformMs": 57.72,
-      "transformRowsPerSecond": 173246,
+      "parseMs": 37.45,
+      "transformMs": 70.77,
+      "transformRowsPerSecond": 141300,
       "validRows": 9982,
       "invalidRows": 18
     },
     {
       "rows": 50000,
-      "parseMs": 114.37,
-      "transformMs": 275.38,
-      "transformRowsPerSecond": 181569,
+      "parseMs": 138.29,
+      "transformMs": 334.26,
+      "transformRowsPerSecond": 149584,
       "validRows": 49910,
       "invalidRows": 90
     }
