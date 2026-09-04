@@ -5,7 +5,7 @@ on:
     branches: [spool-prod-recovery]
     paths:
       - '.github/workflows/restore-main.yml'
-      - '.source-recovery/recovered-src-tests.tgz'
+      - '.source-recovery/recover3.part-*.b64'
   workflow_dispatch:
 
 permissions:
@@ -14,7 +14,7 @@ permissions:
 jobs:
   restore:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,19 +22,24 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Validate recovered archive
+      - name: Reconstruct and validate recovered archive
         shell: bash
         run: |
           set -euo pipefail
+          test "$(find .source-recovery -maxdepth 1 -name 'recover3.part-*.b64' | wc -l)" -eq 13
+          cat .source-recovery/recover3.part-*.b64 > /tmp/recovered.b64
+          test "$(wc -c < /tmp/recovered.b64)" -eq 60012
+          base64 --decode /tmp/recovered.b64 > /tmp/recovered.tgz
+          echo '547fe07b4071603e86d13b4b74bf503ab123953dac9c7ab4a45b4414e7868343  /tmp/recovered.tgz' | sha256sum --check --strict
           rm -rf /tmp/spool-recovered
           mkdir -p /tmp/spool-recovered
-          tar -xzf .source-recovery/recovered-src-tests.tgz -C /tmp/spool-recovered
+          tar -xzf /tmp/recovered.tgz -C /tmp/spool-recovered
           test -s /tmp/spool-recovered/src/app.js
           test -s /tmp/spool-recovered/src/core/command-kernel.js
           test -s /tmp/spool-recovered/src/worker/migration.worker.js
           test -s /tmp/spool-recovered/tests/release-contract.test.js
           test -s /tmp/spool-recovered/docs/superpowers/specs/2026-09-04-autopilot-product-rebuild-design.md
-          echo 'Recovered source archive validated.'
+          echo 'Recovered source archive is byte-identical and structurally valid.'
       - name: Restore canonical main source
         shell: bash
         run: |
@@ -48,9 +53,13 @@ jobs:
           cp -a /tmp/spool-recovered/tests ./tests
           cp -a /tmp/spool-recovered/docs/superpowers ./docs/superpowers
           test -s src/app.js
+          test -s src/core/command-kernel.js
+          test -s src/worker/migration.worker.js
           test -s tests/release-contract.test.js
-          ! find . -maxdepth 2 -type f -name 'payload-*.js' | grep -q .
+          ! find . -type f -name 'payload-*.js' | grep -q .
           ! grep -R "DecompressionStream" index.html boot-watchdog.js src scripts vercel.json
+          grep -q '<script src="/boot-watchdog.js"></script>' index.html
+          grep -q '<script type="module" src="/src/app.js"></script>' index.html
       - name: Run complete release gate
         shell: bash
         run: |
