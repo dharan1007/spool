@@ -1,0 +1,85 @@
+{
+  "generatedAt": "2026-09-04T08:07:01.677Z",
+  "environment": {
+    "node": "v22.16.0",
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "migration": [
+    {
+      "rows": 1000,
+      "parseMs": 6.1,
+      "transformMs": 8.44,
+      "transformRowsPerSecond": 118461,
+      "validRows": 999,
+      "invalidRows": 1
+    },
+    {
+      "rows": 10000,
+      "parseMs": 35.91,
+      "transformMs": 57.72,
+      "transformRowsPerSecond": 173246,
+      "validRows": 9982,
+      "invalidRows": 18
+    },
+    {
+      "rows": 50000,
+      "parseMs": 114.37,
+      "transformMs": 275.38,
+      "transformRowsPerSecond": 181569,
+      "validRows": 49910,
+      "invalidRows": 90
+    }
+  ],
+  "temporalWebMcp": {
+    "baselinePermanentToolCount": 23,
+    "baselineSerializedDefinitionBytes": 7963,
+    "averageActiveToolCount": 4.75,
+    "averageSerializedDefinitionBytes": 1658,
+    "averageToolCountReductionPct": 79.3,
+    "averageDefinitionByteReductionPct": 79.2,
+    "phases": [
+      {
+        "phase": "EMPTY",
+        "toolCount": 2,
+        "serializedDefinitionBytes": 642
+      },
+      {
+        "phase": "SOURCE_READY",
+        "toolCount": 6,
+        "serializedDefinitionBytes": 2468
+      },
+      {
+        "phase": "TARGET_READY",
+        "toolCount": 4,
+        "serializedDefinitionBytes": 1453
+      },
+      {
+        "phase": "MAPPING_DRAFT",
+        "toolCount": 5,
+        "serializedDefinitionBytes": 1732
+      },
+      {
+        "phase": "MAPPING_VALID",
+        "toolCount": 5,
+        "serializedDefinitionBytes": 1836
+      },
+      {
+        "phase": "RUNNING",
+        "toolCount": 4,
+        "serializedDefinitionBytes": 1290
+      },
+      {
+        "phase": "PAUSED",
+        "toolCount": 6,
+        "serializedDefinitionBytes": 2113
+      },
+      {
+        "phase": "COMPLETE",
+        "toolCount": 6,
+        "serializedDefinitionBytes": 1730
+      }
+    ]
+  },
+  "caveat": "These are local deterministic engine and serialized-schema measurements, not universal LLM success-rate claims."
+}
