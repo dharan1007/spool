@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.bootstrap/spool-source.zip'
+      - '.github/workflows/bootstrap-source.yml'
 permissions:
   contents: write
 jobs:
@@ -12,8 +13,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Expand verified source package
-        run: unzip -o .bootstrap/spool-source.zip -d .
+      - name: Recover and expand verified source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive='.bootstrap/spool-source.zip'
+          if unzip -t "$archive" >/dev/null 2>&1; then
+            unzip -o "$archive" -d .
+          else
+            echo 'Bootstrap archive has no usable central directory; attempting deterministic ZIP recovery.'
+            rm -f /tmp/spool-source-recovered.zip
+            zip -FF "$archive" --out /tmp/spool-source-recovered.zip
+            unzip -t /tmp/spool-source-recovered.zip
+            unzip -o /tmp/spool-source-recovered.zip -d .
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -27,5 +40,9 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
+          if git diff --cached --quiet; then
+            echo 'No source restoration changes to commit.'
+            exit 0
+          fi
           git commit -m 'Restore complete verified SPOOL source tree'
           git push
