@@ -29,6 +29,14 @@ function resolveWithinRoot(root, resource) {
   return resolved;
 }
 
+function durableOffset(cursor) {
+  if (cursor == null) return 0;
+  if (!cursor || typeof cursor !== 'object' || !Number.isSafeInteger(cursor.offset) || cursor.offset < 0) {
+    fail('INVALID_SOURCE_CURSOR', 'Filesystem cursor.offset must be a non-negative safe integer');
+  }
+  return cursor.offset;
+}
+
 async function collectRows(batches) {
   const rows = [];
   for await (const batch of batches) {
@@ -82,7 +90,17 @@ export class FilesystemConnector {
     const connection = ctx.connection ?? await this.validateConfig(this.config);
     const filePath = resolveWithinRoot(connection.root, request.resource);
     const format = formatFromResource(request.resource);
-    yield* readRowBatches(filePath, format, request.batchSize ?? 500);
+    const startOffset = durableOffset(request.cursor);
+
+    for await (const batch of readRowBatches(filePath, format, request.batchSize ?? 500)) {
+      const batchEnd = batch.cursor?.offset;
+      if (!Number.isSafeInteger(batchEnd)) fail('INVALID_CONNECTOR_STREAM', 'Filesystem batch cursor is missing an offset');
+      const batchStart = batchEnd - batch.rows.length;
+      if (batchEnd <= startOffset) continue;
+      const sliceFrom = Math.max(0, startOffset - batchStart);
+      const rows = sliceFrom ? batch.rows.slice(sliceFrom) : batch.rows;
+      if (rows.length) yield { ...batch, rows };
+    }
   }
 
   async planWrite(ctx = {}, request = {}) {
