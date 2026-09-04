@@ -1,0 +1,74 @@
+name: SPOOL production boot diagnosis
+
+on:
+  push:
+    branches: [spool-prod-recovery]
+    paths:
+      - '.github/workflows/prod-diagnose.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch canonical production boot assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='https://spool-webmcp.vercel.app'
+          mkdir -p /tmp/spool-prod
+          curl --fail --silent --show-error --location "$base/" -o /tmp/spool-prod/index.html
+          curl --fail --silent --show-error --location "$base/bootstrap.js" -o /tmp/spool-prod/bootstrap.js
+          mapfile -t payloads < <(grep -oE '/payload-[0-9]+\.js' /tmp/spool-prod/index.html | sort -u)
+          test "${#payloads[@]}" -gt 0
+          printf '%s\n' "${payloads[@]}" > /tmp/spool-prod/payload-list.txt
+          for p in "${payloads[@]}"; do
+            curl --fail --silent --show-error --location "$base$p" -o "/tmp/spool-prod/$(basename "$p")"
+          done
+          echo "payload_count=${#payloads[@]}"
+          wc -c /tmp/spool-prod/*
+      - name: Reconstruct and validate embedded application payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/spool-prod/diagnose.mjs <<'NODE'
+          import fs from 'node:fs';
+          import vm from 'node:vm';
+          import zlib from 'node:zlib';
+          import crypto from 'node:crypto';
+          const dir = '/tmp/spool-prod';
+          const files = fs.readFileSync(`${dir}/payload-list.txt`, 'utf8').trim().split(/\n+/).filter(Boolean);
+          const context = vm.createContext({ globalThis: {} });
+          for (const p of files) vm.runInContext(fs.readFileSync(`${dir}/${p.slice(1)}`, 'utf8'), context, { filename: p });
+          const encoded = context.globalThis.__SPOOL_PAYLOAD__;
+          if (typeof encoded !== 'string' || encoded.length < 1000) throw new Error(`payload assembly failed: ${typeof encoded} ${encoded?.length}`);
+          const compressed = Buffer.from(encoded, 'base64');
+          if (compressed[0] !== 0x1f || compressed[1] !== 0x8b) throw new Error('assembled payload is not gzip');
+          const decoded = zlib.gunzipSync(compressed).toString('utf8');
+          const p = JSON.parse(decoded);
+          for (const key of ['body', 'css', 'js']) if (typeof p[key] !== 'string' || p[key].length === 0) throw new Error(`missing payload.${key}`);
+          fs.writeFileSync(`${dir}/body.html`, p.body);
+          fs.writeFileSync(`${dir}/styles.css`, p.css);
+          fs.writeFileSync(`${dir}/app.js`, p.js);
+          const sha = x => crypto.createHash('sha256').update(x).digest('hex');
+          console.log(JSON.stringify({payloadChars: encoded.length, compressedBytes: compressed.length, decodedBytes: Buffer.byteLength(decoded), bodyBytes: Buffer.byteLength(p.body), cssBytes: Buffer.byteLength(p.css), jsBytes: Buffer.byteLength(p.js), jsSha256: sha(p.js), cssSha256: sha(p.css)}, null, 2));
+          NODE
+          node /tmp/spool-prod/diagnose.mjs
+          node --check /tmp/spool-prod/app.js
+      - name: Validate browser bootstrap compatibility assumptions
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "DecompressionStream('gzip')" /tmp/spool-prod/bootstrap.js
+          grep -q "URL.createObjectURL" /tmp/spool-prod/bootstrap.js
+          grep -q "await import(jsUrl)" /tmp/spool-prod/bootstrap.js
+          if grep -q 'boot-watchdog.js' /tmp/spool-prod/index.html; then
+            echo 'unexpected: production has watchdog'
+            exit 1
+          fi
+          echo 'canonical production is using compressed blob bootstrap without independent watchdog'
