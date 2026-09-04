@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/restore-main.yml'
       - '.source-recovery/recover3.part-*.b64'
+      - '.source-recovery/styles.part-*.b64'
   workflow_dispatch:
 
 permissions:
@@ -22,7 +23,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Reconstruct and validate recovered archive
+      - name: Reconstruct and validate recovered source
         shell: bash
         run: |
           set -euo pipefail
@@ -39,7 +40,16 @@ jobs:
           test -s /tmp/spool-recovered/src/worker/migration.worker.js
           test -s /tmp/spool-recovered/tests/release-contract.test.js
           test -s /tmp/spool-recovered/docs/superpowers/specs/2026-09-04-autopilot-product-rebuild-design.md
-          echo 'Recovered source archive is byte-identical and structurally valid.'
+
+          test "$(find .source-recovery -maxdepth 1 -name 'styles.part-*.b64' | wc -l)" -eq 2
+          cat .source-recovery/styles.part-*.b64 > /tmp/styles.b64
+          test "$(wc -c < /tmp/styles.b64)" -eq 9020
+          base64 --decode /tmp/styles.b64 > /tmp/styles.css.gz
+          echo '3c7f46bc3bd3c3bcbf73dbd089f3f5d164b657598c9c29e0ff116f1dd25dbd7f  /tmp/styles.css.gz' | sha256sum --check --strict
+          gzip -dc /tmp/styles.css.gz > /tmp/spool-recovered/styles.css
+          echo 'ca233e45798f6e794a8c76f438a3f2b4dfcb5e6bc692d450b54eb3168fcc520d  /tmp/spool-recovered/styles.css' | sha256sum --check --strict
+          test "$(wc -c < /tmp/spool-recovered/styles.css)" -eq 33182
+          echo 'Recovered source and stylesheet are byte-identical and structurally valid.'
       - name: Restore canonical main source
         shell: bash
         run: |
@@ -52,10 +62,12 @@ jobs:
           cp -a /tmp/spool-recovered/src ./src
           cp -a /tmp/spool-recovered/tests ./tests
           cp -a /tmp/spool-recovered/docs/superpowers ./docs/superpowers
+          cp /tmp/spool-recovered/styles.css ./styles.css
           test -s src/app.js
           test -s src/core/command-kernel.js
           test -s src/worker/migration.worker.js
           test -s tests/release-contract.test.js
+          test -s styles.css
           ! find . -type f -name 'payload-*.js' | grep -q .
           ! grep -R "DecompressionStream" index.html boot-watchdog.js src scripts vercel.json
           grep -q '<script src="/boot-watchdog.js"></script>' index.html
