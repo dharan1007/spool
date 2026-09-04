@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WorkspaceWriteLock } from '../src/storage/workspace-lock.js';
+import { IndexedDbWorkspaceStore } from '../src/storage/indexeddb.js';
 
 class SharedMockLockManager {
   constructor() {
@@ -49,4 +50,36 @@ test('unsupported Web Locks preserves existing single-tab behavior without inven
   const lock = new WorkspaceWriteLock({ lockManager: null });
   assert.deepEqual(await lock.acquire(), { acquired: true, supported: false });
   await lock.release();
+});
+
+test('IndexedDB workspace store refuses access when another tab owns the writer lock', async () => {
+  const writeLock = {
+    acquireCalls: 0,
+    async acquire() {
+      this.acquireCalls += 1;
+      return { acquired: false, supported: true };
+    }
+  };
+  const store = new IndexedDbWorkspaceStore({ writeLock });
+
+  await assert.rejects(
+    () => store.ensureWriteLock(),
+    error => error?.code === 'WORKSPACE_LOCKED' && /another tab/i.test(error.message)
+  );
+  assert.equal(writeLock.acquireCalls, 1);
+});
+
+test('IndexedDB workspace store reuses confirmed writer ownership for the tab lifetime', async () => {
+  const writeLock = {
+    acquireCalls: 0,
+    async acquire() {
+      this.acquireCalls += 1;
+      return { acquired: true, supported: true };
+    }
+  };
+  const store = new IndexedDbWorkspaceStore({ writeLock });
+
+  assert.deepEqual(await store.ensureWriteLock(), { acquired: true, supported: true });
+  assert.deepEqual(await store.ensureWriteLock(), { acquired: true, supported: true });
+  assert.equal(writeLock.acquireCalls, 1);
 });
