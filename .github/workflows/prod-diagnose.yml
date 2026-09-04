@@ -16,23 +16,25 @@ jobs:
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch canonical production boot assets
+      - name: Fetch canonical production assets twice
         shell: bash
         run: |
           set -euo pipefail
           base='https://spool-webmcp.vercel.app'
-          mkdir -p /tmp/spool-prod
+          rm -rf /tmp/spool-prod && mkdir -p /tmp/spool-prod/plain /tmp/spool-prod/fresh
           curl --fail --silent --show-error --location "$base/" -o /tmp/spool-prod/index.html
           curl --fail --silent --show-error --location "$base/bootstrap.js" -o /tmp/spool-prod/bootstrap.js
-          mapfile -t payloads < <(grep -oE '/payload-[0-9]+\.js' /tmp/spool-prod/index.html | sort -u)
+          mapfile -t payloads < <(grep -oE '/payload-[0-9]+\.js' /tmp/spool-prod/index.html | sort -V -u)
           test "${#payloads[@]}" -gt 0
           printf '%s\n' "${payloads[@]}" > /tmp/spool-prod/payload-list.txt
           for p in "${payloads[@]}"; do
-            curl --fail --silent --show-error --location "$base$p" -o "/tmp/spool-prod/$(basename "$p")"
+            name=$(basename "$p")
+            curl --fail --silent --show-error --location "$base$p" -o "/tmp/spool-prod/plain/$name"
+            curl --fail --silent --show-error --location "$base$p?spool_diag=$GITHUB_SHA-$RANDOM" -H 'Cache-Control: no-cache' -o "/tmp/spool-prod/fresh/$name"
           done
           echo "payload_count=${#payloads[@]}"
-          wc -c /tmp/spool-prod/*
-      - name: Reconstruct and validate embedded application payload
+          sha256sum /tmp/spool-prod/plain/* /tmp/spool-prod/fresh/*
+      - name: Prove payload corruption and isolate cache divergence
         shell: bash
         run: |
           set -euo pipefail
@@ -41,34 +43,67 @@ jobs:
           import vm from 'node:vm';
           import zlib from 'node:zlib';
           import crypto from 'node:crypto';
-          const dir = '/tmp/spool-prod';
-          const files = fs.readFileSync(`${dir}/payload-list.txt`, 'utf8').trim().split(/\n+/).filter(Boolean);
-          const context = vm.createContext({ globalThis: {} });
-          for (const p of files) vm.runInContext(fs.readFileSync(`${dir}/${p.slice(1)}`, 'utf8'), context, { filename: p });
-          const encoded = context.globalThis.__SPOOL_PAYLOAD__;
-          if (typeof encoded !== 'string' || encoded.length < 1000) throw new Error(`payload assembly failed: ${typeof encoded} ${encoded?.length}`);
-          const compressed = Buffer.from(encoded, 'base64');
-          if (compressed[0] !== 0x1f || compressed[1] !== 0x8b) throw new Error('assembled payload is not gzip');
-          const decoded = zlib.gunzipSync(compressed).toString('utf8');
-          const p = JSON.parse(decoded);
-          for (const key of ['body', 'css', 'js']) if (typeof p[key] !== 'string' || p[key].length === 0) throw new Error(`missing payload.${key}`);
-          fs.writeFileSync(`${dir}/body.html`, p.body);
-          fs.writeFileSync(`${dir}/styles.css`, p.css);
-          fs.writeFileSync(`${dir}/app.js`, p.js);
-          const sha = x => crypto.createHash('sha256').update(x).digest('hex');
-          console.log(JSON.stringify({payloadChars: encoded.length, compressedBytes: compressed.length, decodedBytes: Buffer.byteLength(decoded), bodyBytes: Buffer.byteLength(p.body), cssBytes: Buffer.byteLength(p.css), jsBytes: Buffer.byteLength(p.js), jsSha256: sha(p.js), cssSha256: sha(p.css)}, null, 2));
+          const root='/tmp/spool-prod';
+          const files=fs.readFileSync(`${root}/payload-list.txt`,'utf8').trim().split(/\n+/).filter(Boolean).map(x=>x.slice(1));
+          const sha=x=>crypto.createHash('sha256').update(x).digest('hex');
+          function chunk(path){
+            const ctx=vm.createContext({globalThis:{}});
+            vm.runInContext(fs.readFileSync(path,'utf8'),ctx,{filename:path});
+            const s=ctx.globalThis.__SPOOL_PAYLOAD__;
+            if(typeof s!=='string') throw new Error(`no payload string in ${path}`);
+            return s;
+          }
+          const plain=files.map(f=>chunk(`${root}/plain/${f}`));
+          const fresh=files.map(f=>chunk(`${root}/fresh/${f}`));
+          const comparison=files.map((f,i)=>({file:f,plainChars:plain[i].length,freshChars:fresh[i].length,same:plain[i]===fresh[i],plainSha:sha(plain[i]),freshSha:sha(fresh[i])}));
+          console.log('chunk_comparison='+JSON.stringify(comparison,null,2));
+          function decode(parts,label){
+            const encoded=parts.join('');
+            const invalid=(encoded.match(/[^A-Za-z0-9+/=]/g)||[]).length;
+            console.log(`${label}: encodedChars=${encoded.length} mod4=${encoded.length%4} invalidBase64Chars=${invalid}`);
+            let compressed;
+            try { compressed=Buffer.from(atob(encoded),'binary'); } catch(e) { console.log(`${label}: atob_error=${e.name}:${e.message}`); return null; }
+            console.log(`${label}: compressedBytes=${compressed.length} magic=${compressed.subarray(0,2).toString('hex')}`);
+            try {
+              const decoded=zlib.gunzipSync(compressed);
+              const obj=JSON.parse(decoded.toString('utf8'));
+              console.log(`${label}: VALID_GZIP decodedBytes=${decoded.length} keys=${Object.keys(obj).join(',')}`);
+              for(const k of ['body','css','js']) if(typeof obj[k]!=='string'||!obj[k]) throw new Error(`missing ${k}`);
+              fs.writeFileSync(`${root}/${label}-body.html`,obj.body);
+              fs.writeFileSync(`${root}/${label}-styles.css`,obj.css);
+              fs.writeFileSync(`${root}/${label}-app.js`,obj.js);
+              console.log(`${label}: body=${Buffer.byteLength(obj.body)} css=${Buffer.byteLength(obj.css)} js=${Buffer.byteLength(obj.js)} jsSha=${sha(obj.js)}`);
+              return obj;
+            } catch(e) {
+              console.log(`${label}: gunzip_or_parse_error=${e.code||e.name}:${e.message}`);
+              return null;
+            }
+          }
+          const a=decode(plain,'plain');
+          const b=decode(fresh,'fresh');
+          if(!a && !b){
+            const changed=comparison.map((x,i)=>x.same?null:i).filter(i=>i!==null);
+            if(changed.length && changed.length<=12){
+              const max=1<<changed.length;
+              for(let mask=1;mask<max;mask++){
+                const parts=[...plain];
+                const chosen=[];
+                changed.forEach((idx,j)=>{if(mask&(1<<j)){parts[idx]=fresh[idx];chosen.push(files[idx]);}});
+                const obj=decode(parts,`mix-${mask}`);
+                if(obj){console.log('VALID_MIX='+chosen.join(','));process.exit(0);}
+              }
+            }
+            process.exitCode=2;
+          }
           NODE
           node /tmp/spool-prod/diagnose.mjs
-          node --check /tmp/spool-prod/app.js
-      - name: Validate browser bootstrap compatibility assumptions
+      - name: Verify bootstrap architecture independently
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
           grep -q "DecompressionStream('gzip')" /tmp/spool-prod/bootstrap.js
           grep -q "URL.createObjectURL" /tmp/spool-prod/bootstrap.js
           grep -q "await import(jsUrl)" /tmp/spool-prod/bootstrap.js
-          if grep -q 'boot-watchdog.js' /tmp/spool-prod/index.html; then
-            echo 'unexpected: production has watchdog'
-            exit 1
-          fi
-          echo 'canonical production is using compressed blob bootstrap without independent watchdog'
+          ! grep -q 'boot-watchdog.js' /tmp/spool-prod/index.html
+          echo 'production boot depends entirely on payload assembly + gzip decompression + blob module import and has no independent startup watchdog'
