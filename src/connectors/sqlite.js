@@ -27,6 +27,12 @@ function ensureBatchSize(value) {
   return batchSize;
 }
 
+function ensureOffset(cursor) {
+  const offset = cursor?.offset ?? 0;
+  if (!Number.isSafeInteger(offset) || offset < 0) fail('INVALID_SOURCE_CURSOR', 'SQLite cursor.offset must be a non-negative safe integer');
+  return offset;
+}
+
 function ensureRows(batches) {
   return (async () => {
     const rows = [];
@@ -96,13 +102,33 @@ export class SQLiteConnector {
     return { resource, columns, primaryKey, rowCount };
   }
 
+  #orderedRows(discovery, limit = null) {
+    const table = quoteSqliteIdentifier(discovery.resource);
+    const orderFields = discovery.primaryKey.length ? discovery.primaryKey : discovery.columns.map(column => column.name);
+    const order = orderFields.length ? ` ORDER BY ${orderFields.map(quoteSqliteIdentifier).join(', ')}` : '';
+    const suffix = limit == null ? '' : ' LIMIT ?';
+    const statement = this.db.prepare(`SELECT * FROM ${table}${order}${suffix}`);
+    return (limit == null ? statement.all() : statement.all(limit)).map(asPlain);
+  }
+
+  async #fullChecksum(discovery) {
+    return sha256Json({
+      resource: discovery.resource,
+      columns: discovery.columns,
+      primaryKey: discovery.primaryKey,
+      rows: this.#orderedRows(discovery)
+    });
+  }
+
   async discover(ctx = {}, request = {}) {
     this.#ensureDb(ctx.connection);
     const result = this.#discoverTable(request.resource);
+    const checksum = await this.#fullChecksum(result);
     return {
       ...result,
       schema: result.columns.map(column => ({ name: column.name, type: column.type, nullable: column.nullable })),
-      identity: `sqlite:${path.basename(this.connection.database)}:${request.resource}:${result.rowCount}`
+      checksum,
+      identity: await sha256Json({ connector: 'sqlite', resource: result.resource, columns: result.columns, primaryKey: result.primaryKey, checksum })
     };
   }
 
@@ -113,11 +139,15 @@ export class SQLiteConnector {
     const table = quoteSqliteIdentifier(request.resource);
     const singlePk = discovery.primaryKey.length === 1 ? discovery.columns.find(column => column.name === discovery.primaryKey[0]) : null;
     const integerPk = singlePk && singlePk.type === 'integer' ? singlePk.name : null;
-    let offset = 0;
+    let offset = ensureOffset(request.cursor);
 
     if (integerPk) {
+      if (request.cursor?.primaryKey && request.cursor.primaryKey !== integerPk) {
+        fail('SOURCE_CURSOR_MISMATCH', `SQLite cursor primary key ${request.cursor.primaryKey} does not match ${integerPk}`);
+      }
       const pk = quoteSqliteIdentifier(integerPk);
-      let last = Number.MIN_SAFE_INTEGER;
+      let last = request.cursor?.value ?? Number.MIN_SAFE_INTEGER;
+      if (!Number.isSafeInteger(last)) fail('INVALID_SOURCE_CURSOR', 'SQLite integer primary-key cursor value must be a safe integer');
       while (true) {
         const rows = this.db.prepare(`SELECT * FROM ${table} WHERE ${pk} > ? ORDER BY ${pk} LIMIT ?`).all(last, batchSize).map(asPlain);
         if (!rows.length) return;
@@ -219,8 +249,9 @@ export class SQLiteConnector {
     this.#ensureDb(ctx.connection);
     const discovery = this.#discoverTable(request.resource);
     const table = quoteSqliteIdentifier(request.resource);
-    const sample = this.db.prepare(`SELECT * FROM ${table} ORDER BY rowid LIMIT 100`).all().map(asPlain);
+    const sample = this.#orderedRows(discovery, 100);
     const sampleHash = await sha256Json(sample);
+    const checksum = await this.#fullChecksum(discovery);
     const countOk = request.expectedRows == null || discovery.rowCount === request.expectedRows;
     let primaryKeyCoverage = null;
     if (discovery.primaryKey.length === 1) {
@@ -234,10 +265,12 @@ export class SQLiteConnector {
       primaryKey: discovery.primaryKey,
       primaryKeyCoverage,
       schema: discovery.columns,
+      checksum,
       sampleHash,
       checks: [
         { name: 'target_count', ok: countOk, expected: request.expectedRows ?? null, actual: discovery.rowCount },
-        { name: 'sample_hash', ok: true, value: sampleHash }
+        { name: 'full_checksum', ok: true, value: checksum, scope: discovery.rowCount },
+        { name: 'sample_hash', ok: true, value: sampleHash, scope: Math.min(100, discovery.rowCount) }
       ]
     };
   }
