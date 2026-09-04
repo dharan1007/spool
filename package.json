@@ -15,7 +15,7 @@
     "build": "node scripts/build-dist.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "license": "MIT"
 }
