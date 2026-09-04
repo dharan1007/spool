@@ -1,3 +1,5 @@
+import { WorkspaceLockedError, WorkspaceWriteLock } from './workspace-lock.js';
+
 const DB_NAME = 'spool-local-runtime';
 const DB_VERSION = 1;
 const CHUNK_SIZE = 2000;
@@ -14,24 +16,42 @@ const txDone = tx => new Promise((resolve, reject) => {
 });
 
 export class IndexedDbWorkspaceStore {
-  constructor() {
+  constructor({ writeLock = new WorkspaceWriteLock() } = {}) {
     this.dbPromise = null;
+    this.writeLock = writeLock;
+    this.writeLockResult = null;
     this.cache = { fingerprint: null, outputJobId: null, outputRevision: null, outputLength: 0 };
+  }
+
+  async ensureWriteLock() {
+    if (this.writeLockResult) return this.writeLockResult;
+    const result = await this.writeLock.acquire();
+    if (!result.acquired) throw new WorkspaceLockedError();
+    this.writeLockResult = result;
+    return result;
   }
 
   async db() {
     if (this.dbPromise) return this.dbPromise;
-    this.dbPromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'key' });
-        if (!db.objectStoreNames.contains('sourceChunks')) db.createObjectStore('sourceChunks', { keyPath: 'id' });
-        if (!db.objectStoreNames.contains('outputChunks')) db.createObjectStore('outputChunks', { keyPath: 'id' });
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-      request.onblocked = () => reject(new Error('IndexedDB upgrade blocked by another SPOOL tab'));
+    this.dbPromise = (async () => {
+      await this.ensureWriteLock();
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'key' });
+          if (!db.objectStoreNames.contains('sourceChunks')) db.createObjectStore('sourceChunks', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('outputChunks')) db.createObjectStore('outputChunks', { keyPath: 'id' });
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+        request.onblocked = () => reject(new Error('IndexedDB upgrade blocked by another SPOOL tab'));
+      });
+    })().catch(async error => {
+      this.dbPromise = null;
+      this.writeLockResult = null;
+      await this.writeLock.release?.();
+      throw error;
     });
     return this.dbPromise;
   }
