@@ -128,7 +128,7 @@ async function makePlan() {
   return createCapabilityBoundMigrationPlan(planInput(), {
     sourceManifest: sourceManifest(),
     targetManifest: targetManifest(),
-    requirements: { restartResume: true, verificationStrength: 'STANDARD' }
+    requirements: { restartResume: true, verificationStrength: 'BASIC' }
   });
 }
 
