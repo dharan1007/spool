@@ -1,0 +1,632 @@
+
+> spool-webmcp@1.0.0 check
+> npm test && npm run build && npm run benchmark && node scripts/static-check.js
+
+
+> spool-webmcp@1.0.0 test
+> node --test tests/*.test.js
+
+TAP version 13
+# Subtest: run_autopilot plans, dry-runs and starts migration without manual schema or mapping commands
+ok 1 - run_autopilot plans, dry-runs and starts migration without manual schema or mapping commands
+  ---
+  duration_ms: 23.739216
+  type: 'test'
+  ...
+# Subtest: run_autopilot fails closed on destructive ambiguity and exposes one bounded mission decision
+ok 2 - run_autopilot fails closed on destructive ambiguity and exposes one bounded mission decision
+  ---
+  duration_ms: 2.526726
+  type: 'test'
+  ...
+# Subtest: autopilot terminal mission becomes COMPLETE after worker execution with dirty rows grouped as quality violations
+ok 3 - autopilot terminal mission becomes COMPLETE after worker execution with dirty rows grouped as quality violations
+  ---
+  duration_ms: 41.38988
+  type: 'test'
+  ...
+# Subtest: autopilot refresh recovery resumes from the durable checkpoint automatically
+ok 4 - autopilot refresh recovery resumes from the durable checkpoint automatically
+  ---
+  duration_ms: 11.402265
+  type: 'test'
+  ...
+# Subtest: database-ready planner normalizes names and promotes mostly parseable typed fields with evidence
+ok 5 - database-ready planner normalizes names and promotes mostly parseable typed fields with evidence
+  ---
+  duration_ms: 5.745774
+  type: 'test'
+  ...
+# Subtest: planner fails closed when normalized target names collide
+ok 6 - planner fails closed when normalized target names collide
+  ---
+  duration_ms: 0.355244
+  type: 'test'
+  ...
+# Subtest: clean-and-standardize keeps semantic string fields while trimming values
+ok 7 - clean-and-standardize keeps semantic string fields while trimming values
+  ---
+  duration_ms: 0.266293
+  type: 'test'
+  ...
+# Subtest: browser worker runtime terminates completed workers and releases handlers
+ok 8 - browser worker runtime terminates completed workers and releases handlers
+  ---
+  duration_ms: 2.688765
+  type: 'test'
+  ...
+# Subtest: browser worker runtime terminates crashed workers after reporting the error
+ok 9 - browser worker runtime terminates crashed workers after reporting the error
+  ---
+  duration_ms: 0.480379
+  type: 'test'
+  ...
+# Subtest: release build emits ordinary same-origin static modules with no compressed/blob application bootstrap
+ok 10 - release build emits ordinary same-origin static modules with no compressed/blob application bootstrap
+  ---
+  duration_ms: 88.489426
+  type: 'test'
+  ...
+# Subtest: Vercel configuration deep-links every product route to index.html without cleanUrls interference
+ok 11 - Vercel configuration deep-links every product route to index.html without cleanUrls interference
+  ---
+  duration_ms: 96.575947
+  type: 'test'
+  ...
+# Subtest: connector validation accepts a complete capability-declared connector
+ok 12 - connector validation accepts a complete capability-declared connector
+  ---
+  duration_ms: 1.980931
+  type: 'test'
+  ...
+# Subtest: connector registry rejects missing methods or incomplete capability declarations
+ok 13 - connector registry rejects missing methods or incomplete capability declarations
+  ---
+  duration_ms: 2.395182
+  type: 'test'
+  ...
+# Subtest: connector registry refuses duplicate connector names
+ok 14 - connector registry refuses duplicate connector names
+  ---
+  duration_ms: 0.418066
+  type: 'test'
+  ...
+# Subtest: registry opens a validated connector and validates its config
+ok 15 - registry opens a validated connector and validates its config
+  ---
+  duration_ms: 0.661946
+  type: 'test'
+  ...
+# Subtest: read streams must be async iterable
+ok 16 - read streams must be async iterable
+  ---
+  duration_ms: 0.476473
+  type: 'test'
+  ...
+# (node:2390) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: filesystem read resumes strictly after persisted row offset
+ok 17 - filesystem read resumes strictly after persisted row offset
+  ---
+  duration_ms: 18.257245
+  type: 'test'
+  ...
+# Subtest: sqlite integer-primary-key read resumes strictly after persisted cursor
+ok 18 - sqlite integer-primary-key read resumes strictly after persisted cursor
+  ---
+  duration_ms: 22.44065
+  type: 'test'
+  ...
+# Subtest: sqlite source identity changes when row content changes without changing row count
+ok 19 - sqlite source identity changes when row content changes without changing row count
+  ---
+  duration_ms: 10.332988
+  type: 'test'
+  ...
+# Subtest: sqlite checksum capability is backed by a full deterministic checksum
+ok 20 - sqlite checksum capability is backed by a full deterministic checksum
+  ---
+  duration_ms: 8.986854
+  type: 'test'
+  ...
+# Subtest: job starts EMPTY and rejects illegal transition
+ok 21 - job starts EMPTY and rejects illegal transition
+  ---
+  duration_ms: 3.947612
+  type: 'test'
+  ...
+# Subtest: valid migration path reaches COMPLETE
+ok 22 - valid migration path reaches COMPLETE
+  ---
+  duration_ms: 0.348524
+  type: 'test'
+  ...
+# Subtest: CSV parser handles quoted commas, quotes, and CRLF
+ok 23 - CSV parser handles quoted commas, quotes, and CRLF
+  ---
+  duration_ms: 1.349841
+  type: 'test'
+  ...
+# Subtest: schema inference distinguishes integer, number, boolean, date and string
+ok 24 - schema inference distinguishes integer, number, boolean, date and string
+  ---
+  duration_ms: 0.960186
+  type: 'test'
+  ...
+# Subtest: fingerprint is stable and sensitive
+ok 25 - fingerprint is stable and sensitive
+  ---
+  duration_ms: 15.106759
+  type: 'test'
+  ...
+# Subtest: demo generator creates requested cardinality with realistic dirty rows
+ok 26 - demo generator creates requested cardinality with realistic dirty rows
+  ---
+  duration_ms: 42.761022
+  type: 'test'
+  ...
+# Subtest: demo mapping produces typed target rows and clusters dirty-data violations
+ok 27 - demo mapping produces typed target rows and clusters dirty-data violations
+  ---
+  duration_ms: 109.603354
+  type: 'test'
+  ...
+# Subtest: mirror plan inserts required casts for inferred non-string source types
+ok 28 - mirror plan inserts required casts for inferred non-string source types
+  ---
+  duration_ms: 1.270894
+  type: 'test'
+  ...
+# Subtest: starter mapping matches exact source names and leaves renamed targets explicitly unresolved
+ok 29 - starter mapping matches exact source names and leaves renamed targets explicitly unresolved
+  ---
+  duration_ms: 0.510694
+  type: 'test'
+  ...
+# Subtest: complete product command chain migrates real dirty demo rows to durable terminal state
+ok 30 - complete product command chain migrates real dirty demo rows to durable terminal state
+  ---
+  duration_ms: 901.118149
+  type: 'test'
+  ...
+# Subtest: Autopilot completes the 5k dirty demo end-to-end with no manual schema or mapping commands
+ok 31 - Autopilot completes the 5k dirty demo end-to-end with no manual schema or mapping commands
+  ---
+  duration_ms: 515.511701
+  type: 'test'
+  ...
+# Subtest: filesystem connector discovers and reads real JSONL in bounded batches
+ok 32 - filesystem connector discovers and reads real JSONL in bounded batches
+  ---
+  duration_ms: 21.54261
+  type: 'test'
+  ...
+# Subtest: filesystem connector rejects traversal outside configured root
+ok 33 - filesystem connector rejects traversal outside configured root
+  ---
+  duration_ms: 2.754372
+  type: 'test'
+  ...
+# Subtest: filesystem connector atomically writes and verifies a real JSONL target
+ok 34 - filesystem connector atomically writes and verifies a real JSONL target
+  ---
+  duration_ms: 7.603504
+  type: 'test'
+  ...
+# Subtest: filesystem connector supports hardened CSV and JSON source formats
+ok 35 - filesystem connector supports hardened CSV and JSON source formats
+  ---
+  duration_ms: 6.268795
+  type: 'test'
+  ...
+# Subtest: job store survives process-style re-instantiation at the committed checkpoint
+ok 36 - job store survives process-style re-instantiation at the committed checkpoint
+  ---
+  duration_ms: 14.820127
+  type: 'test'
+  ...
+# Subtest: job store rejects illegal terminal jumps and checkpoint identity drift
+not ok 37 - job store rejects illegal terminal jumps and checkpoint identity drift
+  ---
+  duration_ms: 4.792448
+  type: 'test'
+  location: '/home/runner/work/spool/spool/tests/job-store.test.js:45:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /INVALID_JOB_TRANSITION|transition/i. Input:
+    
+    'SpoolError: VERIFICATION_REQUIRED: A job cannot become COMPLETE before verification succeeds'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+  error: 'VERIFICATION_REQUIRED: A job cannot become COMPLETE before verification succeeds'
+  stack: |-
+    fail (file:///home/runner/work/spool/spool/src/core/errors.js:11:9)
+    validateTerminalEvidence (file:///home/runner/work/spool/spool/src/platform/runtime-contracts.js:73:28)
+    validateJobRecord (file:///home/runner/work/spool/spool/src/platform/runtime-contracts.js:87:3)
+    assertJobTransition (file:///home/runner/work/spool/spool/src/platform/runtime-contracts.js:94:3)
+    JobStore.update (file:///home/runner/work/spool/spool/src/daemon/job-store.js:115:5)
+    async waitForActual (node:assert:644:5)
+    async Function.rejects (node:assert:767:25)
+    async TestContext.<anonymous> (file:///home/runner/work/spool/spool/tests/job-store.test.js:50:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///home/runner/work/spool/spool/tests/job-store.test.js:50:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: receipt creation is immutable, hashed, and recursively redacted
+ok 38 - receipt creation is immutable, hashed, and recursively redacted
+  ---
+  duration_ms: 2.055772
+  type: 'test'
+  ...
+# Subtest: persisted receipts cannot be overwritten with different content
+ok 39 - persisted receipts cannot be overwritten with different content
+  ---
+  duration_ms: 6.985201
+  type: 'test'
+  ...
+# Subtest: UI source load and WebMCP commands share one durable workspace
+ok 40 - UI source load and WebMCP commands share one durable workspace
+  ---
+  duration_ms: 14.182997
+  type: 'test'
+  ...
+# Subtest: kernel returns typed envelope and valid next actions on invalid phase
+ok 41 - kernel returns typed envelope and valid next actions on invalid phase
+  ---
+  duration_ms: 1.22094
+  type: 'test'
+  ...
+# Subtest: start, pause, revise and resume forces replay from row zero at newest revision
+ok 42 - start, pause, revise and resume forces replay from row zero at newest revision
+  ---
+  duration_ms: 5.285635
+  type: 'test'
+  ...
+# Subtest: refresh recovery converts orphan RUNNING job to PAUSED_RECOVERED
+ok 43 - refresh recovery converts orphan RUNNING job to PAUSED_RECOVERED
+  ---
+  duration_ms: 2.776845
+  type: 'test'
+  ...
+# Subtest: runtime progress and completion are serialized even when callbacks arrive back-to-back
+ok 44 - runtime progress and completion are serialized even when callbacks arrive back-to-back
+  ---
+  duration_ms: 2.892757
+  type: 'test'
+  ...
+# Subtest: inspect_workspace returns workflow metadata without dumping source or output rows
+ok 45 - inspect_workspace returns workflow metadata without dumping source or output rows
+  ---
+  duration_ms: 2.331438
+  type: 'test'
+  ...
+# Subtest: loading a replacement source aborts the active runtime before resetting workspace
+ok 46 - loading a replacement source aborts the active runtime before resetting workspace
+  ---
+  duration_ms: 1.849588
+  type: 'test'
+  ...
+# Subtest: invalid replacement source does not abort or corrupt the active migration
+ok 47 - invalid replacement source does not abort or corrupt the active migration
+  ---
+  duration_ms: 2.186925
+  type: 'test'
+  ...
+# Subtest: header-only replacement is rejected before aborting an active migration
+ok 48 - header-only replacement is rejected before aborting an active migration
+  ---
+  duration_ms: 2.63102
+  type: 'test'
+  ...
+# Subtest: engine groups row violations with bounded samples
+ok 49 - engine groups row violations with bounded samples
+  ---
+  duration_ms: 1.976525
+  type: 'test'
+  ...
+# Subtest: revision replay makes completed output equivalent to clean run of newest mapping
+ok 50 - revision replay makes completed output equivalent to clean run of newest mapping
+  ---
+  duration_ms: 2.793209
+  type: 'test'
+  ...
+# Subtest: engine enforces target schema types instead of exporting structurally invalid rows
+ok 51 - engine enforces target schema types instead of exporting structurally invalid rows
+  ---
+  duration_ms: 0.343747
+  type: 'test'
+  ...
+# Subtest: runtime state machine includes recovery states and terminal completion needs verification plus receipt
+ok 52 - runtime state machine includes recovery states and terminal completion needs verification plus receipt
+  ---
+  duration_ms: 1.727638
+  type: 'test'
+  ...
+# Subtest: execution ownership and checkpoint identity fail closed
+ok 53 - execution ownership and checkpoint identity fail closed
+  ---
+  duration_ms: 0.349746
+  type: 'test'
+  ...
+# Subtest: durable clone rejects raw rows and runtime-only secret values
+ok 54 - durable clone rejects raw rows and runtime-only secret values
+  ---
+  duration_ms: 0.558604
+  type: 'test'
+  ...
+# Subtest: public job projection is allowlisted and normalized errors do not leak connector-native text
+ok 55 - public job projection is allowlisted and normalized errors do not leak connector-native text
+  ---
+  duration_ms: 0.747963
+  type: 'test'
+  ...
+# Subtest: file JobStore adds version and execution epoch guards while preserving single-writer persistence
+ok 56 - file JobStore adds version and execution epoch guards while preserving single-writer persistence
+  ---
+  duration_ms: 15.544274
+  type: 'test'
+  ...
+# Subtest: canonical JSON and plan hash are stable across object key order
+ok 57 - canonical JSON and plan hash are stable across object key order
+  ---
+  duration_ms: 1.828787
+  type: 'test'
+  ...
+# Subtest: plan identity excludes volatile creation time but binds migration semantics
+ok 58 - plan identity excludes volatile creation time but binds migration semantics
+  ---
+  duration_ms: 1.87813
+  type: 'test'
+  ...
+# Subtest: connector references reject embedded secret-shaped fields
+ok 59 - connector references reject embedded secret-shaped fields
+  ---
+  duration_ms: 0.864965
+  type: 'test'
+  ...
+# Subtest: redaction removes nested secret material without changing safe metadata
+ok 60 - redaction removes nested secret material without changing safe metadata
+  ---
+  duration_ms: 2.184802
+  type: 'test'
+  ...
+# Subtest: environment secret references resolve without embedding a value in the reference
+ok 61 - environment secret references resolve without embedding a value in the reference
+  ---
+  duration_ms: 0.398788
+  type: 'test'
+  ...
+# Subtest: missing environment secret fails closed
+ok 62 - missing environment secret fails closed
+  ---
+  duration_ms: 0.728445
+  type: 'test'
+  ...
+# Subtest: destructive overwrite requires explicit policy approval
+ok 63 - destructive overwrite requires explicit policy approval
+  ---
+  duration_ms: 0.469572
+  type: 'test'
+  ...
+# Subtest: connection descriptors persist secret references but never resolved secret values
+ok 64 - connection descriptors persist secret references but never resolved secret values
+  ---
+  duration_ms: 14.710304
+  type: 'test'
+  ...
+# Subtest: connection store rejects raw secret-shaped config values
+ok 65 - connection store rejects raw secret-shaped config values
+  ---
+  duration_ms: 1.468355
+  type: 'test'
+  ...
+# Subtest: release includes CI, security policy, and evaluator demo script
+ok 66 - release includes CI, security policy, and evaluator demo script
+  ---
+  duration_ms: 6.761933
+  type: 'test'
+  ...
+# Subtest: CSV export neutralizes spreadsheet formulas
+ok 67 - CSV export neutralizes spreadsheet formulas
+  ---
+  duration_ms: 0.991642
+  type: 'test'
+  ...
+# Subtest: CSV parser rejects oversized cells
+ok 68 - CSV parser rejects oversized cells
+  ---
+  duration_ms: 2.581657
+  type: 'test'
+  ...
+# Subtest: transform IR rejects unknown operators and excessive depth
+ok 69 - transform IR rejects unknown operators and excessive depth
+  ---
+  duration_ms: 0.581778
+  type: 'test'
+  ...
+# Subtest: CSV serializer has stable headers and no prototype keys
+ok 70 - CSV serializer has stable headers and no prototype keys
+  ---
+  duration_ms: 0.330277
+  type: 'test'
+  ...
+# (node:2526) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: sqlite connector validates as a real transactional connector
+ok 71 - sqlite connector validates as a real transactional connector
+  ---
+  duration_ms: 18.027437
+  type: 'test'
+  ...
+# Subtest: sqlite discovery returns columns and integer primary key without exposing SQL execution
+ok 72 - sqlite discovery returns columns and integer primary key without exposing SQL execution
+  ---
+  duration_ms: 7.179869
+  type: 'test'
+  ...
+# Subtest: sqlite source read paginates by integer primary key in bounded batches
+ok 73 - sqlite source read paginates by integer primary key in bounded batches
+  ---
+  duration_ms: 7.03158
+  type: 'test'
+  ...
+# Subtest: sqlite target create_insert commits real rows and verifies count
+ok 74 - sqlite target create_insert commits real rows and verifies count
+  ---
+  duration_ms: 4.099676
+  type: 'test'
+  ...
+# Subtest: sqlite upsert updates existing key and inserts new key inside transaction
+ok 75 - sqlite upsert updates existing key and inserts new key inside transaction
+  ---
+  duration_ms: 6.640183
+  type: 'test'
+  ...
+# Subtest: sqlite rejects arbitrary resource SQL instead of acting as a SQL proxy
+ok 76 - sqlite rejects arbitrary resource SQL instead of acting as a SQL proxy
+  ---
+  duration_ms: 5.298965
+  type: 'test'
+  ...
+# Subtest: typed transform IR evaluates nested numeric operation
+ok 77 - typed transform IR evaluates nested numeric operation
+  ---
+  duration_ms: 1.364072
+  type: 'test'
+  ...
+# Subtest: enum_map reports unmapped values instead of silently coercing
+ok 78 - enum_map reports unmapped values instead of silently coercing
+  ---
+  duration_ms: 0.54931
+  type: 'test'
+  ...
+# Subtest: regex_replace rejects unsafe patterns
+ok 79 - regex_replace rejects unsafe patterns
+  ---
+  duration_ms: 0.357387
+  type: 'test'
+  ...
+# Subtest: compileMapping validates target uniqueness and returns deterministic mapper
+ok 80 - compileMapping validates target uniqueness and returns deterministic mapper
+  ---
+  duration_ms: 2.316036
+  type: 'test'
+  ...
+# Subtest: root document is a minimal resilient app shell instead of a monolithic workbench
+ok 81 - root document is a minimal resilient app shell instead of a monolithic workbench
+  ---
+  duration_ms: 1.374096
+  type: 'test'
+  ...
+# Subtest: product frontend defines separate explanatory and Studio routes
+ok 82 - product frontend defines separate explanatory and Studio routes
+  ---
+  duration_ms: 0.414271
+  type: 'test'
+  ...
+# Subtest: boot path renders a visible failure state instead of leaving Loading SPOOL forever
+ok 83 - boot path renders a visible failure state instead of leaving Loading SPOOL forever
+  ---
+  duration_ms: 0.37315
+  type: 'test'
+  ...
+# Subtest: visual system covers public storytelling, Studio workflow, diagnostics and responsive navigation
+ok 84 - visual system covers public storytelling, Studio workflow, diagnostics and responsive navigation
+  ---
+  duration_ms: 10.690707
+  type: 'test'
+  ...
+# Subtest: optional WebMCP absence does not block the application
+ok 85 - optional WebMCP absence does not block the application
+  ---
+  duration_ms: 1.548043
+  type: 'test'
+  ...
+# Subtest: optional WebMCP registration failure is contained instead of failing app boot
+ok 86 - optional WebMCP registration failure is contained instead of failing app boot
+  ---
+  duration_ms: 2.245221
+  type: 'test'
+  ...
+# Subtest: phase exposes only valid temporal tool surface
+ok 87 - phase exposes only valid temporal tool surface
+  ---
+  duration_ms: 1.768939
+  type: 'test'
+  ...
+# Subtest: registry aborts stale tools when phase changes
+ok 88 - registry aborts stale tools when phase changes
+  ---
+  duration_ms: 2.931594
+  type: 'test'
+  ...
+# Subtest: newer phase wins when an older native registration resolves late
+ok 89 - newer phase wins when an older native registration resolves late
+  ---
+  duration_ms: 1.003089
+  type: 'test'
+  ...
+# Subtest: registered execute delegates to the shared command kernel
+ok 90 - registered execute delegates to the shared command kernel
+  ---
+  duration_ms: 0.426268
+  type: 'test'
+  ...
+# Subtest: worker gate rejects wrong job, stale sequence and wrong revision
+ok 91 - worker gate rejects wrong job, stale sequence and wrong revision
+  ---
+  duration_ms: 0.906757
+  type: 'test'
+  ...
+# Subtest: processChunk returns bounded violations and preserves absolute row index
+ok 92 - processChunk returns bounded violations and preserves absolute row index
+  ---
+  duration_ms: 0.886998
+  type: 'test'
+  ...
+# Subtest: only one tab can hold the durable workspace writer lock at a time
+ok 93 - only one tab can hold the durable workspace writer lock at a time
+  ---
+  duration_ms: 2.572043
+  type: 'test'
+  ...
+# Subtest: lock acquisition is idempotent within one tab
+ok 94 - lock acquisition is idempotent within one tab
+  ---
+  duration_ms: 0.273574
+  type: 'test'
+  ...
+# Subtest: unsupported Web Locks preserves existing single-tab behavior without inventing a network dependency
+ok 95 - unsupported Web Locks preserves existing single-tab behavior without inventing a network dependency
+  ---
+  duration_ms: 0.221727
+  type: 'test'
+  ...
+# Subtest: IndexedDB workspace store refuses access when another tab owns the writer lock
+ok 96 - IndexedDB workspace store refuses access when another tab owns the writer lock
+  ---
+  duration_ms: 0.714063
+  type: 'test'
+  ...
+# Subtest: IndexedDB workspace store reuses confirmed writer ownership for the tab lifetime
+ok 97 - IndexedDB workspace store reuses confirmed writer ownership for the tab lifetime
+  ---
+  duration_ms: 0.298059
+  type: 'test'
+  ...
+1..97
+# tests 97
+# suites 0
+# pass 96
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1816.453307
