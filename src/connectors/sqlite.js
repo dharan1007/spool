@@ -5,6 +5,19 @@ import { sha256Json } from '../platform/canonical-json.js';
 import { CONNECTOR_CAPABILITY_PROFILE_VERSION } from './contract.js';
 import { quoteSqliteIdentifier, sqliteTypeForTarget, spoolTypeForSqlite, validateNewSqliteIdentifier } from './sqlite-identifiers.js';
 
+const BATCH_LEDGER_TABLE = '__spool_batch_ledger_v1';
+const BATCH_LEDGER_TABLE_SQL = quoteSqliteIdentifier(BATCH_LEDGER_TABLE);
+const BATCH_LEDGER_COLUMNS = Object.freeze([
+  ['batch_identity', 'TEXT', 1, 1],
+  ['resource', 'TEXT', 1, 0],
+  ['plan_id', 'TEXT', 1, 0],
+  ['job_id', 'TEXT', 1, 0],
+  ['committed_rows', 'INTEGER', 1, 0],
+  ['target_rows', 'INTEGER', 1, 0],
+  ['commit_id', 'TEXT', 1, 0],
+  ['committed_at', 'TEXT', 1, 0]
+]);
+
 const CAPABILITIES = Object.freeze({
   source: true,
   target: true,
@@ -30,9 +43,9 @@ const CAPABILITY_PROFILE = Object.freeze({
   }),
   target: Object.freeze({
     atomicity: 'transaction',
-    commitEvidence: 'postcondition',
-    reconcileAfterCrash: false,
-    idempotency: 'none'
+    commitEvidence: 'native_commit_id',
+    reconcileAfterCrash: true,
+    idempotency: 'batch_key'
   }),
   verification: Object.freeze({
     logicalCount: true,
@@ -70,6 +83,29 @@ function ensureRows(batches) {
   })();
 }
 
+function batchContext(ctx = {}) {
+  if (ctx.batchIdentity == null) return null;
+  if (typeof ctx.batchIdentity !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(ctx.batchIdentity)) {
+    fail('INVALID_BATCH_IDENTITY', 'SQLite batchIdentity must be a sha256 identity');
+  }
+  if (typeof ctx.planId !== 'string' || !ctx.planId) fail('INVALID_BATCH_CONTEXT', 'SQLite ledger write requires planId');
+  if (typeof ctx.jobId !== 'string' || !ctx.jobId) fail('INVALID_BATCH_CONTEXT', 'SQLite ledger write requires jobId');
+  return { batchIdentity: ctx.batchIdentity, planId: ctx.planId, jobId: ctx.jobId };
+}
+
+function ackFromLedger(row) {
+  return {
+    committedRows: Number(row.committed_rows),
+    commitId: row.commit_id,
+    checkpointToken: row.commit_id,
+    targetRows: Number(row.target_rows)
+  };
+}
+
+function ledgerMatches(row, context, resource) {
+  return row.resource === resource && row.plan_id === context.planId && row.job_id === context.jobId;
+}
+
 export class SQLiteConnector {
   constructor(config = {}) {
     this.config = structuredClone(config);
@@ -80,7 +116,7 @@ export class SQLiteConnector {
   manifest() {
     return {
       name: 'sqlite',
-      version: '1.0.0',
+      version: '1.1.0',
       capabilities: { ...CAPABILITIES },
       capabilityProfile: structuredClone(CAPABILITY_PROFILE)
     };
@@ -115,6 +151,37 @@ export class SQLiteConnector {
   #tableExists(resource) {
     const row = this.db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name=?").get(resource);
     return Boolean(row);
+  }
+
+  #batchLedgerExists() {
+    return this.#tableExists(BATCH_LEDGER_TABLE);
+  }
+
+  #ensureBatchLedger() {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS ${BATCH_LEDGER_TABLE_SQL} (
+      batch_identity TEXT PRIMARY KEY,
+      resource TEXT NOT NULL,
+      plan_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      committed_rows INTEGER NOT NULL CHECK (committed_rows >= 0),
+      target_rows INTEGER NOT NULL CHECK (target_rows >= 0),
+      commit_id TEXT NOT NULL UNIQUE,
+      committed_at TEXT NOT NULL
+    )`);
+    const columns = this.db.prepare(`PRAGMA table_info(${BATCH_LEDGER_TABLE_SQL})`).all();
+    const matches = columns.length === BATCH_LEDGER_COLUMNS.length && columns.every((column, index) => {
+      const expected = BATCH_LEDGER_COLUMNS[index];
+      return column.name === expected[0]
+        && String(column.type).toUpperCase() === expected[1]
+        && Number(column.notnull) === expected[2]
+        && Number(column.pk) === expected[3];
+    });
+    if (!matches) fail('SQLITE_LEDGER_CONFLICT', `SQLite internal ledger ${BATCH_LEDGER_TABLE} has an incompatible schema`);
+  }
+
+  #loadBatchLedger(batchIdentity) {
+    if (!this.#batchLedgerExists()) return null;
+    return asPlain(this.db.prepare(`SELECT batch_identity, resource, plan_id, job_id, committed_rows, target_rows, commit_id, committed_at FROM ${BATCH_LEDGER_TABLE_SQL} WHERE batch_identity=?`).get(batchIdentity));
   }
 
   #discoverTable(resource) {
@@ -241,9 +308,24 @@ export class SQLiteConnector {
     const rows = await ensureRows(batches);
     const mode = request.mode ?? 'insert';
     await this.planWrite(ctx, request);
+    const ledgerContext = batchContext(ctx);
+    if (ledgerContext) this.#ensureBatchLedger();
 
+    let ack = null;
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      if (ledgerContext) {
+        const existing = this.#loadBatchLedger(ledgerContext.batchIdentity);
+        if (existing) {
+          if (!ledgerMatches(existing, ledgerContext, request.resource)) {
+            fail('SQLITE_BATCH_IDENTITY_CONFLICT', `SQLite batch identity ${ledgerContext.batchIdentity} is already bound to different target metadata`);
+          }
+          ack = ackFromLedger(existing);
+          this.db.exec('COMMIT');
+          return ack;
+        }
+      }
+
       if (mode === 'create_insert' && !this.#tableExists(request.resource)) this.#createTable(request.resource, request.targetSchema);
       const fields = this.#validateTargetColumns(request.resource, request.targetSchema);
       const table = quoteSqliteIdentifier(request.resource);
@@ -262,18 +344,58 @@ export class SQLiteConnector {
       }
       const statement = this.db.prepare(sql);
       for (const row of rows) statement.run(...fields.map(field => row?.[field] ?? null));
+
+      const targetRows = Number(this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count);
+      if (ledgerContext) {
+        const commitId = `sqlite-batch:${ledgerContext.batchIdentity}`;
+        this.db.prepare(`INSERT INTO ${BATCH_LEDGER_TABLE_SQL} (
+          batch_identity, resource, plan_id, job_id, committed_rows, target_rows, commit_id, committed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          ledgerContext.batchIdentity,
+          request.resource,
+          ledgerContext.planId,
+          ledgerContext.jobId,
+          rows.length,
+          targetRows,
+          commitId,
+          new Date().toISOString()
+        );
+        ack = { committedRows: rows.length, commitId, checkpointToken: commitId, targetRows };
+      } else {
+        ack = {
+          committedRows: rows.length,
+          checkpointToken: `sqlite:${request.resource}:${targetRows}`,
+          targetRows
+        };
+      }
       this.db.exec('COMMIT');
     } catch (error) {
       try { this.db.exec('ROLLBACK'); } catch {}
       throw error;
     }
 
-    const targetRows = Number(this.db.prepare(`SELECT COUNT(*) AS count FROM ${quoteSqliteIdentifier(request.resource)}`).get().count);
-    return {
-      committedRows: rows.length,
-      checkpointToken: `sqlite:${request.resource}:${targetRows}`,
-      targetRows
-    };
+    return ack;
+  }
+
+  async reconcileTargetCommit(ctx = {}, request = {}) {
+    this.#ensureDb(ctx.connection);
+    const ledgerContext = batchContext(ctx);
+    if (!ledgerContext) fail('INVALID_RECONCILIATION_REQUEST', 'SQLite reconciliation requires batchIdentity context');
+    if (typeof request.resource !== 'string' || !request.resource) fail('INVALID_RECONCILIATION_REQUEST', 'SQLite reconciliation requires target resource');
+    const pendingIdentity = request.pendingBatch?.batchIdentity;
+    if (typeof pendingIdentity !== 'string' || pendingIdentity !== ledgerContext.batchIdentity) {
+      fail('INVALID_RECONCILIATION_REQUEST', 'SQLite reconciliation pending batch identity does not match execution context');
+    }
+    if (!this.#batchLedgerExists()) return { status: 'UNKNOWN' };
+
+    const row = this.#loadBatchLedger(ledgerContext.batchIdentity);
+    if (!row) return { status: 'NOT_COMMITTED' };
+    if (!ledgerMatches(row, ledgerContext, request.resource)) return { status: 'UNKNOWN' };
+    if (!this.#tableExists(request.resource)) return { status: 'UNKNOWN' };
+
+    const currentRows = Number(this.db.prepare(`SELECT COUNT(*) AS count FROM ${quoteSqliteIdentifier(request.resource)}`).get().count);
+    if (!Number.isSafeInteger(currentRows) || currentRows < Number(row.target_rows)) return { status: 'UNKNOWN' };
+    return { status: 'COMMITTED', ack: ackFromLedger(row) };
   }
 
   async verify(ctx = {}, request = {}) {
