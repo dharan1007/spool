@@ -321,6 +321,36 @@ export class SpoolCommandService {
     };
   }
 
+  async verifyJob(request = {}) {
+    requireRequest(request);
+    if (typeof request.jobId !== 'string' || !request.jobId) fail('INVALID_JOB_ID', 'jobId is required');
+    const { job, context, target } = await this.#resolveManagedJob(request.jobId);
+    if (job.state === 'COMPLETE') {
+      const receipt = await this.jobStore.loadReceipt(job.receiptId);
+      const publicReceipt = projectPublicReceipt(receipt);
+      return {
+        job: projectPublicJob(job),
+        verification: safeDurableClone(publicReceipt.verification, 'public verification'),
+        receipt: publicReceipt
+      };
+    }
+    if (job.state !== 'PAUSED') fail('INVALID_JOB_TRANSITION', `Cannot verify job from ${job.state}`);
+    if (!this.executionController) fail('VERIFY_UNAVAILABLE', 'Explicit verification requires a managed execution controller');
+    if (typeof this.runner.verifyPaused !== 'function') fail('VERIFY_UNAVAILABLE', 'Shared runner does not support paused-job verification');
+    if (this.executionController.isActive(job.jobId)) fail('JOB_EXECUTION_ACTIVE', `Job ${job.jobId} already has an active execution`);
+
+    const result = await this.executionController.start(job.jobId, () => this.runner.verifyPaused({
+      plan: context.plan,
+      targetConfig: structuredClone(target.config),
+      jobId: job.jobId
+    }));
+    return {
+      job: projectPublicJob(result.job),
+      verification: safeDurableClone(result.verification, 'public verification'),
+      receipt: result.receipt ? projectPublicReceipt(result.receipt) : null
+    };
+  }
+
   async inspectJob(request = {}) {
     requireRequest(request);
     if (typeof request.jobId !== 'string' || !request.jobId) fail('INVALID_JOB_ID', 'jobId is required');
