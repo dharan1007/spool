@@ -84,12 +84,12 @@ export class SpoolCommandService {
   async putConnection(request = {}) {
     requireRequest(request);
     requireConnectionName(request.name);
+    this.registry.manifest(request.type);
     const stored = await this.configStore.putConnection(request.name, {
       type: request.type,
       config: request.config ?? {},
       secretRefs: request.secretRefs ?? {}
     });
-    this.registry.manifest(stored.type);
     return projectConnection(stored);
   }
 
