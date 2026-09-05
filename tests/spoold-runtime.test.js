@@ -155,7 +155,10 @@ test('runtime enforces one live daemon per state directory and releases ownershi
   const second = await createSpooldRuntime({ stateDir, port: 0 });
   try {
     await first.start();
-    await assert.rejects(() => second.start(), /already running|lock/i);
+    await assert.rejects(
+      () => second.start(),
+      error => error?.code === 'SPOOLD_ALREADY_RUNNING'
+    );
   } finally {
     await second.close();
     await first.close();
