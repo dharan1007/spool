@@ -8,11 +8,13 @@ import {
   assertJobTransition,
   safeDurableClone,
   validateCheckpointContract,
+  validateCounts,
   validateExecutionOwnership,
   validateJobRecord
 } from '../platform/runtime-contracts.js';
 
 const ACTIVE_RECOVERY_STATES = new Set(['RUNNING', 'PAUSING', 'VERIFYING', 'RECOVERING']);
+const TERMINAL_STATES = new Set(['COMPLETE', 'FAILED', 'ABORTED']);
 const MAX_LEASE_MS = 24 * 60 * 60 * 1000;
 
 function clone(value) {
@@ -50,6 +52,45 @@ function sameCounts(a, b) {
   return a?.processedRows === b?.processedRows
     && a?.acceptedRows === b?.acceptedRows
     && a?.rejectedRows === b?.rejectedRows;
+}
+
+function requireString(value, code, label) {
+  if (typeof value !== 'string' || !value) fail(code, `${label} is required`);
+}
+
+function validateCursor(value, label) {
+  if (value == null) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    fail('INVALID_PENDING_BATCH', `${label} must be an object or null`);
+  }
+  safeDurableClone(value, `pending batch ${label}`);
+}
+
+function validatePendingBatch(pendingBatch, job) {
+  const durable = safeDurableClone(pendingBatch, 'pending batch');
+  if (!durable || typeof durable !== 'object' || Array.isArray(durable)) {
+    fail('INVALID_PENDING_BATCH', 'Pending batch must be an object');
+  }
+  if (durable.schemaVersion !== 1) fail('INVALID_PENDING_BATCH', 'Pending batch schemaVersion must be 1');
+  if (durable.planId !== job.planId || durable.planRevision !== job.planRevision) {
+    fail('PENDING_BATCH_PLAN_MISMATCH', 'Pending batch plan identity does not match the job');
+  }
+  requireString(durable.batchIdentity, 'INVALID_PENDING_BATCH', 'batchIdentity');
+  requireString(durable.sourceIdentity, 'INVALID_PENDING_BATCH', 'sourceIdentity');
+  requireString(durable.payloadHash, 'INVALID_PENDING_BATCH', 'payloadHash');
+  validateCursor(durable.previousSourceCursor, 'previousSourceCursor');
+  validateCursor(durable.sourceCursor, 'sourceCursor');
+  if (!durable.targetRef || typeof durable.targetRef !== 'object' || Array.isArray(durable.targetRef)) {
+    fail('INVALID_PENDING_BATCH', 'targetRef is required');
+  }
+  const targetKeys = Object.keys(durable.targetRef);
+  if (targetKeys.some(key => !['connector', 'resource'].includes(key))) {
+    fail('INVALID_PENDING_BATCH', 'Pending batch targetRef may contain only connector and resource');
+  }
+  requireString(durable.targetRef.connector, 'INVALID_PENDING_BATCH', 'target connector');
+  requireString(durable.targetRef.resource, 'INVALID_PENDING_BATCH', 'target resource');
+  validateCounts(durable.counts);
+  return durable;
 }
 
 function receiptMatchesJob(receipt, job) {
@@ -105,10 +146,8 @@ export class SQLiteJobStore {
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
-
         CREATE INDEX jobs_state_idx ON jobs(state);
         CREATE INDEX jobs_updated_idx ON jobs(updated_at DESC);
-
         CREATE TABLE receipts (
           receipt_id TEXT PRIMARY KEY,
           job_id TEXT NOT NULL,
@@ -117,9 +156,7 @@ export class SQLiteJobStore {
           receipt_json TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
-
         CREATE INDEX receipts_job_idx ON receipts(job_id);
-
         CREATE TABLE recovery_events (
           sequence INTEGER PRIMARY KEY AUTOINCREMENT,
           job_id TEXT NOT NULL,
@@ -128,7 +165,6 @@ export class SQLiteJobStore {
           created_at TEXT NOT NULL,
           FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE RESTRICT
         );
-
         CREATE INDEX recovery_events_job_idx ON recovery_events(job_id, sequence);
         PRAGMA user_version = 1;
       `);
@@ -166,6 +202,8 @@ export class SQLiteJobStore {
     ) {
       fail('CORRUPT_JOB_STORE', `SQLite columns and job payload disagree for ${row.job_id}`);
     }
+    if (job.pendingBatch === undefined) job.pendingBatch = null;
+    if (job.pendingBatch != null) validatePendingBatch(job.pendingBatch, job);
     validateJobRecord(job);
     return job;
   }
@@ -207,7 +245,6 @@ export class SQLiteJobStore {
       fail('STALE_STATE_VERSION', `Job ${jobId} state version has advanced`);
     }
     if (expectedExecutionEpoch !== undefined) validateExecutionOwnership(previous, expectedExecutionEpoch);
-
     const candidate = updater(clone(previous));
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
       fail('INVALID_JOB_RECORD', 'Job updater must return a job record');
@@ -216,7 +253,8 @@ export class SQLiteJobStore {
     next.stateVersion = previous.stateVersion + 1;
     next.updatedAt = new Date().toISOString();
     if (previous.state === 'PLANNED' && next.state === 'RUNNING' && !next.startedAt) next.startedAt = next.updatedAt;
-    if (['COMPLETE', 'FAILED', 'ABORTED'].includes(next.state) && !next.completedAt) next.completedAt = next.updatedAt;
+    if (TERMINAL_STATES.has(next.state) && !next.completedAt) next.completedAt = next.updatedAt;
+    if (next.pendingBatch != null) validatePendingBatch(next.pendingBatch, next);
     assertJobTransition(previous, next);
     return this.writeJobLocked(previous, next);
   }
@@ -238,6 +276,7 @@ export class SQLiteJobStore {
       executionLeaseExpiresAt: null,
       counts: { processedRows: 0, acceptedRows: 0, rejectedRows: 0 },
       checkpoint: null,
+      pendingBatch: null,
       verification: null,
       receiptId: null,
       lastError: null,
@@ -248,7 +287,6 @@ export class SQLiteJobStore {
     };
     validateJobRecord(job);
     const durable = safeDurableClone(job, 'sqlite job record');
-
     this.transaction(() => {
       this.db.prepare(`
         INSERT INTO jobs (
@@ -256,17 +294,8 @@ export class SQLiteJobStore {
           execution_owner, execution_lease_expires_at, record_json, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        durable.jobId,
-        durable.planId,
-        durable.planRevision,
-        durable.state,
-        durable.stateVersion,
-        durable.executionEpoch,
-        null,
-        null,
-        JSON.stringify(durable),
-        durable.createdAt,
-        durable.updatedAt
+        durable.jobId, durable.planId, durable.planRevision, durable.state, durable.stateVersion,
+        durable.executionEpoch, null, null, JSON.stringify(durable), durable.createdAt, durable.updatedAt
       );
     });
     return clone(durable);
@@ -288,27 +317,21 @@ export class SQLiteJobStore {
     validateExpectedStateVersion(expectedStateVersion);
     validateOwner(ownerId);
     validateLeaseMs(leaseMs);
-
     return clone(this.transaction(() => {
       const previous = this.loadLocked(jobId);
       if (expectedStateVersion !== undefined && previous.stateVersion !== expectedStateVersion) {
         fail('STALE_STATE_VERSION', `Job ${jobId} state version has advanced`);
       }
-      if (['COMPLETE', 'FAILED', 'ABORTED'].includes(previous.state)) {
-        fail('TERMINAL_JOB', `Cannot acquire execution ownership for terminal job ${jobId}`);
-      }
-
+      if (TERMINAL_STATES.has(previous.state)) fail('TERMINAL_JOB', `Cannot acquire execution ownership for terminal job ${jobId}`);
       const nowMs = Date.now();
       const leaseExpiryMs = previous.executionLeaseExpiresAt ? Date.parse(previous.executionLeaseExpiresAt) : 0;
       if (previous.executionOwner && previous.executionOwner !== ownerId && Number.isFinite(leaseExpiryMs) && leaseExpiryMs > nowMs) {
         fail('EXECUTION_LEASE_HELD', `Job ${jobId} already has an active execution lease`);
       }
-
       let nextState = previous.state;
       const expiredForeignLease = previous.executionOwner && previous.executionOwner !== ownerId && leaseExpiryMs <= nowMs;
       if (expiredForeignLease && ACTIVE_RECOVERY_STATES.has(previous.state)) nextState = 'RECOVERING';
       if (previous.state === 'RECOVERY_REQUIRED') nextState = 'RECOVERING';
-
       const next = {
         ...previous,
         state: nextState,
@@ -323,38 +346,24 @@ export class SQLiteJobStore {
     }));
   }
 
-  async renewExecution(jobId, {
-    expectedStateVersion,
-    expectedExecutionEpoch,
-    ownerId,
-    leaseMs = 30_000
-  } = {}) {
+  async renewExecution(jobId, { expectedStateVersion, expectedExecutionEpoch, ownerId, leaseMs = 30_000 } = {}) {
     validateExpectedStateVersion(expectedStateVersion);
     validateOwner(ownerId);
     validateLeaseMs(leaseMs);
-
     return clone(this.transaction(() => {
       const previous = this.loadLocked(jobId);
       if (expectedStateVersion !== undefined && previous.stateVersion !== expectedStateVersion) {
         fail('STALE_STATE_VERSION', `Job ${jobId} state version has advanced`);
       }
-      if (expectedExecutionEpoch === undefined) {
-        fail('INVALID_EXECUTION_EPOCH', 'expectedExecutionEpoch is required to renew execution ownership');
-      }
+      if (expectedExecutionEpoch === undefined) fail('INVALID_EXECUTION_EPOCH', 'expectedExecutionEpoch is required to renew execution ownership');
       validateExecutionOwnership(previous, expectedExecutionEpoch);
-      if (previous.executionOwner !== ownerId) {
-        fail('STALE_EXECUTION_OWNER', `Execution owner ${ownerId} no longer owns job ${jobId}`);
-      }
-      if (['COMPLETE', 'FAILED', 'ABORTED', 'RECOVERY_REQUIRED'].includes(previous.state)) {
+      if (previous.executionOwner !== ownerId) fail('STALE_EXECUTION_OWNER', `Execution owner ${ownerId} no longer owns job ${jobId}`);
+      if (TERMINAL_STATES.has(previous.state) || previous.state === 'RECOVERY_REQUIRED') {
         fail('INVALID_EXECUTION_LEASE', `Execution lease cannot be renewed while job ${jobId} is ${previous.state}`);
       }
-
       const nowMs = Date.now();
       const leaseExpiryMs = previous.executionLeaseExpiresAt ? Date.parse(previous.executionLeaseExpiresAt) : Number.NaN;
-      if (!Number.isFinite(leaseExpiryMs) || leaseExpiryMs <= nowMs) {
-        fail('EXECUTION_LEASE_EXPIRED', `Execution lease for job ${jobId} has expired`);
-      }
-
+      if (!Number.isFinite(leaseExpiryMs) || leaseExpiryMs <= nowMs) fail('EXECUTION_LEASE_EXPIRED', `Execution lease for job ${jobId} has expired`);
       const next = {
         ...previous,
         stateVersion: previous.stateVersion + 1,
@@ -374,6 +383,28 @@ export class SQLiteJobStore {
     )));
   }
 
+  async beginPendingBatch(jobId, pendingBatch, { expectedStateVersion, expectedExecutionEpoch } = {}) {
+    return clone(this.transaction(() => {
+      const previous = this.loadLocked(jobId);
+      const durable = validatePendingBatch(pendingBatch, previous);
+      if (previous.state !== 'RUNNING') fail('INVALID_PENDING_BATCH_STATE', `Cannot begin a target batch while job ${jobId} is ${previous.state}`);
+      if (previous.pendingBatch != null) fail('PENDING_BATCH_EXISTS', `Job ${jobId} already has a pending target batch`);
+      return this.mutateLocked(
+        jobId,
+        current => ({ ...current, pendingBatch: durable }),
+        { expectedStateVersion, expectedExecutionEpoch }
+      );
+    }));
+  }
+
+  async clearPendingBatch(jobId, { expectedStateVersion, expectedExecutionEpoch } = {}) {
+    return clone(this.transaction(() => this.mutateLocked(
+      jobId,
+      current => ({ ...current, pendingBatch: null }),
+      { expectedStateVersion, expectedExecutionEpoch }
+    )));
+  }
+
   async commitCheckpoint(jobId, checkpoint, { expectedStateVersion, expectedExecutionEpoch } = {}) {
     return clone(this.transaction(() => {
       const previous = this.loadLocked(jobId);
@@ -386,6 +417,7 @@ export class SQLiteJobStore {
           const next = {
             ...current,
             checkpoint: safeDurableClone(checkpoint, 'checkpoint'),
+            pendingBatch: null,
             counts: {
               processedRows: checkpoint?.processedRows,
               acceptedRows: checkpoint?.acceptedRows,
@@ -475,12 +507,8 @@ export class SQLiteJobStore {
       INSERT INTO receipts (receipt_id, job_id, plan_id, plan_revision, receipt_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(
-      durable.receiptId,
-      durable.jobId,
-      durable.planId,
-      durable.planRevision,
-      JSON.stringify(durable),
-      durable.timing?.completedAt ?? new Date().toISOString()
+      durable.receiptId, durable.jobId, durable.planId, durable.planRevision,
+      JSON.stringify(durable), durable.timing?.completedAt ?? new Date().toISOString()
     );
     return durable;
   }
@@ -498,22 +526,20 @@ export class SQLiteJobStore {
   async finalizeVerifiedJob(jobId, receipt, { expectedStateVersion, expectedExecutionEpoch } = {}) {
     return clone(this.transaction(() => {
       const previous = this.loadLocked(jobId);
-
       if (previous.state === 'COMPLETE') {
         if (previous.receiptId !== receipt?.receiptId) fail('RECEIPT_IMMUTABLE', `Job ${jobId} is already finalized with another receipt`);
         const stored = this.saveReceiptLocked(receipt);
         if (canonicalJson(stored) !== canonicalJson(receipt)) fail('RECEIPT_IMMUTABLE', `Receipt ${receipt.receiptId} is immutable`);
         return previous;
       }
-
       validateExpectedStateVersion(expectedStateVersion);
       if (expectedStateVersion !== undefined && previous.stateVersion !== expectedStateVersion) {
         fail('STALE_STATE_VERSION', `Job ${jobId} state version has advanced`);
       }
       if (expectedExecutionEpoch !== undefined) validateExecutionOwnership(previous, expectedExecutionEpoch);
       if (previous.state !== 'VERIFYING') fail('INVALID_JOB_TRANSITION', `Cannot finalize job from ${previous.state}`);
+      if (previous.pendingBatch != null) fail('PENDING_BATCH_EXISTS', 'Cannot finalize while a target batch is unresolved');
       receiptMatchesJob(receipt, previous);
-
       const storedReceipt = this.saveReceiptLocked(receipt);
       const completedAt = storedReceipt.timing?.completedAt ?? new Date().toISOString();
       const next = {
