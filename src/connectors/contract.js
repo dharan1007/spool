@@ -160,6 +160,9 @@ export function validateConnector(connector) {
   if (manifest.capabilities.rollback && typeof connector.rollback !== 'function') {
     fail('INVALID_CONNECTOR', 'Connector advertises rollback but does not implement rollback()');
   }
+  if (manifest.capabilityProfile.target.reconcileAfterCrash && typeof connector.reconcileTargetCommit !== 'function') {
+    fail('INVALID_CONNECTOR', 'Connector advertises crash reconciliation but does not implement reconcileTargetCommit()');
+  }
   return manifest;
 }
 
