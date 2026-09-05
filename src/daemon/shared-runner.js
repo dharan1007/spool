@@ -13,6 +13,7 @@ import { createReceipt } from './receipt.js';
 
 const DEFAULT_LEASE_MS = 10 * 60 * 1000;
 const MAX_BATCH_SIZE = 100_000;
+const RECONCILIATION_STATUSES = new Set(['COMMITTED', 'NOT_COMMITTED', 'UNKNOWN']);
 
 function validateRunnerDependency(value, method, label) {
   if (!value || typeof value[method] !== 'function') {
@@ -51,8 +52,6 @@ function writeRequestFor(plan) {
 
 function verificationRequestFor(plan, counts) {
   const request = { resource: plan.targetRef.resource };
-  // create_insert owns the full newly-created resource, so its logical count is deterministic.
-  // Insert/upsert may target pre-existing resources, where acceptedRows is not the final row count.
   if (plan.writeStrategy.mode === 'create_insert') request.expectedRows = counts.acceptedRows;
   return request;
 }
@@ -78,7 +77,7 @@ function boundedCommitEvidence(ack, targetBoundary) {
   const evidence = { targetBoundary };
   if (Number.isSafeInteger(ack?.committedRows) && ack.committedRows >= 0) evidence.committedRows = ack.committedRows;
   if (Number.isSafeInteger(ack?.targetRows) && ack.targetRows >= 0) evidence.targetRows = ack.targetRows;
-  return evidence;
+  return safeDurableClone(evidence, 'runner commit evidence');
 }
 
 function boundedVerificationEvidence(result) {
@@ -104,11 +103,76 @@ function connectorReceiptIdentity(connector) {
   return { name: manifest.name, version: manifest.version };
 }
 
+async function buildPendingBatch(plan, job, batch, transformed, payloadHash) {
+  const nextCounts = {
+    processedRows: job.counts.processedRows + transformed.processedRows,
+    acceptedRows: job.counts.acceptedRows + transformed.validRows,
+    rejectedRows: job.counts.rejectedRows + transformed.invalidRows
+  };
+  const identityPayload = {
+    domain: 'spool-batch-v1',
+    planId: plan.planId,
+    planRevision: plan.planRevision,
+    sourceIdentity: plan.sourceRef.identity ?? null,
+    previousSourceCursor: job.checkpoint?.sourceCursor ?? null,
+    sourceCursor: batch.cursor,
+    payloadHash,
+    targetRef: { connector: plan.targetRef.connector, resource: plan.targetRef.resource },
+    counts: nextCounts
+  };
+  const batchIdentity = await sha256Json(identityPayload);
+  return safeDurableClone({
+    schemaVersion: 1,
+    planId: plan.planId,
+    planRevision: plan.planRevision,
+    batchIdentity,
+    sourceIdentity: plan.sourceRef.identity,
+    previousSourceCursor: job.checkpoint?.sourceCursor ?? null,
+    sourceCursor: batch.cursor,
+    payloadHash,
+    targetRef: { connector: plan.targetRef.connector, resource: plan.targetRef.resource },
+    counts: nextCounts
+  }, 'runner pending batch');
+}
+
+function checkpointFromPending(plan, pendingBatch, ack) {
+  const targetBoundary = normalizeTargetBoundary(ack, plan);
+  if (plan.connectorBinding.target.capabilityProfile.target.commitEvidence !== 'none' && !targetBoundary) {
+    fail('TARGET_COMMIT_EVIDENCE_MISSING', 'Target commit evidence is required by the capability-bound plan');
+  }
+  const commitEvidence = boundedCommitEvidence(ack, targetBoundary);
+  return {
+    schemaVersion: 1,
+    planId: plan.planId,
+    planRevision: plan.planRevision,
+    batchIdentity: pendingBatch.batchIdentity,
+    sourceCursor: safeDurableClone(pendingBatch.sourceCursor, 'source cursor'),
+    targetBoundary,
+    commitEvidence,
+    processedRows: pendingBatch.counts.processedRows,
+    acceptedRows: pendingBatch.counts.acceptedRows,
+    rejectedRows: pendingBatch.counts.rejectedRows,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function validateReconciliationResult(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result) || !RECONCILIATION_STATUSES.has(result.status)) {
+    fail('INVALID_RECONCILIATION_RESULT', 'Target reconciliation must return COMMITTED, NOT_COMMITTED, or UNKNOWN');
+  }
+  if (result.status === 'COMMITTED' && (!result.ack || typeof result.ack !== 'object' || Array.isArray(result.ack))) {
+    fail('INVALID_RECONCILIATION_RESULT', 'COMMITTED reconciliation requires bounded commit acknowledgement evidence');
+  }
+  return result;
+}
+
 export class SharedMigrationRunner {
   constructor({ registry, store, ownerId, leaseMs = DEFAULT_LEASE_MS } = {}) {
     validateRunnerDependency(registry, 'open', 'registry');
     validateRunnerDependency(store, 'acquireExecution', 'store');
     validateRunnerDependency(store, 'renewExecution', 'store');
+    validateRunnerDependency(store, 'beginPendingBatch', 'store');
+    validateRunnerDependency(store, 'clearPendingBatch', 'store');
     validateRunnerDependency(store, 'commitCheckpoint', 'store');
     validateRunnerDependency(store, 'finalizeVerifiedJob', 'store');
     validateOwnerId(ownerId);
@@ -139,7 +203,6 @@ export class SharedMigrationRunner {
         }
       );
     }
-
     await this.store.appendRecoveryEvent(job.jobId, {
       schemaVersion: 1,
       kind,
@@ -148,7 +211,6 @@ export class SharedMigrationRunner {
       error: publicError,
       details: safeDurableClone(redact(details), 'runner recovery details')
     });
-
     fail('RECOVERY_REQUIRED', `Job ${job.jobId} requires reconciliation before execution can continue`);
   }
 
@@ -159,6 +221,78 @@ export class SharedMigrationRunner {
       ownerId: this.ownerId,
       leaseMs: this.leaseMs
     });
+  }
+
+  async reconcile(job, plan, target, epoch) {
+    const capability = plan.connectorBinding.target.capabilityProfile.target;
+    if (!job.pendingBatch || capability.reconcileAfterCrash !== true || typeof target.reconcileTargetCommit !== 'function') {
+      await this.enterRecoveryRequired(job, { code: 'RECONCILIATION_UNAVAILABLE' }, 'reconciliation_required', {
+        targetConnector: plan.targetRef.connector,
+        targetResource: plan.targetRef.resource,
+        hasPendingBatch: Boolean(job.pendingBatch),
+        reconcileAfterCrash: capability.reconcileAfterCrash === true
+      });
+    }
+
+    let result;
+    try {
+      result = validateReconciliationResult(await target.reconcileTargetCommit(
+        {
+          connection: target.connection,
+          planId: plan.planId,
+          jobId: job.jobId,
+          executionEpoch: epoch,
+          batchIdentity: job.pendingBatch.batchIdentity
+        },
+        {
+          resource: plan.targetRef.resource,
+          pendingBatch: safeDurableClone(job.pendingBatch, 'reconciliation pending batch'),
+          previousCheckpoint: job.checkpoint ? safeDurableClone(job.checkpoint, 'reconciliation checkpoint') : null
+        }
+      ));
+    } catch (error) {
+      await this.enterRecoveryRequired(job, error, 'target_reconciliation_error', {
+        targetConnector: plan.targetRef.connector,
+        targetResource: plan.targetRef.resource,
+        batchIdentity: job.pendingBatch.batchIdentity
+      });
+    }
+
+    if (result.status === 'UNKNOWN') {
+      await this.enterRecoveryRequired(job, { code: 'TARGET_RECONCILIATION_UNKNOWN' }, 'target_reconciliation_unknown', {
+        targetConnector: plan.targetRef.connector,
+        targetResource: plan.targetRef.resource,
+        batchIdentity: job.pendingBatch.batchIdentity
+      });
+    }
+
+    if (result.status === 'COMMITTED') {
+      let checkpoint;
+      try {
+        checkpoint = checkpointFromPending(plan, job.pendingBatch, result.ack);
+      } catch (error) {
+        await this.enterRecoveryRequired(job, error, 'target_reconciliation_evidence_invalid', {
+          targetConnector: plan.targetRef.connector,
+          targetResource: plan.targetRef.resource,
+          batchIdentity: job.pendingBatch.batchIdentity
+        });
+      }
+      job = await this.store.commitCheckpoint(job.jobId, checkpoint, {
+        expectedStateVersion: job.stateVersion,
+        expectedExecutionEpoch: epoch
+      });
+    } else if (result.status === 'NOT_COMMITTED') {
+      job = await this.store.clearPendingBatch(job.jobId, {
+        expectedStateVersion: job.stateVersion,
+        expectedExecutionEpoch: epoch
+      });
+    }
+
+    return this.store.update(
+      job.jobId,
+      current => ({ ...current, state: 'RUNNING', lastError: null }),
+      { expectedStateVersion: job.stateVersion, expectedExecutionEpoch: epoch }
+    );
   }
 
   async run({ plan, sourceConfig = {}, targetConfig = {}, jobId } = {}) {
@@ -200,13 +334,7 @@ export class SharedMigrationRunner {
       const epoch = job.executionEpoch;
 
       if (job.state === 'RECOVERING') {
-        await this.enterRecoveryRequired(job, { code: 'RECONCILIATION_REQUIRED' }, 'reconciliation_required', {
-          sourceConnector: plan.sourceRef.connector,
-          sourceResource: plan.sourceRef.resource,
-          targetConnector: plan.targetRef.connector,
-          targetResource: plan.targetRef.resource,
-          reason: 'execution ownership changed without connector-proven commit reconciliation'
-        });
+        job = await this.reconcile(job, plan, target, epoch);
       }
 
       if (job.state === 'PLANNED' || job.state === 'PAUSED') {
@@ -235,64 +363,45 @@ export class SharedMigrationRunner {
 
         const transformed = this.engine.run(batch.rows, plan.mapping, plan.planRevision, plan.targetSchema);
         const payloadHash = await sha256Json(transformed.output);
-
-        // Reassert durable ownership immediately before every target mutation. If the lease
-        // expired while reading or transforming, execution stops before creating ambiguity.
         job = await this.renewLease(job, epoch);
+
+        const pendingBatch = await buildPendingBatch(plan, job, batch, transformed, payloadHash);
+        job = await this.store.beginPendingBatch(job.jobId, pendingBatch, {
+          expectedStateVersion: job.stateVersion,
+          expectedExecutionEpoch: epoch
+        });
 
         let ack;
         try {
           ack = await target.write(
-            { connection: target.connection, planId: plan.planId, jobId: job.jobId, executionEpoch: epoch },
+            {
+              connection: target.connection,
+              planId: plan.planId,
+              jobId: job.jobId,
+              executionEpoch: epoch,
+              batchIdentity: pendingBatch.batchIdentity
+            },
             writeRequestFor(plan),
             oneBatch(transformed.output)
           );
         } catch (error) {
           await this.enterRecoveryRequired(job, error, 'target_commit_ambiguous', {
             targetConnector: plan.targetRef.connector,
-            targetResource: plan.targetRef.resource
+            targetResource: plan.targetRef.resource,
+            batchIdentity: pendingBatch.batchIdentity
           });
         }
 
-        const targetBoundary = normalizeTargetBoundary(ack, plan);
-        if (plan.connectorBinding.target.capabilityProfile.target.commitEvidence !== 'none' && !targetBoundary) {
-          await this.enterRecoveryRequired(job, { code: 'TARGET_COMMIT_EVIDENCE_MISSING' }, 'target_commit_evidence_missing', {
+        let checkpoint;
+        try {
+          checkpoint = checkpointFromPending(plan, pendingBatch, ack);
+        } catch (error) {
+          await this.enterRecoveryRequired(job, error, 'target_commit_evidence_missing', {
             targetConnector: plan.targetRef.connector,
-            targetResource: plan.targetRef.resource
+            targetResource: plan.targetRef.resource,
+            batchIdentity: pendingBatch.batchIdentity
           });
         }
-
-        const nextCounts = {
-          processedRows: job.counts.processedRows + transformed.processedRows,
-          acceptedRows: job.counts.acceptedRows + transformed.validRows,
-          rejectedRows: job.counts.rejectedRows + transformed.invalidRows
-        };
-        const commitEvidence = boundedCommitEvidence(ack, targetBoundary);
-        const batchIdentity = await sha256Json({
-          domain: 'spool-batch-v1',
-          planId: plan.planId,
-          planRevision: plan.planRevision,
-          sourceIdentity: plan.sourceRef.identity ?? null,
-          previousSourceCursor: job.checkpoint?.sourceCursor ?? null,
-          sourceCursor: batch.cursor,
-          payloadHash,
-          targetRef: { connector: plan.targetRef.connector, resource: plan.targetRef.resource },
-          commitEvidence
-        });
-
-        const checkpoint = {
-          schemaVersion: 1,
-          planId: plan.planId,
-          planRevision: plan.planRevision,
-          batchIdentity,
-          sourceCursor: safeDurableClone(batch.cursor, 'source cursor'),
-          targetBoundary,
-          commitEvidence,
-          processedRows: nextCounts.processedRows,
-          acceptedRows: nextCounts.acceptedRows,
-          rejectedRows: nextCounts.rejectedRows,
-          updatedAt: new Date().toISOString()
-        };
 
         job = await this.store.commitCheckpoint(job.jobId, checkpoint, {
           expectedStateVersion: job.stateVersion,
@@ -305,9 +414,6 @@ export class SharedMigrationRunner {
         current => ({ ...current, state: 'VERIFYING' }),
         { expectedStateVersion: job.stateVersion, expectedExecutionEpoch: epoch }
       );
-
-      // Verification may be long-running too; renew before entering connector work so an
-      // expired owner cannot persist verification evidence or finalize a receipt.
       job = await this.renewLease(job, epoch);
 
       let verificationResult;
