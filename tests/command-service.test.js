@@ -84,6 +84,19 @@ test('command service exposes connector and connection metadata without runtime 
   }
 });
 
+test('command service rejects an unregistered connector before persisting a connection descriptor', async () => {
+  const value = await fixture();
+  try {
+    await assert.rejects(
+      () => value.service.putConnection({ name: 'invalid', type: 'missing_connector', config: {}, secretRefs: {} }),
+      /CONNECTOR_NOT_FOUND|registered|connector/i
+    );
+    assert.equal(await value.configStore.getConnection('invalid'), null);
+  } finally {
+    await cleanup(value);
+  }
+});
+
 test('command service tests a named real connector and returns bounded health', async () => {
   const value = await fixture();
   try {
