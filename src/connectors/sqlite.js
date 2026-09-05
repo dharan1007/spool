@@ -159,7 +159,7 @@ export class SQLiteConnector {
 
   #ensureBatchLedger() {
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${BATCH_LEDGER_TABLE_SQL} (
-      batch_identity TEXT PRIMARY KEY,
+      batch_identity TEXT NOT NULL PRIMARY KEY,
       resource TEXT NOT NULL,
       plan_id TEXT NOT NULL,
       job_id TEXT NOT NULL,
