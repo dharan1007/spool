@@ -109,6 +109,8 @@ test('resume rejects named connection drift before opening a target connector', 
   try {
     const source = await value.configStore.getConnection('source');
     const target = await value.configStore.getConnection('target');
+    const sourceFingerprint = await fingerprint(source);
+    const targetFingerprint = await fingerprint(target);
     const created = await value.jobStore.create(value.plan);
     const job = await value.jobStore.update(
       created.jobId,
@@ -117,8 +119,8 @@ test('resume rejects named connection drift before opening a target connector', 
         executionContext: {
           schemaVersion: 1,
           plan: value.plan,
-          sourceConnection: { name: 'source', fingerprint: await fingerprint(source) },
-          targetConnection: { name: 'target', fingerprint: await fingerprint(target) }
+          sourceConnection: { name: 'source', fingerprint: sourceFingerprint },
+          targetConnection: { name: 'target', fingerprint: targetFingerprint }
         }
       }),
       { expectedStateVersion: created.stateVersion, expectedExecutionEpoch: created.executionEpoch }
