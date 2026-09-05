@@ -15,6 +15,8 @@ function serviceFixture() {
     async testConnection(request) { calls.push(['testConnection', request]); return { name: request.name, ok: true }; },
     async createPlan(request) { calls.push(['createPlan', request]); return { planId: 'sha256:plan' }; },
     async runMigration(request) { calls.push(['runMigration', request]); return { job: { jobId: 'job_1' }, receipt: { receiptId: 'receipt_1' } }; },
+    async pauseJob(request) { calls.push(['pauseJob', request]); return { jobId: request.jobId, state: 'PAUSED' }; },
+    async resumeJob(request) { calls.push(['resumeJob', request]); return { job: { jobId: request.jobId, state: 'RUNNING' }, receipt: null }; },
     async inspectJob(request) { calls.push(['inspectJob', request]); return { jobId: request.jobId, state: 'RUNNING' }; },
     async getReceipt(request) { calls.push(['getReceipt', request]); return { receiptId: request.receiptId ?? 'receipt_1' }; }
   };
@@ -83,6 +85,25 @@ test('spoold dispatches only allowlisted commands through SpoolCommandService', 
     assert.equal(commandService.calls.length, 1);
     const unknownPayload = await unknown.json();
     assert.equal(unknownPayload.error.code, 'COMMAND_NOT_FOUND');
+  } finally {
+    await host.close();
+  }
+});
+
+test('spoold exposes pause and resume only as thin command-service dispatches', async () => {
+  const { host, commandService, baseUrl } = await startHost();
+  try {
+    const paused = await command(baseUrl, 'pause_job', { jobId: 'job_9' });
+    assert.equal(paused.status, 200);
+    assert.deepEqual(await paused.json(), { ok: true, result: { jobId: 'job_9', state: 'PAUSED' } });
+
+    const resumed = await command(baseUrl, 'resume_job', { jobId: 'job_9', detach: true });
+    assert.equal(resumed.status, 200);
+    assert.deepEqual(await resumed.json(), { ok: true, result: { job: { jobId: 'job_9', state: 'RUNNING' }, receipt: null } });
+    assert.deepEqual(commandService.calls, [
+      ['pauseJob', { jobId: 'job_9' }],
+      ['resumeJob', { jobId: 'job_9', detach: true }]
+    ]);
   } finally {
     await host.close();
   }
