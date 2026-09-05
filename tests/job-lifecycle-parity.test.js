@@ -78,7 +78,7 @@ async function cleanup(value) {
   await rm(value.root, { recursive: true, force: true });
 }
 
-test('SQLiteJobStore durably persists a secret-free managed execution context without exposing it publicly', async () => {
+test('SQLiteJobStore durably preserves a secret-free managed execution context through its fenced record update', async () => {
   const root = await mkdtemp(join(tmpdir(), 'spool-lifecycle-store-'));
   const store = new SQLiteJobStore({ stateDir: root });
   try {
@@ -89,7 +89,12 @@ test('SQLiteJobStore durably persists a secret-free managed execution context wi
       sourceConnection: { name: 'source', fingerprint: 'sha256:source-binding' },
       targetConnection: { name: 'target', fingerprint: 'sha256:target-binding' }
     };
-    const created = await store.create(plan, { executionContext });
+    const created = await store.create(plan);
+    await store.update(
+      created.jobId,
+      current => ({ ...current, executionContext }),
+      { expectedStateVersion: created.stateVersion, expectedExecutionEpoch: created.executionEpoch }
+    );
     const loaded = await store.load(created.jobId);
     assert.deepEqual(loaded.executionContext, executionContext);
     assert.doesNotMatch(JSON.stringify(loaded), /resolvedSecret|secretValue/);
@@ -104,14 +109,20 @@ test('resume rejects named connection drift before opening a target connector', 
   try {
     const source = await value.configStore.getConnection('source');
     const target = await value.configStore.getConnection('target');
-    const job = await value.jobStore.create(value.plan, {
-      executionContext: {
-        schemaVersion: 1,
-        plan: value.plan,
-        sourceConnection: { name: 'source', fingerprint: await fingerprint(source) },
-        targetConnection: { name: 'target', fingerprint: await fingerprint(target) }
-      }
-    });
+    const created = await value.jobStore.create(value.plan);
+    const job = await value.jobStore.update(
+      created.jobId,
+      current => ({
+        ...current,
+        executionContext: {
+          schemaVersion: 1,
+          plan: value.plan,
+          sourceConnection: { name: 'source', fingerprint: await fingerprint(source) },
+          targetConnection: { name: 'target', fingerprint: await fingerprint(target) }
+        }
+      }),
+      { expectedStateVersion: created.stateVersion, expectedExecutionEpoch: created.executionEpoch }
+    );
     await value.service.putConnection({
       name: 'target',
       type: 'sqlite',
