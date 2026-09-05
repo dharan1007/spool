@@ -106,6 +106,32 @@ test('spoold rejects unapproved browser origins but permits originless local cli
   }
 });
 
+test('spoold answers CORS preflight only for explicitly approved origins', async () => {
+  const { host, commandService, baseUrl } = await startHost();
+  try {
+    const allowed = await fetch(`${baseUrl}/v1/commands/list_connectors`, {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'https://app.spool.local',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'authorization,content-type'
+      }
+    });
+    assert.equal(allowed.status, 204);
+    assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://app.spool.local');
+    assert.match(allowed.headers.get('access-control-allow-headers') ?? '', /authorization/i);
+
+    const denied = await fetch(`${baseUrl}/v1/commands/list_connectors`, {
+      method: 'OPTIONS',
+      headers: { origin: 'https://evil.example', 'access-control-request-method': 'POST' }
+    });
+    assert.equal(denied.status, 403);
+    assert.deepEqual(commandService.calls, []);
+  } finally {
+    await host.close();
+  }
+});
+
 test('spoold enforces bounded JSON bodies before service invocation', async () => {
   const { host, commandService, baseUrl } = await startHost({ maxBodyBytes: 64 });
   try {
