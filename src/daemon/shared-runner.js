@@ -169,6 +169,7 @@ function validateReconciliationResult(result) {
 export class SharedMigrationRunner {
   constructor({ registry, store, ownerId, leaseMs = DEFAULT_LEASE_MS } = {}) {
     validateRunnerDependency(registry, 'open', 'registry');
+    validateRunnerDependency(registry, 'manifest', 'registry');
     validateRunnerDependency(store, 'acquireExecution', 'store');
     validateRunnerDependency(store, 'renewExecution', 'store');
     validateRunnerDependency(store, 'beginPendingBatch', 'store');
@@ -221,6 +222,31 @@ export class SharedMigrationRunner {
       ownerId: this.ownerId,
       leaseMs: this.leaseMs
     });
+  }
+
+  async verifyTarget(job, plan, target, epoch) {
+    let verificationResult;
+    try {
+      verificationResult = await target.verify(
+        { connection: target.connection, planId: plan.planId, jobId: job.jobId, executionEpoch: epoch },
+        verificationRequestFor(plan, job.counts)
+      );
+    } catch (error) {
+      await this.enterRecoveryRequired(job, error, 'verification_error', {
+        targetConnector: plan.targetRef.connector,
+        targetResource: plan.targetRef.resource
+      });
+    }
+
+    const verification = boundedVerificationEvidence(verificationResult);
+    if (!verification.ok) {
+      await this.enterRecoveryRequired(job, { code: 'TARGET_VERIFICATION_FAILED' }, 'verification_failed', {
+        targetConnector: plan.targetRef.connector,
+        targetResource: plan.targetRef.resource,
+        verification
+      });
+    }
+    return verification;
   }
 
   async reconcile(job, plan, target, epoch) {
@@ -295,6 +321,54 @@ export class SharedMigrationRunner {
     );
   }
 
+  async verifyPaused({ plan, targetConfig = {}, jobId } = {}) {
+    validateMigrationPlan(plan);
+    if (!plan.connectorBinding) fail('PLAN_CONNECTOR_BINDING_REQUIRED', 'Paused-job verification requires a capability-bound migration plan');
+    if (typeof jobId !== 'string' || !jobId) fail('INVALID_JOB_ID', 'jobId is required');
+
+    let target = null;
+    let job = await this.store.load(jobId);
+    if (job.planId !== plan.planId || job.planRevision !== plan.planRevision) {
+      fail('JOB_PLAN_MISMATCH', 'Existing job does not belong to the supplied plan');
+    }
+    if (job.state === 'COMPLETE') {
+      const receipt = await this.store.loadReceipt(job.receiptId);
+      return { job, verification: receipt.verification, receipt };
+    }
+    if (job.state !== 'PAUSED') fail('INVALID_JOB_TRANSITION', `Cannot verify job from ${job.state}`);
+    if (job.pendingBatch != null) fail('RECOVERY_REQUIRED', `Job ${job.jobId} has unresolved target state and cannot be verified`);
+
+    try {
+      target = await this.registry.open(plan.targetRef.connector, targetConfig, { role: 'verify', planId: plan.planId, jobId });
+      assertPlanConnectorCompatibility(plan, {
+        sourceManifest: this.registry.manifest(plan.sourceRef.connector),
+        targetManifest: target.manifest()
+      });
+
+      job = await this.store.acquireExecution(job.jobId, {
+        expectedStateVersion: job.stateVersion,
+        ownerId: this.ownerId,
+        leaseMs: this.leaseMs
+      });
+      const epoch = job.executionEpoch;
+      if (job.state !== 'PAUSED') fail('INVALID_JOB_TRANSITION', `Cannot verify job from ${job.state}`);
+      job = await this.renewLease(job, epoch);
+      const verification = await this.verifyTarget(job, plan, target, epoch);
+      job = await this.store.update(
+        job.jobId,
+        current => ({ ...current, verification, lastError: null }),
+        { expectedStateVersion: job.stateVersion, expectedExecutionEpoch: epoch }
+      );
+      job = await this.store.releaseExecution(job.jobId, {
+        expectedStateVersion: job.stateVersion,
+        expectedExecutionEpoch: epoch
+      });
+      return { job, verification, receipt: null };
+    } finally {
+      if (target && typeof target.close === 'function') await target.close().catch(() => {});
+    }
+  }
+
   async run({ plan, sourceConfig = {}, targetConfig = {}, jobId } = {}) {
     validateMigrationPlan(plan);
     if (!plan.connectorBinding) {
@@ -340,7 +414,7 @@ export class SharedMigrationRunner {
       if (job.state === 'PLANNED' || job.state === 'PAUSED') {
         job = await this.store.update(
           job.jobId,
-          current => ({ ...current, state: 'RUNNING' }),
+          current => ({ ...current, state: 'RUNNING', verification: null }),
           { expectedStateVersion: job.stateVersion, expectedExecutionEpoch: epoch }
         );
       }
@@ -416,27 +490,7 @@ export class SharedMigrationRunner {
       );
       job = await this.renewLease(job, epoch);
 
-      let verificationResult;
-      try {
-        verificationResult = await target.verify(
-          { connection: target.connection, planId: plan.planId, jobId: job.jobId, executionEpoch: epoch },
-          verificationRequestFor(plan, job.counts)
-        );
-      } catch (error) {
-        await this.enterRecoveryRequired(job, error, 'verification_error', {
-          targetConnector: plan.targetRef.connector,
-          targetResource: plan.targetRef.resource
-        });
-      }
-
-      const verification = boundedVerificationEvidence(verificationResult);
-      if (!verification.ok) {
-        await this.enterRecoveryRequired(job, { code: 'TARGET_VERIFICATION_FAILED' }, 'verification_failed', {
-          targetConnector: plan.targetRef.connector,
-          targetResource: plan.targetRef.resource,
-          verification
-        });
-      }
+      const verification = await this.verifyTarget(job, plan, target, epoch);
 
       job = await this.store.update(
         job.jobId,
