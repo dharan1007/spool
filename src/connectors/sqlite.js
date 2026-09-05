@@ -2,6 +2,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fail } from '../core/errors.js';
 import { sha256Json } from '../platform/canonical-json.js';
+import { CONNECTOR_CAPABILITY_PROFILE_VERSION } from './contract.js';
 import { quoteSqliteIdentifier, sqliteTypeForTarget, spoolTypeForSqlite, validateNewSqliteIdentifier } from './sqlite-identifiers.js';
 
 const CAPABILITIES = Object.freeze({
@@ -17,6 +18,31 @@ const CAPABILITIES = Object.freeze({
   checksum: true,
   pagination: true,
   rateLimitAware: false
+});
+
+const CAPABILITY_PROFILE = Object.freeze({
+  version: CONNECTOR_CAPABILITY_PROFILE_VERSION,
+  source: Object.freeze({
+    snapshot: 'none',
+    ordering: 'none',
+    resume: 'unsupported',
+    cursorKind: null
+  }),
+  target: Object.freeze({
+    atomicity: 'transaction',
+    commitEvidence: 'postcondition',
+    reconcileAfterCrash: false,
+    idempotency: 'none'
+  }),
+  verification: Object.freeze({
+    logicalCount: true,
+    schema: true,
+    keyCoverage: true,
+    sampleHash: true,
+    logicalDatasetHash: false,
+    physicalArtifactHash: false,
+    maxStrength: 'STANDARD'
+  })
 });
 
 function asPlain(row) { return row ? { ...row } : row; }
@@ -52,7 +78,12 @@ export class SQLiteConnector {
   }
 
   manifest() {
-    return { name: 'sqlite', version: '1.0.0', capabilities: { ...CAPABILITIES } };
+    return {
+      name: 'sqlite',
+      version: '1.0.0',
+      capabilities: { ...CAPABILITIES },
+      capabilityProfile: structuredClone(CAPABILITY_PROFILE)
+    };
   }
 
   async validateConfig(config = this.config) {
