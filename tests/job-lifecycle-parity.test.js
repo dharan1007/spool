@@ -10,6 +10,7 @@ import { ConfigStore } from '../src/daemon/config-store.js';
 import { SQLiteJobStore } from '../src/daemon/sqlite-job-store.js';
 import { SharedMigrationRunner } from '../src/daemon/shared-runner.js';
 import { SpoolCommandService } from '../src/daemon/command-service.js';
+import { sha256Json } from '../src/platform/canonical-json.js';
 
 function registryWithP1Connectors() {
   const registry = new ConnectorRegistry();
@@ -35,6 +36,16 @@ function migrationInput() {
     verification: { checks: ['target_count', 'schema'] },
     risk: { level: 'low', approvals: [] }
   };
+}
+
+async function fingerprint(descriptor) {
+  return sha256Json({
+    domain: 'spool-connection-binding-v1',
+    name: descriptor.name,
+    type: descriptor.type,
+    config: descriptor.config ?? {},
+    secretRefs: descriptor.secretRefs ?? {}
+  });
 }
 
 async function fixture() {
@@ -91,12 +102,14 @@ test('SQLiteJobStore durably persists a secret-free managed execution context wi
 test('resume rejects named connection drift before opening a target connector', async () => {
   const value = await fixture();
   try {
+    const source = await value.configStore.getConnection('source');
+    const target = await value.configStore.getConnection('target');
     const job = await value.jobStore.create(value.plan, {
       executionContext: {
         schemaVersion: 1,
         plan: value.plan,
-        sourceConnection: { name: 'source', fingerprint: 'placeholder' },
-        targetConnection: { name: 'target', fingerprint: 'placeholder' }
+        sourceConnection: { name: 'source', fingerprint: await fingerprint(source) },
+        targetConnection: { name: 'target', fingerprint: await fingerprint(target) }
       }
     });
     await value.service.putConnection({
