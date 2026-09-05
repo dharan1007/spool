@@ -17,6 +17,8 @@ const COMMANDS = new Set([
   'test_connection',
   'create_plan',
   'run_migration',
+  'pause_job',
+  'resume_job',
   'inspect_job',
   'get_receipt'
 ]);
