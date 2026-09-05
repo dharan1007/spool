@@ -12,6 +12,26 @@ import { SharedMigrationRunner } from '../src/daemon/shared-runner.js';
 import { SpoolCommandService } from '../src/daemon/command-service.js';
 import { ExecutionController, ExecutionControlledJobStore } from '../src/daemon/execution-controller.js';
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+class BlockingSQLiteConnector extends SQLiteConnector {
+  constructor(config, barrier) {
+    super(config);
+    this.barrier = barrier;
+  }
+
+  async write(...args) {
+    this.barrier.started.resolve();
+    await this.barrier.release.promise;
+    return super.write(...args);
+  }
+}
+
 function input() {
   return {
     planRevision: 1,
@@ -30,9 +50,10 @@ async function fixture() {
   const stateDir = join(root, 'state');
   const targetDb = join(root, 'target.sqlite3');
   await writeFile(join(root, 'customers.jsonl'), `${JSON.stringify({ id: '1' })}\n`);
+  const barrier = { started: deferred(), release: deferred() };
   const registry = new ConnectorRegistry();
   registry.register('filesystem', config => new FilesystemConnector(config));
-  registry.register('sqlite', config => new SQLiteConnector(config));
+  registry.register('sqlite', config => new BlockingSQLiteConnector(config, barrier));
   const configStore = new ConfigStore({ stateDir });
   const jobStore = new SQLiteJobStore({ stateDir });
   const executionController = new ExecutionController();
@@ -47,7 +68,7 @@ async function fixture() {
     targetConnection: 'target',
     requirements: { restartResume: false, verificationStrength: 'STANDARD' }
   });
-  return { root, jobStore, executionController, service, plan };
+  return { root, jobStore, executionController, service, plan, barrier };
 }
 
 test('runMigration detach:true returns a durable managed job handle while the same controller owns execution', async () => {
@@ -62,6 +83,8 @@ test('runMigration detach:true returns a durable managed job handle while the sa
     assert.equal(started.receipt, null);
     assert.notEqual(started.job.state, 'COMPLETE');
     assert.equal(value.executionController.isActive(started.job.jobId), true);
+    await value.barrier.started.promise;
+    value.barrier.release.resolve();
     while (value.executionController.isActive(started.job.jobId)) {
       await new Promise(resolve => setTimeout(resolve, 5));
     }
@@ -69,6 +92,7 @@ test('runMigration detach:true returns a durable managed job handle while the sa
     assert.equal(complete.state, 'COMPLETE');
     assert.ok(complete.receiptId);
   } finally {
+    value.barrier.release.resolve();
     value.jobStore.close();
     await rm(value.root, { recursive: true, force: true });
   }
