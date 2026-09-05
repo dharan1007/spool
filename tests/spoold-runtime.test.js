@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, stat, access } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SQLiteJobStore } from '../src/daemon/sqlite-job-store.js';
@@ -26,6 +27,44 @@ async function command(descriptor, token, name, body = {}) {
       'content-type': 'application/json'
     },
     body: JSON.stringify(body)
+  });
+}
+
+function firstJsonLine(stream, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    const timer = setTimeout(() => cleanup(new Error('Timed out waiting for spoold descriptor')), timeoutMs);
+    const onData = chunk => {
+      buffer += chunk.toString('utf8');
+      const index = buffer.indexOf('\n');
+      if (index < 0) return;
+      const line = buffer.slice(0, index).trim();
+      try { cleanup(null, JSON.parse(line)); }
+      catch (error) { cleanup(error); }
+    };
+    const onError = error => cleanup(error);
+    const cleanup = (error, value) => {
+      clearTimeout(timer);
+      stream.off('data', onData);
+      stream.off('error', onError);
+      if (error) reject(error); else resolve(value);
+    };
+    stream.on('data', onData);
+    stream.on('error', onError);
+  });
+}
+
+function childExit(child, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Timed out waiting for spoold child exit')), timeoutMs);
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+    child.once('error', error => {
+      clearTimeout(timer);
+      reject(error);
+    });
   });
 }
 
@@ -110,6 +149,27 @@ test('runtime performs startup recovery before publishing the live daemon descri
   }
 });
 
+test('runtime enforces one live daemon per state directory and releases ownership on clean shutdown', async () => {
+  const stateDir = await tempStateDir();
+  const first = await createSpooldRuntime({ stateDir, port: 0 });
+  const second = await createSpooldRuntime({ stateDir, port: 0 });
+  try {
+    await first.start();
+    await assert.rejects(() => second.start(), /already running|lock/i);
+  } finally {
+    await second.close();
+    await first.close();
+  }
+
+  const third = await createSpooldRuntime({ stateDir, port: 0 });
+  try {
+    const descriptor = await third.start();
+    assert.equal(descriptor.protocolVersion, 'spoold-v1');
+  } finally {
+    await third.close();
+  }
+});
+
 test('runtime refuses non-loopback composition before writing live daemon state', async () => {
   const stateDir = await tempStateDir();
   await assert.rejects(
@@ -117,4 +177,37 @@ test('runtime refuses non-loopback composition before writing live daemon state'
     /loopback/i
   );
   await assert.rejects(() => access(join(stateDir, 'spoold.json')), error => error?.code === 'ENOENT');
+});
+
+test('daemon entrypoint starts from environment and removes live descriptor on SIGTERM', async () => {
+  const stateDir = await tempStateDir();
+  const child = spawn(process.execPath, ['src/daemon/main.js'], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      SPOOL_STATE_DIR: stateDir,
+      SPOOLD_HOST: '127.0.0.1',
+      SPOOLD_PORT: '0'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  try {
+    const announced = await firstJsonLine(child.stdout);
+    assert.equal(announced.protocolVersion, 'spoold-v1');
+    assert.equal(announced.host, '127.0.0.1');
+    assert.equal(Number.isInteger(announced.port), true);
+    const persisted = await readJson(join(stateDir, 'spoold.json'));
+    assert.equal(persisted.endpoint, announced.endpoint);
+
+    const exitPromise = childExit(child);
+    assert.equal(child.kill('SIGTERM'), true);
+    const exited = await exitPromise;
+    assert.equal(exited.code, 0);
+    assert.equal(exited.signal, null);
+    await assert.rejects(() => access(join(stateDir, 'spoold.json')), error => error?.code === 'ENOENT');
+    await access(join(stateDir, 'spoold-pairing.json'));
+  } finally {
+    if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL');
+  }
 });
