@@ -124,6 +124,16 @@ test('pauseJob waits through an in-flight target commit and returns only after a
     assert.deepEqual(paused.counts, { processedRows: 1, acceptedRows: 1, rejectedRows: 0 });
     assert.equal(value.executionController.isActive(started.job.jobId), false);
 
+    const verified = await value.service.verifyJob({ jobId: started.job.jobId });
+    assert.equal(verified.job.state, 'PAUSED');
+    assert.equal(verified.verification.ok, true);
+    assert.equal(verified.verification.status, 'PASS');
+    assert.equal(verified.verification.targetRows, 1);
+    assert.equal(value.executionController.isActive(started.job.jobId), false);
+    const verifiedJob = await value.service.inspectJob({ jobId: started.job.jobId });
+    assert.equal(verifiedJob.state, 'PAUSED');
+    assert.equal(verifiedJob.verification.ok, true);
+
     await assert.rejects(
       () => value.service.resumeJob({ jobId: started.job.jobId }),
       error => error?.code === 'RESUME_GUARANTEE_UNAVAILABLE'
