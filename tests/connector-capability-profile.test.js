@@ -105,7 +105,7 @@ test('connector validation returns the normalized profile alongside legacy boole
   assert.equal(manifest.capabilityProfile.version, CONNECTOR_CAPABILITY_PROFILE_VERSION);
 });
 
-test('filesystem and sqlite advertise conservative truthful P1 profiles', () => {
+test('filesystem stays conservative while sqlite advertises proven ledger-backed target recovery', () => {
   const filesystem = validateConnector(new FilesystemConnector({ root: '/tmp' })).capabilityProfile;
   assert.equal(filesystem.source.snapshot, 'none');
   assert.equal(filesystem.source.resume, 'unsupported');
@@ -118,6 +118,8 @@ test('filesystem and sqlite advertise conservative truthful P1 profiles', () => 
   assert.equal(sqlite.source.snapshot, 'none');
   assert.equal(sqlite.source.resume, 'unsupported');
   assert.equal(sqlite.target.atomicity, 'transaction');
-  assert.equal(sqlite.target.reconcileAfterCrash, false);
+  assert.equal(sqlite.target.commitEvidence, 'native_commit_id');
+  assert.equal(sqlite.target.reconcileAfterCrash, true);
+  assert.equal(sqlite.target.idempotency, 'batch_key');
   assert.notEqual(sqlite.verification.maxStrength, 'STRONG');
 });
