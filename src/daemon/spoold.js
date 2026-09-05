@@ -15,6 +15,8 @@ const COMMANDS = Object.freeze({
   test_connection: 'testConnection',
   create_plan: 'createPlan',
   run_migration: 'runMigration',
+  pause_job: 'pauseJob',
+  resume_job: 'resumeJob',
   inspect_job: 'inspectJob',
   get_receipt: 'getReceipt'
 });
