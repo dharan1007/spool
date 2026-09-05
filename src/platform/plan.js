@@ -1,8 +1,17 @@
-import { sha256Json } from './canonical-json.js';
+import { canonicalJson, sha256Json } from './canonical-json.js';
 import { validateConnectorRef } from './contracts.js';
 import { validateTargetSchema } from '../core/schema.js';
 import { compileMapping } from '../core/transforms.js';
 import { fail } from '../core/errors.js';
+
+export const PLAN_IDENTITY_VERSION = 'spool-plan-v1';
+
+function deepFreeze(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze(child, seen);
+  return Object.freeze(value);
+}
 
 function validateWriteStrategy(strategy) {
   if (!strategy || typeof strategy !== 'object' || Array.isArray(strategy)) {
@@ -24,6 +33,9 @@ function validateRisk(risk) {
 
 export function validateMigrationPlan(plan) {
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) fail('INVALID_PLAN', 'Migration plan must be an object');
+  if (plan.identityVersion !== undefined && plan.identityVersion !== PLAN_IDENTITY_VERSION) {
+    fail('UNSUPPORTED_PLAN_IDENTITY_VERSION', `Unsupported plan identity version ${plan.identityVersion}`);
+  }
   validateConnectorRef(plan.sourceRef);
   validateConnectorRef(plan.targetRef);
   validateTargetSchema(plan.targetSchema);
@@ -43,12 +55,19 @@ export function validateMigrationPlan(plan) {
 }
 
 export async function createMigrationPlan(input) {
+  canonicalJson(input);
   const identity = structuredClone(input);
   delete identity.createdAt;
   delete identity.planId;
+  identity.identityVersion = PLAN_IDENTITY_VERSION;
   validateMigrationPlan(identity);
-  const planId = await sha256Json(identity);
-  return Object.freeze({
+
+  const planId = await sha256Json({
+    domain: PLAN_IDENTITY_VERSION,
+    plan: identity
+  });
+
+  return deepFreeze({
     ...identity,
     planId,
     createdAt: input.createdAt ?? new Date().toISOString()
