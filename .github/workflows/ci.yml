@@ -21,4 +21,20 @@ jobs:
       - name: Install reproducibly
         run: npm ci --ignore-scripts
       - name: Run production release gate
-        run: npm run check
+        id: gate
+        shell: bash
+        run: |
+          set +e
+          npm run check > ci-output.txt 2>&1
+          status=$?
+          cat ci-output.txt
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+      - name: Upload release-gate diagnostic output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-a-release-gate-output
+          path: ci-output.txt
+          if-no-files-found: error
+          retention-days: 1
