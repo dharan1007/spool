@@ -3,58 +3,24 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fail } from '../core/errors.js';
 import { canonicalJson } from '../platform/canonical-json.js';
-
-const TRANSITIONS = Object.freeze({
-  PLANNED: new Set(['RUNNING', 'FAILED', 'ABORTED']),
-  RUNNING: new Set(['PAUSING', 'PAUSED', 'VERIFYING', 'FAILED', 'ABORTED']),
-  PAUSING: new Set(['PAUSED', 'FAILED', 'ABORTED']),
-  PAUSED: new Set(['RUNNING', 'FAILED', 'ABORTED']),
-  VERIFYING: new Set(['COMPLETE', 'FAILED', 'ABORTED']),
-  COMPLETE: new Set(),
-  FAILED: new Set(),
-  ABORTED: new Set()
-});
+import {
+  assertJobTransition,
+  safeDurableClone,
+  validateExecutionOwnership,
+  validateJobRecord
+} from '../platform/runtime-contracts.js';
 
 function clone(value) { return structuredClone(value); }
 function safeFileId(id) { return String(id).replaceAll(':', '_').replace(/[^A-Za-z0-9._-]/g, '_'); }
-
-function validateCounts(counts) {
-  if (!counts || typeof counts !== 'object') fail('INVALID_JOB_COUNTS', 'Job counts are required');
-  const values = [counts.processedRows, counts.acceptedRows, counts.rejectedRows];
-  if (values.some(value => !Number.isSafeInteger(value) || value < 0)) fail('INVALID_JOB_COUNTS', 'Job counts must be non-negative safe integers');
-  if (counts.acceptedRows + counts.rejectedRows !== counts.processedRows) {
-    fail('INVALID_JOB_COUNTS', 'acceptedRows + rejectedRows must equal processedRows');
-  }
+function sameCounts(a, b) {
+  return a?.processedRows === b?.processedRows && a?.acceptedRows === b?.acceptedRows && a?.rejectedRows === b?.rejectedRows;
 }
 
-function validateCheckpoint(job, checkpoint) {
-  if (checkpoint == null) return;
-  if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) fail('INVALID_CHECKPOINT', 'Checkpoint must be an object');
-  if (checkpoint.planId !== job.planId || checkpoint.planRevision !== job.planRevision) {
-    fail('CHECKPOINT_PLAN_MISMATCH', 'Checkpoint plan identity/revision does not match the job');
-  }
-  const values = [checkpoint.processedRows, checkpoint.acceptedRows, checkpoint.rejectedRows];
-  if (values.some(value => !Number.isSafeInteger(value) || value < 0)) fail('INVALID_CHECKPOINT', 'Checkpoint counters must be non-negative safe integers');
-  if (checkpoint.acceptedRows + checkpoint.rejectedRows !== checkpoint.processedRows) {
-    fail('INVALID_CHECKPOINT', 'Checkpoint acceptedRows + rejectedRows must equal processedRows');
-  }
-  if (checkpoint.processedRows < job.counts.processedRows) fail('CHECKPOINT_REGRESSION', 'Checkpoint may not move behind persisted job counts');
-}
-
-function validateRecord(previous, next) {
-  if (!next || typeof next !== 'object' || Array.isArray(next)) fail('INVALID_JOB_RECORD', 'Job updater must return a job record');
-  if (next.jobId !== previous.jobId || next.planId !== previous.planId || next.planRevision !== previous.planRevision) {
-    fail('JOB_IDENTITY_MUTATION', 'Job identity and plan identity are immutable');
-  }
-  if (!TRANSITIONS[next.state]) fail('INVALID_JOB_STATE', `Unknown job state ${next.state}`);
-  if (previous.state !== next.state && !TRANSITIONS[previous.state]?.has(next.state)) {
-    fail('INVALID_JOB_TRANSITION', `Cannot transition job from ${previous.state} to ${next.state}`);
-  }
-  validateCounts(next.counts);
-  validateCheckpoint(next, next.checkpoint);
-  if (next.state === 'COMPLETE' && next.verification?.ok !== true) {
-    fail('VERIFICATION_REQUIRED', 'A job cannot become COMPLETE before verification succeeds');
-  }
+function withLegacyDefaults(job) {
+  const normalized = clone(job);
+  if (!Number.isSafeInteger(normalized.stateVersion) || normalized.stateVersion < 0) normalized.stateVersion = 0;
+  if (!Number.isSafeInteger(normalized.executionEpoch) || normalized.executionEpoch < 0) normalized.executionEpoch = 0;
+  return normalized;
 }
 
 export class JobStore {
@@ -75,8 +41,9 @@ export class JobStore {
 
   async atomicWrite(file, value) {
     await this.ensureDirs();
+    const durable = safeDurableClone(value, 'job-store record');
     const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    await writeFile(temp, `${JSON.stringify(durable, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     await rename(temp, file);
   }
 
@@ -91,6 +58,8 @@ export class JobStore {
       planId: plan.planId,
       planRevision: plan.planRevision,
       state: 'PLANNED',
+      stateVersion: 0,
+      executionEpoch: 0,
       counts: { processedRows: 0, acceptedRows: 0, rejectedRows: 0 },
       checkpoint: null,
       verification: null,
@@ -101,14 +70,16 @@ export class JobStore {
       completedAt: null,
       updatedAt: now
     };
+    validateJobRecord(job);
     await this.atomicWrite(this.jobPath(job.jobId), job);
     return clone(job);
   }
 
   async load(jobId) {
     try {
-      const parsed = JSON.parse(await readFile(this.jobPath(jobId), 'utf8'));
+      const parsed = withLegacyDefaults(JSON.parse(await readFile(this.jobPath(jobId), 'utf8')));
       if (parsed?.jobId !== jobId) fail('JOB_IDENTITY_MISMATCH', 'Persisted job ID does not match requested job');
+      validateJobRecord(parsed);
       return parsed;
     } catch (error) {
       if (error?.code === 'ENOENT') fail('JOB_NOT_FOUND', `Job ${jobId} was not found`);
@@ -116,15 +87,32 @@ export class JobStore {
     }
   }
 
-  async update(jobId, updater) {
+  async update(jobId, updater, { expectedStateVersion, expectedExecutionEpoch } = {}) {
     if (typeof updater !== 'function') fail('INVALID_JOB_UPDATER', 'Job updater must be a function');
     const previous = await this.load(jobId);
+    if (expectedStateVersion !== undefined) {
+      if (!Number.isSafeInteger(expectedStateVersion) || expectedStateVersion < 0) fail('INVALID_STATE_VERSION', 'expectedStateVersion must be a non-negative safe integer');
+      if (previous.stateVersion !== expectedStateVersion) fail('STALE_STATE_VERSION', `Job ${jobId} state version has advanced`);
+    }
+    if (expectedExecutionEpoch !== undefined) validateExecutionOwnership(previous, expectedExecutionEpoch);
+
     const candidate = await updater(clone(previous));
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) fail('INVALID_JOB_RECORD', 'Job updater must return a job record');
     const next = clone(candidate);
+    next.stateVersion = previous.stateVersion + 1;
     next.updatedAt = new Date().toISOString();
+
+    if (next.checkpoint && sameCounts(next.counts, previous.counts) && !sameCounts(next.counts, next.checkpoint)) {
+      next.counts = {
+        processedRows: next.checkpoint.processedRows,
+        acceptedRows: next.checkpoint.acceptedRows,
+        rejectedRows: next.checkpoint.rejectedRows
+      };
+    }
+
     if (previous.state === 'PLANNED' && next.state === 'RUNNING' && !next.startedAt) next.startedAt = next.updatedAt;
     if (['COMPLETE', 'FAILED', 'ABORTED'].includes(next.state) && !next.completedAt) next.completedAt = next.updatedAt;
-    validateRecord(previous, next);
+    assertJobTransition(previous, next);
     await this.atomicWrite(this.jobPath(jobId), next);
     return clone(next);
   }
@@ -133,24 +121,29 @@ export class JobStore {
     await this.ensureDirs();
     const names = (await readdir(this.jobsDir)).filter(name => name.endsWith('.json')).sort();
     const jobs = [];
-    for (const name of names) jobs.push(JSON.parse(await readFile(join(this.jobsDir, name), 'utf8')));
+    for (const name of names) {
+      const parsed = withLegacyDefaults(JSON.parse(await readFile(join(this.jobsDir, name), 'utf8')));
+      validateJobRecord(parsed);
+      jobs.push(parsed);
+    }
     return jobs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   async saveReceipt(receipt) {
     if (!receipt?.receiptId || typeof receipt.receiptId !== 'string') fail('INVALID_RECEIPT', 'receiptId is required');
+    const durableReceipt = safeDurableClone(receipt, 'receipt');
     const file = this.receiptPath(receipt.receiptId);
     try {
       const existing = JSON.parse(await readFile(file, 'utf8'));
-      if (canonicalJson(existing) !== canonicalJson(receipt)) {
+      if (canonicalJson(existing) !== canonicalJson(durableReceipt)) {
         fail('RECEIPT_IMMUTABLE', `Receipt ${receipt.receiptId} is immutable`);
       }
       return clone(existing);
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
     }
-    await this.atomicWrite(file, receipt);
-    return clone(receipt);
+    await this.atomicWrite(file, durableReceipt);
+    return clone(durableReceipt);
   }
 
   async loadReceipt(receiptId) {
