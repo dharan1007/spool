@@ -2,6 +2,7 @@ import { access, mkdir, open, readFile, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fail } from '../core/errors.js';
 import { inferSchema } from '../core/schema.js';
+import { CONNECTOR_CAPABILITY_PROFILE_VERSION } from './contract.js';
 import { formatFromResource, readAllRows, readRowBatches, serializeRows, sha256File } from './file-formats.js';
 
 const CAPABILITIES = Object.freeze({
@@ -17,6 +18,31 @@ const CAPABILITIES = Object.freeze({
   checksum: true,
   pagination: true,
   rateLimitAware: false
+});
+
+const CAPABILITY_PROFILE = Object.freeze({
+  version: CONNECTOR_CAPABILITY_PROFILE_VERSION,
+  source: Object.freeze({
+    snapshot: 'none',
+    ordering: 'none',
+    resume: 'unsupported',
+    cursorKind: null
+  }),
+  target: Object.freeze({
+    atomicity: 'resource_replace',
+    commitEvidence: 'content_identity',
+    reconcileAfterCrash: false,
+    idempotency: 'resource_replace'
+  }),
+  verification: Object.freeze({
+    logicalCount: true,
+    schema: false,
+    keyCoverage: false,
+    sampleHash: false,
+    logicalDatasetHash: false,
+    physicalArtifactHash: true,
+    maxStrength: 'STANDARD'
+  })
 });
 
 function resolveWithinRoot(root, resource) {
@@ -52,7 +78,12 @@ export class FilesystemConnector {
   }
 
   manifest() {
-    return { name: 'filesystem', version: '1.0.0', capabilities: { ...CAPABILITIES } };
+    return {
+      name: 'filesystem',
+      version: '1.0.0',
+      capabilities: { ...CAPABILITIES },
+      capabilityProfile: structuredClone(CAPABILITY_PROFILE)
+    };
   }
 
   async validateConfig(config = this.config) {
