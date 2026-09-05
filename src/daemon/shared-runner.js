@@ -108,6 +108,7 @@ export class SharedMigrationRunner {
   constructor({ registry, store, ownerId, leaseMs = DEFAULT_LEASE_MS } = {}) {
     validateRunnerDependency(registry, 'open', 'registry');
     validateRunnerDependency(store, 'acquireExecution', 'store');
+    validateRunnerDependency(store, 'renewExecution', 'store');
     validateRunnerDependency(store, 'commitCheckpoint', 'store');
     validateRunnerDependency(store, 'finalizeVerifiedJob', 'store');
     validateOwnerId(ownerId);
@@ -151,6 +152,15 @@ export class SharedMigrationRunner {
     fail('RECOVERY_REQUIRED', `Job ${job.jobId} requires reconciliation before execution can continue`);
   }
 
+  async renewLease(job, epoch) {
+    return this.store.renewExecution(job.jobId, {
+      expectedStateVersion: job.stateVersion,
+      expectedExecutionEpoch: epoch,
+      ownerId: this.ownerId,
+      leaseMs: this.leaseMs
+    });
+  }
+
   async run({ plan, sourceConfig = {}, targetConfig = {}, jobId } = {}) {
     validateMigrationPlan(plan);
     if (!plan.connectorBinding) {
@@ -189,7 +199,17 @@ export class SharedMigrationRunner {
       });
       const epoch = job.executionEpoch;
 
-      if (job.state === 'PLANNED' || job.state === 'PAUSED' || job.state === 'RECOVERING') {
+      if (job.state === 'RECOVERING') {
+        await this.enterRecoveryRequired(job, { code: 'RECONCILIATION_REQUIRED' }, 'reconciliation_required', {
+          sourceConnector: plan.sourceRef.connector,
+          sourceResource: plan.sourceRef.resource,
+          targetConnector: plan.targetRef.connector,
+          targetResource: plan.targetRef.resource,
+          reason: 'execution ownership changed without connector-proven commit reconciliation'
+        });
+      }
+
+      if (job.state === 'PLANNED' || job.state === 'PAUSED') {
         job = await this.store.update(
           job.jobId,
           current => ({ ...current, state: 'RUNNING' }),
@@ -215,6 +235,11 @@ export class SharedMigrationRunner {
 
         const transformed = this.engine.run(batch.rows, plan.mapping, plan.planRevision, plan.targetSchema);
         const payloadHash = await sha256Json(transformed.output);
+
+        // Reassert durable ownership immediately before every target mutation. If the lease
+        // expired while reading or transforming, execution stops before creating ambiguity.
+        job = await this.renewLease(job, epoch);
+
         let ack;
         try {
           ack = await target.write(
@@ -280,6 +305,10 @@ export class SharedMigrationRunner {
         current => ({ ...current, state: 'VERIFYING' }),
         { expectedStateVersion: job.stateVersion, expectedExecutionEpoch: epoch }
       );
+
+      // Verification may be long-running too; renew before entering connector work so an
+      // expired owner cannot persist verification evidence or finalize a receipt.
+      job = await this.renewLease(job, epoch);
 
       let verificationResult;
       try {
