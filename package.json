@@ -12,6 +12,7 @@
     "benchmark": "node benchmarks/run.js",
     "check": "npm test && npm run build && npm run benchmark && node scripts/static-check.js",
     "serve": "python3 -m http.server 8765",
+    "spoold": "node src/daemon/main.js",
     "build": "node scripts/build-dist.js"
   },
   "engines": {
