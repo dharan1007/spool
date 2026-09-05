@@ -82,7 +82,7 @@ function requireExecutionContext(job) {
 }
 
 export class SpoolCommandService {
-  constructor({ configStore, registry, jobStore, runner } = {}) {
+  constructor({ configStore, registry, jobStore, runner, executionController = null } = {}) {
     requireMethod(configStore, 'putConnection', 'configStore');
     requireMethod(configStore, 'getConnection', 'configStore');
     requireMethod(configStore, 'listConnections', 'configStore');
@@ -94,10 +94,16 @@ export class SpoolCommandService {
     requireMethod(jobStore, 'load', 'jobStore');
     requireMethod(jobStore, 'loadReceipt', 'jobStore');
     requireMethod(runner, 'run', 'runner');
+    if (executionController != null) {
+      requireMethod(executionController, 'start', 'executionController');
+      requireMethod(executionController, 'requestPause', 'executionController');
+      requireMethod(executionController, 'isActive', 'executionController');
+    }
     this.configStore = configStore;
     this.registry = registry;
     this.jobStore = jobStore;
     this.runner = runner;
+    this.executionController = executionController;
   }
 
   async #connection(name, expectedType = null) {
@@ -154,6 +160,30 @@ export class SpoolCommandService {
       fail('CONNECTION_BINDING_DRIFT', 'Target connection descriptor changed after the job was planned');
     }
     return { job, context, source, target };
+  }
+
+  async #executeManaged({ plan, source, target, jobId, detach = false }) {
+    const run = () => this.runner.run({
+      plan,
+      sourceConfig: structuredClone(source.config),
+      targetConfig: structuredClone(target.config),
+      jobId
+    });
+
+    if (!this.executionController) {
+      if (detach) fail('DETACHED_EXECUTION_UNAVAILABLE', 'Detached migration requires a managed execution controller');
+      return run();
+    }
+
+    const task = this.executionController.start(jobId, run);
+    if (detach) {
+      return {
+        job: await this.jobStore.load(jobId),
+        receipt: null,
+        detached: true
+      };
+    }
+    return task;
   }
 
   async listConnectors() {
@@ -233,16 +263,35 @@ export class SpoolCommandService {
       const managed = await this.#bindManagedJob(request.plan, source, target);
       jobId = managed.jobId;
     }
-    const result = await this.runner.run({
+    const result = await this.#executeManaged({
       plan: request.plan,
-      sourceConfig: structuredClone(source.config),
-      targetConfig: structuredClone(target.config),
-      jobId
+      source,
+      target,
+      jobId,
+      detach: request.detach === true
     });
     return {
       job: projectPublicJob(result.job),
-      receipt: projectPublicReceipt(result.receipt)
+      receipt: result.receipt ? projectPublicReceipt(result.receipt) : null
     };
+  }
+
+  async pauseJob(request = {}) {
+    requireRequest(request);
+    if (typeof request.jobId !== 'string' || !request.jobId) fail('INVALID_JOB_ID', 'jobId is required');
+    const job = await this.jobStore.load(request.jobId);
+    if (job.state === 'PAUSED') return projectPublicJob(job);
+    if (!this.executionController) fail('PAUSE_UNAVAILABLE', 'Pause requires a managed execution controller');
+    if (job.state === 'VERIFYING') fail('PAUSE_TOO_LATE', 'Job has already entered verification and cannot be paused');
+    if (!['PLANNED', 'RUNNING', 'PAUSING'].includes(job.state)) {
+      fail('INVALID_JOB_TRANSITION', `Cannot pause job from ${job.state}`);
+    }
+    if (!this.executionController.isActive(job.jobId)) {
+      fail('JOB_EXECUTION_NOT_ACTIVE', `Job ${job.jobId} has no active execution to pause`);
+    }
+    const result = await this.executionController.requestPause(job.jobId);
+    if (result?.paused === true && result.job?.state === 'PAUSED') return projectPublicJob(result.job);
+    fail('PAUSE_TOO_LATE', `Job ${job.jobId} crossed the safe pause boundary before the request was acknowledged`);
   }
 
   async resumeJob(request = {}) {
@@ -256,11 +305,15 @@ export class SpoolCommandService {
     if (job.state !== 'PAUSED' && job.state !== 'RECOVERY_REQUIRED') {
       fail('INVALID_JOB_TRANSITION', `Cannot resume job from ${job.state}`);
     }
-    const result = await this.runner.run({
+    if (context.plan.connectorBinding?.requirements?.restartResume !== true) {
+      fail('RESUME_GUARANTEE_UNAVAILABLE', 'This plan did not prove restart-safe source and target resume guarantees');
+    }
+    const result = await this.#executeManaged({
       plan: context.plan,
-      sourceConfig: structuredClone(source.config),
-      targetConfig: structuredClone(target.config),
-      jobId: job.jobId
+      source,
+      target,
+      jobId: job.jobId,
+      detach: request.detach === true
     });
     return {
       job: projectPublicJob(result.job),
