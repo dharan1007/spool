@@ -34,11 +34,13 @@ test('self-hosted runtime generates durable private pairing credentials and a to
   const runtime = await createSpooldRuntime({ stateDir, port: 0 });
   const descriptorPath = join(stateDir, 'spoold.json');
   const pairingPath = join(stateDir, 'spoold-pairing.json');
+  let firstToken;
 
   try {
     const first = await runtime.start();
     const descriptor = await readJson(descriptorPath);
     const pairing = await readJson(pairingPath);
+    firstToken = pairing.token;
 
     assert.equal(descriptor.schemaVersion, 1);
     assert.equal(descriptor.protocolVersion, 'spoold-v1');
@@ -72,8 +74,7 @@ test('self-hosted runtime generates durable private pairing credentials and a to
   try {
     await secondRuntime.start();
     const secondPairing = await readJson(pairingPath);
-    const originalPairing = await readJson(pairingPath);
-    assert.equal(secondPairing.token, originalPairing.token);
+    assert.equal(secondPairing.token, firstToken);
   } finally {
     await secondRuntime.close();
   }
