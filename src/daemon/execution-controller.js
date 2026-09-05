@@ -34,26 +34,17 @@ export class ExecutionController {
     if (typeof taskFactory !== 'function') fail('INVALID_EXECUTION_TASK', 'Execution task factory must be a function');
     if (this.active.has(jobId)) fail('JOB_EXECUTION_ACTIVE', `Job ${jobId} already has an active execution`);
 
-    const record = {
-      jobId,
-      executionEpoch: null,
-      pauseRequested: false,
-      promise: null
-    };
+    const record = { jobId, executionEpoch: null, pauseRequested: false, promise: null };
     this.active.set(jobId, record);
     record.promise = Promise.resolve()
       .then(() => taskFactory())
       .catch(error => {
-        if (error instanceof ExecutionPausedSignal) {
-          return { job: error.job, receipt: null, paused: true };
-        }
+        if (error instanceof ExecutionPausedSignal) return { job: error.job, receipt: null, paused: true };
         throw error;
       })
       .finally(() => {
         if (this.active.get(jobId) === record) this.active.delete(jobId);
       });
-    // Detached command callers may intentionally not await immediately. Keep the
-    // rejection observed here while preserving the original promise for consumers.
     record.promise.catch(() => {});
     return record.promise;
   }
@@ -92,6 +83,15 @@ export class ExecutionController {
   isActive(jobId) {
     return this.active.has(requireJobId(jobId));
   }
+
+  activeJobIds() {
+    return [...this.active.keys()];
+  }
+
+  async pauseAll() {
+    const jobs = this.activeJobIds();
+    return Promise.allSettled(jobs.map(jobId => this.requestPause(jobId)));
+  }
 }
 
 export class ExecutionControlledJobStore {
@@ -123,23 +123,12 @@ export class ExecutionControlledJobStore {
     let pausing = await this.store.update(
       job.jobId,
       current => ({ ...current, state: 'PAUSING' }),
-      {
-        expectedStateVersion: options.expectedStateVersion ?? job.stateVersion,
-        expectedExecutionEpoch: epoch
-      }
+      { expectedStateVersion: options.expectedStateVersion ?? job.stateVersion, expectedExecutionEpoch: epoch }
     );
     pausing = await this.store.update(
       job.jobId,
-      current => ({
-        ...current,
-        state: 'PAUSED',
-        executionOwner: null,
-        executionLeaseExpiresAt: null
-      }),
-      {
-        expectedStateVersion: pausing.stateVersion,
-        expectedExecutionEpoch: epoch
-      }
+      current => ({ ...current, state: 'PAUSED', executionOwner: null, executionLeaseExpiresAt: null }),
+      { expectedStateVersion: pausing.stateVersion, expectedExecutionEpoch: epoch }
     );
     throw new ExecutionPausedSignal(pausing);
   }
@@ -165,10 +154,12 @@ export class ExecutionControlledJobStore {
     const epoch = requireEpoch(options.expectedExecutionEpoch);
     if (this.controller.shouldPause(jobId, epoch)) {
       const current = await this.store.load(jobId);
-      return this.#pauseAtBoundary(current, {
-        expectedStateVersion: options.expectedStateVersion,
-        expectedExecutionEpoch: epoch
-      });
+      if (current.state === 'RUNNING' && current.pendingBatch == null) {
+        return this.#pauseAtBoundary(current, {
+          expectedStateVersion: options.expectedStateVersion,
+          expectedExecutionEpoch: epoch
+        });
+      }
     }
     return this.store.renewExecution(jobId, options);
   }
