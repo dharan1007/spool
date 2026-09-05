@@ -49,7 +49,10 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'spool-command-control-'));
   const stateDir = join(root, 'state');
   const targetDb = join(root, 'target.sqlite3');
-  await writeFile(join(root, 'customers.jsonl'), `${JSON.stringify({ id: '1' })}\n`);
+  await writeFile(join(root, 'customers.jsonl'), [
+    JSON.stringify({ id: '1' }),
+    JSON.stringify({ id: '2' })
+  ].join('\n') + '\n');
   const barrier = { started: deferred(), release: deferred() };
   const registry = new ConnectorRegistry();
   registry.register('filesystem', config => new FilesystemConnector(config));
@@ -69,6 +72,13 @@ async function fixture() {
     requirements: { restartResume: false, verificationStrength: 'STANDARD' }
   });
   return { root, jobStore, executionController, service, plan, barrier };
+}
+
+async function closeFixture(value) {
+  value.barrier.release.resolve();
+  if (value.executionController.activeJobIds().length) await value.executionController.pauseAll();
+  value.jobStore.close();
+  await rm(value.root, { recursive: true, force: true });
 }
 
 test('runMigration detach:true returns a durable managed job handle while the same controller owns execution', async () => {
@@ -92,8 +102,36 @@ test('runMigration detach:true returns a durable managed job handle while the sa
     assert.equal(complete.state, 'COMPLETE');
     assert.ok(complete.receiptId);
   } finally {
+    await closeFixture(value);
+  }
+});
+
+test('pauseJob waits through an in-flight target commit and returns only after a durable PAUSED boundary', async () => {
+  const value = await fixture();
+  try {
+    const started = await value.service.runMigration({
+      plan: value.plan,
+      sourceConnection: 'source',
+      targetConnection: 'target',
+      detach: true
+    });
+    await value.barrier.started.promise;
+    const pausePromise = value.service.pauseJob({ jobId: started.job.jobId });
+    assert.equal(value.executionController.isActive(started.job.jobId), true);
     value.barrier.release.resolve();
-    value.jobStore.close();
-    await rm(value.root, { recursive: true, force: true });
+    const paused = await pausePromise;
+    assert.equal(paused.state, 'PAUSED');
+    assert.deepEqual(paused.counts, { processedRows: 1, acceptedRows: 1, rejectedRows: 0 });
+    assert.equal(value.executionController.isActive(started.job.jobId), false);
+
+    await assert.rejects(
+      () => value.service.resumeJob({ jobId: started.job.jobId }),
+      error => error?.code === 'RESUME_GUARANTEE_UNAVAILABLE'
+    );
+    const stillPaused = await value.service.inspectJob({ jobId: started.job.jobId });
+    assert.equal(stillPaused.state, 'PAUSED');
+    assert.deepEqual(stillPaused.counts, paused.counts);
+  } finally {
+    await closeFixture(value);
   }
 });
