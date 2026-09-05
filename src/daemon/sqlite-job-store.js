@@ -323,6 +323,49 @@ export class SQLiteJobStore {
     }));
   }
 
+  async renewExecution(jobId, {
+    expectedStateVersion,
+    expectedExecutionEpoch,
+    ownerId,
+    leaseMs = 30_000
+  } = {}) {
+    validateExpectedStateVersion(expectedStateVersion);
+    validateOwner(ownerId);
+    validateLeaseMs(leaseMs);
+
+    return clone(this.transaction(() => {
+      const previous = this.loadLocked(jobId);
+      if (expectedStateVersion !== undefined && previous.stateVersion !== expectedStateVersion) {
+        fail('STALE_STATE_VERSION', `Job ${jobId} state version has advanced`);
+      }
+      if (expectedExecutionEpoch === undefined) {
+        fail('INVALID_EXECUTION_EPOCH', 'expectedExecutionEpoch is required to renew execution ownership');
+      }
+      validateExecutionOwnership(previous, expectedExecutionEpoch);
+      if (previous.executionOwner !== ownerId) {
+        fail('STALE_EXECUTION_OWNER', `Execution owner ${ownerId} no longer owns job ${jobId}`);
+      }
+      if (['COMPLETE', 'FAILED', 'ABORTED', 'RECOVERY_REQUIRED'].includes(previous.state)) {
+        fail('INVALID_EXECUTION_LEASE', `Execution lease cannot be renewed while job ${jobId} is ${previous.state}`);
+      }
+
+      const nowMs = Date.now();
+      const leaseExpiryMs = previous.executionLeaseExpiresAt ? Date.parse(previous.executionLeaseExpiresAt) : Number.NaN;
+      if (!Number.isFinite(leaseExpiryMs) || leaseExpiryMs <= nowMs) {
+        fail('EXECUTION_LEASE_EXPIRED', `Execution lease for job ${jobId} has expired`);
+      }
+
+      const next = {
+        ...previous,
+        stateVersion: previous.stateVersion + 1,
+        executionLeaseExpiresAt: new Date(nowMs + leaseMs).toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      assertJobTransition(previous, next);
+      return this.writeJobLocked(previous, next);
+    }));
+  }
+
   async releaseExecution(jobId, { expectedStateVersion, expectedExecutionEpoch } = {}) {
     return clone(this.transaction(() => this.mutateLocked(
       jobId,
