@@ -91,13 +91,15 @@ export function validateJobRecord(job) {
 
 export function assertJobTransition(previous, next) {
   validateJobRecord(previous);
-  validateJobRecord(next);
+  if (!next || typeof next !== 'object' || Array.isArray(next)) fail('INVALID_JOB_RECORD', 'Job record must be an object');
   if (next.jobId !== previous.jobId || next.planId !== previous.planId || next.planRevision !== previous.planRevision) {
     fail('JOB_IDENTITY_MUTATION', 'Job identity and plan identity are immutable');
   }
+  if (!JOB_STATES.has(next.state)) fail('INVALID_JOB_STATE', `Unknown job state ${next.state}`);
   if (previous.state !== next.state && !TRANSITIONS[previous.state]?.has(next.state)) {
     fail('INVALID_JOB_TRANSITION', `Cannot transition job from ${previous.state} to ${next.state}`);
   }
+  validateJobRecord(next);
   if (next.stateVersion !== previous.stateVersion + 1) {
     fail('INVALID_STATE_VERSION', 'Every persisted job mutation must advance stateVersion exactly once');
   }
