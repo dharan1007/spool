@@ -1,10 +1,12 @@
 import { fail } from '../core/errors.js';
+import { sha256Json } from '../platform/canonical-json.js';
 import { createCapabilityBoundMigrationPlan, validateMigrationPlan } from '../platform/plan.js';
 import { projectPublicJob, projectPublicReceipt } from '../platform/public-dto.js';
 import { redact } from '../platform/redact.js';
 import { safeDurableClone } from '../platform/runtime-contracts.js';
 
 const CONNECTION_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+const CONNECTION_BINDING_VERSION = 1;
 
 function requireMethod(value, method, label) {
   if (!value || typeof value[method] !== 'function') {
@@ -45,6 +47,40 @@ function projectHealth(health) {
   return safeDurableClone(redacted, 'public connector health');
 }
 
+async function connectionFingerprint(descriptor) {
+  return sha256Json({
+    domain: 'spool-connection-binding-v1',
+    name: descriptor.name,
+    type: descriptor.type,
+    config: descriptor.config ?? {},
+    secretRefs: descriptor.secretRefs ?? {}
+  });
+}
+
+function requireExecutionContext(job) {
+  const context = job?.executionContext;
+  if (!context || typeof context !== 'object' || Array.isArray(context) || context.schemaVersion !== CONNECTION_BINDING_VERSION) {
+    fail('JOB_EXECUTION_CONTEXT_REQUIRED', `Job ${job?.jobId ?? ''} has no resumable execution context`.trim());
+  }
+  if (!context.plan || typeof context.plan !== 'object' || Array.isArray(context.plan)) {
+    fail('JOB_EXECUTION_CONTEXT_INVALID', 'Managed execution context requires the immutable migration plan');
+  }
+  validateMigrationPlan(context.plan);
+  if (context.plan.planId !== job.planId || context.plan.planRevision !== job.planRevision) {
+    fail('JOB_EXECUTION_CONTEXT_INVALID', 'Managed execution context plan identity does not match the job');
+  }
+  for (const [role, connector] of [['source', context.sourceConnection], ['target', context.targetConnection]]) {
+    if (!connector || typeof connector !== 'object' || Array.isArray(connector)) {
+      fail('JOB_EXECUTION_CONTEXT_INVALID', `Managed execution context requires ${role} connection binding`);
+    }
+    requireConnectionName(connector.name, `${role} connection`);
+    if (typeof connector.fingerprint !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(connector.fingerprint)) {
+      fail('JOB_EXECUTION_CONTEXT_INVALID', `${role} connection fingerprint is invalid`);
+    }
+  }
+  return safeDurableClone(context, 'managed execution context');
+}
+
 export class SpoolCommandService {
   constructor({ configStore, registry, jobStore, runner } = {}) {
     requireMethod(configStore, 'putConnection', 'configStore');
@@ -53,6 +89,8 @@ export class SpoolCommandService {
     requireMethod(registry, 'list', 'registry');
     requireMethod(registry, 'manifest', 'registry');
     requireMethod(registry, 'open', 'registry');
+    requireMethod(jobStore, 'create', 'jobStore');
+    requireMethod(jobStore, 'update', 'jobStore');
     requireMethod(jobStore, 'load', 'jobStore');
     requireMethod(jobStore, 'loadReceipt', 'jobStore');
     requireMethod(runner, 'run', 'runner');
@@ -70,6 +108,52 @@ export class SpoolCommandService {
       fail('CONNECTION_TYPE_MISMATCH', `Connection ${validatedName} type does not match required connector`);
     }
     return descriptor;
+  }
+
+  async #executionContext(plan, source, target) {
+    return safeDurableClone({
+      schemaVersion: CONNECTION_BINDING_VERSION,
+      plan,
+      sourceConnection: {
+        name: source.name,
+        fingerprint: await connectionFingerprint(source)
+      },
+      targetConnection: {
+        name: target.name,
+        fingerprint: await connectionFingerprint(target)
+      }
+    }, 'managed execution context');
+  }
+
+  async #bindManagedJob(plan, source, target) {
+    const executionContext = await this.#executionContext(plan, source, target);
+    const created = await this.jobStore.create(plan);
+    return this.jobStore.update(
+      created.jobId,
+      current => ({ ...current, executionContext }),
+      {
+        expectedStateVersion: created.stateVersion,
+        expectedExecutionEpoch: created.executionEpoch
+      }
+    );
+  }
+
+  async #resolveManagedJob(jobId) {
+    const job = await this.jobStore.load(jobId);
+    const context = requireExecutionContext(job);
+    const source = await this.#connection(context.sourceConnection.name, context.plan.sourceRef.connector);
+    const target = await this.#connection(context.targetConnection.name, context.plan.targetRef.connector);
+    const [sourceFingerprint, targetFingerprint] = await Promise.all([
+      connectionFingerprint(source),
+      connectionFingerprint(target)
+    ]);
+    if (sourceFingerprint !== context.sourceConnection.fingerprint) {
+      fail('CONNECTION_BINDING_DRIFT', 'Source connection descriptor changed after the job was planned');
+    }
+    if (targetFingerprint !== context.targetConnection.fingerprint) {
+      fail('CONNECTION_BINDING_DRIFT', 'Target connection descriptor changed after the job was planned');
+    }
+    return { job, context, source, target };
   }
 
   async listConnectors() {
@@ -144,15 +228,43 @@ export class SpoolCommandService {
     const targetName = requireConnectionName(request.targetConnection, 'target connection');
     const source = await this.#connection(sourceName, request.plan.sourceRef.connector);
     const target = await this.#connection(targetName, request.plan.targetRef.connector);
+    let jobId = request.jobId;
+    if (jobId == null) {
+      const managed = await this.#bindManagedJob(request.plan, source, target);
+      jobId = managed.jobId;
+    }
     const result = await this.runner.run({
       plan: request.plan,
       sourceConfig: structuredClone(source.config),
       targetConfig: structuredClone(target.config),
-      jobId: request.jobId
+      jobId
     });
     return {
       job: projectPublicJob(result.job),
       receipt: projectPublicReceipt(result.receipt)
+    };
+  }
+
+  async resumeJob(request = {}) {
+    requireRequest(request);
+    if (typeof request.jobId !== 'string' || !request.jobId) fail('INVALID_JOB_ID', 'jobId is required');
+    const { job, context, source, target } = await this.#resolveManagedJob(request.jobId);
+    if (job.state === 'COMPLETE') {
+      const receipt = await this.jobStore.loadReceipt(job.receiptId);
+      return { job: projectPublicJob(job), receipt: projectPublicReceipt(receipt) };
+    }
+    if (job.state !== 'PAUSED' && job.state !== 'RECOVERY_REQUIRED') {
+      fail('INVALID_JOB_TRANSITION', `Cannot resume job from ${job.state}`);
+    }
+    const result = await this.runner.run({
+      plan: context.plan,
+      sourceConfig: structuredClone(source.config),
+      targetConfig: structuredClone(target.config),
+      jobId: job.jobId
+    });
+    return {
+      job: projectPublicJob(result.job),
+      receipt: result.receipt ? projectPublicReceipt(result.receipt) : null
     };
   }
 
