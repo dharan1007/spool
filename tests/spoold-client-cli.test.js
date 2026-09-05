@@ -155,3 +155,10 @@ test('CLI rejects unknown options without exposing daemon credentials', async ()
   assert.equal(output.error.code, 'CLI_USAGE_ERROR');
   assert.doesNotMatch(result.stderr, /should-never-be-accepted/);
 });
+
+test('package exposes the spool CLI without replacing the spoold daemon entrypoint', async () => {
+  const pkg = await readJson(join(process.cwd(), 'package.json'));
+  assert.equal(pkg.scripts.spoold, 'node src/daemon/main.js');
+  assert.equal(pkg.scripts.spool, 'node src/cli/main.js');
+  assert.equal(pkg.bin.spool, 'src/cli/main.js');
+});
