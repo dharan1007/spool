@@ -84,7 +84,7 @@ test('resume compatibility accepts exact connector contracts and rejects version
   assert.equal(assertPlanConnectorCompatibility(plan, connectorSet), true);
 
   const versionDrift = structuredClone(connectorSet.targetManifest);
-  versionDrift.version = '1.1.0';
+  versionDrift.version = '9.9.9';
   assert.throws(
     () => assertPlanConnectorCompatibility(plan, { sourceManifest: connectorSet.sourceManifest, targetManifest: versionDrift }),
     /drift|compatib|version/i
