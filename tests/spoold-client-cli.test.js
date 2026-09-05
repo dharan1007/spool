@@ -54,6 +54,25 @@ test('spoold client discovers live descriptor and private pairing credential the
   }
 });
 
+test('spoold client accepts lifecycle commands and preserves daemon rejection codes', async () => {
+  const stateDir = await tempStateDir();
+  const runtime = await createSpooldRuntime({ stateDir, port: 0 });
+  try {
+    await runtime.start();
+    const client = await SpooldClient.fromStateDir({ stateDir });
+    await assert.rejects(
+      () => client.command('pause_job', { jobId: 'job_missing' }),
+      error => error?.code === 'JOB_NOT_FOUND'
+    );
+    await assert.rejects(
+      () => client.command('resume_job', { jobId: 'job_missing' }),
+      error => error?.code === 'JOB_NOT_FOUND'
+    );
+  } finally {
+    await runtime.close();
+  }
+});
+
 test('spoold discovery rejects protocol drift before opening a command connection', async () => {
   const stateDir = await tempStateDir();
   const runtime = await createSpooldRuntime({ stateDir, port: 0 });
@@ -117,6 +136,26 @@ test('CLI is a thin spoold client with machine-readable success output', async (
     assert.equal(output.ok, true);
     assert.equal(output.command, 'list_connectors');
     assert.deepEqual(output.result.map(item => item.name), ['filesystem', 'sqlite']);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('CLI recognizes lifecycle commands and reports remote command failures rather than usage errors', async () => {
+  const stateDir = await tempStateDir();
+  const runtime = await createSpooldRuntime({ stateDir, port: 0 });
+  try {
+    await runtime.start();
+    for (const command of ['pause_job', 'resume_job']) {
+      const result = await runCli([command, '--state-dir', stateDir, '--stdin'], {
+        stdin: JSON.stringify({ jobId: 'job_missing' })
+      });
+      assert.equal(result.code, 4);
+      const output = JSON.parse(result.stderr);
+      assert.equal(output.ok, false);
+      assert.equal(output.error.code, 'JOB_NOT_FOUND');
+      assert.notEqual(output.error.code, 'CLI_USAGE_ERROR');
+    }
   } finally {
     await runtime.close();
   }
