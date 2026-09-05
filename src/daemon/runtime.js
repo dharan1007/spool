@@ -7,6 +7,7 @@ import { ConnectorRegistry } from '../connectors/registry.js';
 import { SQLiteConnector } from '../connectors/sqlite.js';
 import { SpoolCommandService } from './command-service.js';
 import { ConfigStore } from './config-store.js';
+import { ExecutionController, ExecutionControlledJobStore } from './execution-controller.js';
 import { SharedMigrationRunner } from './shared-runner.js';
 import { SpooldHost } from './spoold.js';
 import { SQLiteJobStore } from './sqlite-job-store.js';
@@ -41,11 +42,8 @@ function validatePairing(value) {
 }
 
 async function removeIfExists(path) {
-  try {
-    await unlink(path);
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-  }
+  try { await unlink(path); }
+  catch (error) { if (error?.code !== 'ENOENT') throw error; }
 }
 
 async function atomicWriteJson(stateDir, filename, value) {
@@ -76,21 +74,15 @@ async function loadOrCreatePairing(stateDir) {
     }
   }
 
-  const pairing = Object.freeze({
-    schemaVersion: 1,
-    instanceId: randomUUID(),
-    token: randomBytes(32).toString('hex')
-  });
+  const pairing = Object.freeze({ schemaVersion: 1, instanceId: randomUUID(), token: randomBytes(32).toString('hex') });
   await atomicWriteJson(stateDir, PAIRING_FILE, pairing);
   return pairing;
 }
 
 function processIsAlive(pid) {
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) {
     if (error?.code === 'EPERM') return true;
     if (error?.code === 'ESRCH') return false;
     throw error;
@@ -99,9 +91,8 @@ function processIsAlive(pid) {
 
 async function readLock(path) {
   let value;
-  try {
-    value = JSON.parse(await readFile(path, 'utf8'));
-  } catch (error) {
+  try { value = JSON.parse(await readFile(path, 'utf8')); }
+  catch (error) {
     if (error?.code === 'ENOENT') return null;
     if (error instanceof SyntaxError) fail('SPOOLD_LOCK_CORRUPT', 'spoold lock file is not valid JSON');
     throw error;
@@ -117,12 +108,7 @@ async function acquireStateLock(stateDir, ownerId) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const handle = await open(path, 'wx', 0o600);
-      const record = {
-        schemaVersion: 1,
-        pid: process.pid,
-        ownerId,
-        createdAt: new Date().toISOString()
-      };
+      const record = { schemaVersion: 1, pid: process.pid, ownerId, createdAt: new Date().toISOString() };
       try {
         await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, 'utf8');
         await handle.sync();
@@ -136,9 +122,7 @@ async function acquireStateLock(stateDir, ownerId) {
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
       const existing = await readLock(path);
-      if (existing && processIsAlive(existing.pid)) {
-        fail('SPOOLD_ALREADY_RUNNING', `spoold state directory is already owned by process ${existing.pid}`);
-      }
+      if (existing && processIsAlive(existing.pid)) fail('SPOOLD_ALREADY_RUNNING', `spoold state directory is already owned by process ${existing.pid}`);
       await removeIfExists(path);
     }
   }
@@ -152,9 +136,7 @@ async function releaseStateLock(lock) {
     if (error?.code === 'ENOENT') return null;
     throw error;
   });
-  if (existing && existing.ownerId === lock.record.ownerId && existing.pid === lock.record.pid) {
-    await removeIfExists(lock.path);
-  }
+  if (existing && existing.ownerId === lock.record.ownerId && existing.pid === lock.record.pid) await removeIfExists(lock.path);
 }
 
 function createRegistry() {
@@ -165,7 +147,7 @@ function createRegistry() {
 }
 
 export class SpooldRuntime {
-  constructor({ stateDir, host, port, allowedOrigins, maxBodyBytes, registry, configStore, jobStore, runner, commandService, ownerId }) {
+  constructor({ stateDir, host, port, allowedOrigins, maxBodyBytes, registry, configStore, jobStore, executionController, runner, commandService, ownerId }) {
     this.stateDir = stateDir;
     this.host = host;
     this.port = port;
@@ -174,6 +156,7 @@ export class SpooldRuntime {
     this.registry = registry;
     this.configStore = configStore;
     this.jobStore = jobStore;
+    this.executionController = executionController;
     this.runner = runner;
     this.commandService = commandService;
     this.ownerId = ownerId;
@@ -219,10 +202,7 @@ export class SpooldRuntime {
       this.descriptor = descriptor;
       return structuredClone(descriptor);
     } catch (error) {
-      if (this.hostServer) {
-        await this.hostServer.close().catch(() => {});
-        this.hostServer = null;
-      }
+      if (this.hostServer) { await this.hostServer.close().catch(() => {}); this.hostServer = null; }
       await removeIfExists(join(this.stateDir, DESCRIPTOR_FILE)).catch(() => {});
       await releaseStateLock(this.lock).catch(() => {});
       this.lock = null;
@@ -239,6 +219,10 @@ export class SpooldRuntime {
       catch (error) { errors.push(error); }
       this.hostServer = null;
     }
+    if (this.executionController) {
+      try { await this.executionController.pauseAll(); }
+      catch (error) { errors.push(error); }
+    }
     try { await removeIfExists(join(this.stateDir, DESCRIPTOR_FILE)); }
     catch (error) { errors.push(error); }
     try { await releaseStateLock(this.lock); }
@@ -251,13 +235,7 @@ export class SpooldRuntime {
   }
 }
 
-export async function createSpooldRuntime({
-  stateDir,
-  host = DEFAULT_HOST,
-  port = DEFAULT_PORT,
-  allowedOrigins = [],
-  maxBodyBytes
-} = {}) {
+export async function createSpooldRuntime({ stateDir, host = DEFAULT_HOST, port = DEFAULT_PORT, allowedOrigins = [], maxBodyBytes } = {}) {
   requireStateDir(stateDir);
   if (!isLoopbackHost(host)) fail('SPOOLD_NON_LOOPBACK_BIND', 'spoold runtime may bind only to a loopback address');
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
@@ -266,9 +244,11 @@ export async function createSpooldRuntime({
   const registry = createRegistry();
   const configStore = new ConfigStore({ stateDir });
   const jobStore = new SQLiteJobStore({ stateDir });
+  const executionController = new ExecutionController();
+  const controlledJobStore = new ExecutionControlledJobStore({ store: jobStore, controller: executionController });
   const ownerId = `spoold:${process.pid}:${randomUUID()}`;
-  const runner = new SharedMigrationRunner({ registry, store: jobStore, ownerId });
-  const commandService = new SpoolCommandService({ configStore, registry, jobStore, runner });
+  const runner = new SharedMigrationRunner({ registry, store: controlledJobStore, ownerId });
+  const commandService = new SpoolCommandService({ configStore, registry, jobStore, runner, executionController });
 
   return new SpooldRuntime({
     stateDir,
@@ -279,6 +259,7 @@ export async function createSpooldRuntime({
     registry,
     configStore,
     jobStore,
+    executionController,
     runner,
     commandService,
     ownerId
