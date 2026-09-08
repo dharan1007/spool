@@ -1,0 +1,47 @@
+name: Migration case / fixture
+description: Contribute a privacy-safe real-world data edge case for the public regression corpus
+title: "[Case]: "
+labels:
+  - help wanted
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Real migration edge cases are high-value contributions. Use synthetic or anonymized data only. The goal is a fixture we can legally and safely keep in the public repository.
+  - type: textarea
+    id: pattern
+    attributes:
+      label: Data pattern
+      description: Describe the messy/ambiguous pattern and why normal CSV/schema handling struggles with it.
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Minimal synthetic source
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected typed result or violation
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: provenance
+    attributes:
+      label: Why this case matters
+      description: Explain the real class of migration this models without disclosing private information.
+    validations:
+      required: true
+  - type: checkboxes
+    id: license
+    attributes:
+      label: Public fixture confirmation
+      options:
+        - label: This example is synthetic/anonymized and contains no confidential, personal or customer data.
+          required: true
+        - label: I am comfortable with this fixture being stored and redistributed in the public MIT-licensed repository.
+          required: true
