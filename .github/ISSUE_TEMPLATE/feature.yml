@@ -1,0 +1,51 @@
+name: Feature or integration request
+description: Propose a migration capability with concrete outcome and safety requirements
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        SPOOL prioritizes deterministic migration outcomes over feature count. Describe the real migration problem first; implementation can follow from the required invariants.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Migration outcome
+      description: What should a user be able to migrate or prove after this exists?
+      placeholder: "Migrate X to Y while preserving ..."
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current workaround / failure
+      description: What do users have to do today, and where does it fail or become unsafe?
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Concrete example
+      description: Provide a privacy-safe source/target example or connector scenario.
+    validations:
+      required: true
+  - type: textarea
+    id: durability
+    attributes:
+      label: Correctness and recovery requirements
+      description: If this mutates a destination, describe idempotency, crash recovery, reconciliation, credential and concurrency expectations.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing tools/workflows and why they do not solve this case.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and roadmap items first.
+          required: true
+        - label: I am not asking SPOOL to execute arbitrary model-generated code against migration data.
+          required: true
