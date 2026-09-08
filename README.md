@@ -1,77 +1,163 @@
 # SPOOL
 
-**A local-first Autopilot for deterministic data migrations, built around Temporal WebMCP.**
+**Local-first autonomous data migrations: dirty data in, typed and validated data out.**
 
-SPOOL turns a messy CSV into a typed, validated output without making a human or an agent micromanage a long ETL workflow. The default interaction is deliberately small:
+SPOOL profiles messy CSV data, infers a target schema, generates a constrained deterministic transform plan, dry-runs it, executes it with checkpoint recovery, verifies the result, and preserves lineage — without uploading the dataset to an application backend.
+
+[**Try SPOOL**](https://spool-webmcp.vercel.app/) · [How it works](docs/ARCHITECTURE.md) · [Benchmarks](docs/BENCHMARKS.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md)
+
+[![release-gate](https://github.com/dharan1007/spool/actions/workflows/ci.yml/badge.svg)](https://github.com/dharan1007/spool/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+## See the outcome first
+
+```text
+messy CSV
+   ↓
+PROFILE
+   ↓
+INFER TARGET CONTRACT
+   ↓
+PLAN DETERMINISTIC TRANSFORMS
+   ↓
+DRY RUN + QUALITY ASSESSMENT
+   ↓
+EXECUTE WITH CHECKPOINTS
+   ↓
+VERIFY
+   ↓
+typed output + violations + lineage
+```
+
+The normal interaction is deliberately small:
 
 `Add source → choose outcome → Run Autopilot → review only real ambiguities → export`
 
-Behind that simple surface, the website owns workflow memory and orchestration: profiling, schema inference, deterministic mapping generation, dry-run validation, bounded repair policy, Worker execution, checkpoint recovery, quality verification and result lineage.
+SPOOL owns the mechanical migration workflow. It does **not** silently guess through ambiguous or destructive decisions. Those fail closed into a bounded `needs_attention` state.
 
-## Product surfaces
+## Try it in about a minute
 
-The public product and the migration Studio are intentionally separated:
+1. Open [spool-webmcp.vercel.app](https://spool-webmcp.vercel.app/).
+2. Choose **Studio → New migration**.
+3. Select **Try 25k-row example**.
+4. Choose **Database-ready**.
+5. Run **Autopilot**.
+6. Inspect the typed result, grouped quality violations, lineage and export.
 
-- `/` — product overview and the problem SPOOL solves
-- `/autopilot` — what SPOOL automates and where it refuses to guess
-- `/how-it-works` — end-to-end migration journey
-- `/webmcp` — Temporal WebMCP and site-owned orchestration
-- `/benchmarks` — measured engine/tool-surface evidence
-- `/docs` — concise product/technical documentation
-- `/studio` — durable local migration dashboard
-- `/studio/new` — source + outcome; the primary setup surface
-- `/studio/mission` — autonomous run state and only the decisions that need attention
-- `/studio/results` — output, quality, lineage and exports
+The included 25k-row example contains real dirty fee/date values; the successful result is produced by the same deterministic engine used by the Studio, not by mocked output.
 
-Low-level target schema, transform IR, checkpoint and runtime controls remain available under **Advanced diagnostics** rather than being required in the normal workflow.
+## Why SPOOL exists
 
-## Autopilot pipeline
+A data migration is usually much more than copying rows. Real inputs contain locale-dependent numbers, malformed dates, mixed boolean conventions, duplicate or unsafe headers, invalid cells, partial batches and interrupted runs. A generic LLM can suggest transformations, but unrestricted generated code is the wrong trust boundary for a migration engine.
 
-Internally, one `run_autopilot` mission drives:
+SPOOL separates **inference** from **execution**:
 
-`PROFILE → INFER → PLAN → DRY RUN → ASSESS → EXECUTE → VERIFY`
+| Problem | SPOOL's boundary |
+|---|---|
+| Messy source data | Profile and infer structure from bounded evidence |
+| Schema conversion | Generate a typed target contract |
+| Transformation | Execute a constrained deterministic IR — no `eval` or arbitrary generated code |
+| Ambiguity | Stop and request a bounded decision instead of guessing |
+| Partial execution | Persist checkpoints and mission state |
+| Mapping changes | Replay from row zero so one result never mixes transform revisions |
+| Bad rows | Group violations with bounded samples instead of silently coercing them |
+| CSV export | Neutralize spreadsheet formulas before export |
+| Dataset privacy | Keep the dataset data plane in the browser |
 
-SPOOL automatically generates a target contract and constrained transform IR when evidence is strong enough. Ambiguous or destructive choices fail closed into `needs_attention`; the user resolves only those bounded decisions and the mission continues automatically.
+## Measured engine evidence
 
-For database-ready migrations, semantic fields that are mostly parseable can be promoted from a dirty source string column to `number`, `date`, or `boolean`. Rows that cannot satisfy the typed contract become grouped quality violations rather than being silently coerced.
+The checked-in deterministic benchmark currently reports:
 
-## Temporal WebMCP
+| Rows | CSV parse | Transform + target validation | Rows/sec | Valid | Invalid |
+|---:|---:|---:|---:|---:|---:|
+| 1,000 | 7.63 ms | 12.46 ms | 80,241 | 999 | 1 |
+| 10,000 | 37.45 ms | 70.77 ms | 141,300 | 9,982 | 18 |
+| 50,000 | 138.29 ms | 334.26 ms | 149,584 | 49,910 | 90 |
 
-Most agentic sites expose a permanent tool catalog and expect the model to remember which operations are legal. SPOOL makes **tool topology part of application state** and adds site-owned orchestration on top.
+SPOOL's temporal tool registry also exposes 4.75 active tools / 1,658 serialized definition bytes on average across the measured workflow phases versus a permanent 23-tool / 7,963-byte catalog for the same tool set — a 79.3% active-tool reduction and 79.2% serialized-definition reduction.
 
-The agent-facing happy path can be as small as:
-
-`inspect_workspace → run_autopilot → inspect_mission → inspect_result/export`
-
-Only phase-valid tools remain registered. Stale registrations are removed with `AbortSignal`. Human UI actions and WebMCP execution callbacks invoke the same command kernel; there is no second agent-only business-logic path.
-
-## What is real
-
-- Local CSV parsing with quote/CRLF handling, unsafe/duplicate-header rejection and hard row/column/cell limits.
-- Header-only files are rejected before an existing active migration is interrupted.
-- Typed target schemas enforced on every output row.
-- Constrained deterministic transformation IR; no `eval`, `Function` or arbitrary model-generated code execution.
-- Browser Worker execution with job/revision/sequence isolation.
-- IndexedDB persistence for source, output, mission metadata and checkpoints.
-- Autopilot refresh recovery: a valid interrupted Autopilot mission resumes from its durable checkpoint when reopened; manual migrations remain explicitly recoverable.
-- Mapping revision changes force replay from row zero so a completed result contains one transform revision.
-- Grouped violations with bounded samples rather than unbounded row dumps to an agent.
-- Spreadsheet-formula neutralization on CSV export.
-- Native `document.modelContext.registerTool()` integration when WebMCP is supported.
-- A deterministic 25k-row demo containing real dirty fee/date values; success is not mocked.
-- Production CSP with `connect-src 'none'`; the dataset data plane stays in the browser.
-
-## Run locally
-
-SPOOL has no runtime package dependencies.
+These are **local deterministic engine and serialized-schema measurements**, not universal claims about model success, tokenization or browser-agent performance. Reproduce them with:
 
 ```bash
 npm ci --ignore-scripts
-npm run check
-python3 -m http.server 8765
+npm run benchmark
 ```
 
-Open `http://localhost:8765`, choose **Studio → New migration**, then **Try 25k-row example → Database-ready → Run Autopilot**. SPOOL profiles, plans, dry-runs and executes the migration without manual schema or mapping commands.
+See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) and [`benchmarks/latest.json`](benchmarks/latest.json) for the generated evidence.
+
+## Autopilot pipeline
+
+A single `run_autopilot` mission drives:
+
+```text
+PROFILE → INFER → PLAN → DRY RUN → ASSESS → EXECUTE → VERIFY
+```
+
+Semantic string fields that are sufficiently parseable can be promoted to `number`, `date` or `boolean`. Values that cannot satisfy the target contract become explicit quality violations instead of being silently coerced.
+
+## Temporal WebMCP
+
+Most agentic applications expose a permanent catalog and make the caller reason about which tools are currently legal. SPOOL makes **tool topology part of application state**.
+
+The agent-facing happy path can be as small as:
+
+```text
+inspect_workspace
+→ run_autopilot
+→ inspect_mission
+→ inspect_result / export
+```
+
+Only phase-valid tools remain registered. Stale registrations are removed with `AbortSignal`. Human UI actions and WebMCP callbacks invoke the same command kernel, so there is no separate agent-only business-logic implementation.
+
+Native browser integration uses `document.modelContext.registerTool()` when WebMCP is available. Browsers without that experimental API still use the normal human Studio.
+
+## What is implemented
+
+- Local CSV parsing with quote/CRLF handling, unsafe/duplicate-header rejection and hard row/column/cell limits.
+- Header-only rejection before an active migration is interrupted.
+- Typed target schemas enforced for every output row.
+- Constrained deterministic transformation IR.
+- Browser Worker execution with job/revision/sequence isolation.
+- IndexedDB persistence for source, output, mission metadata and checkpoints.
+- Autopilot refresh recovery from a valid durable checkpoint.
+- Revision-aware replay when mappings change.
+- Grouped violations with bounded samples.
+- Spreadsheet-formula neutralization on CSV export.
+- Temporal WebMCP tool registration.
+- Deterministic benchmark generation.
+- Production CSP with `connect-src 'none'` for the local dataset data plane.
+
+## Product surfaces
+
+- `/` — product overview
+- `/autopilot` — automation and ambiguity boundaries
+- `/how-it-works` — migration journey
+- `/webmcp` — temporal agent surface
+- `/benchmarks` — measured evidence
+- `/docs` — product and technical documentation
+- `/studio` — durable local migration dashboard
+- `/studio/new` — source + outcome setup
+- `/studio/mission` — autonomous run state and decisions requiring attention
+- `/studio/results` — output, quality, lineage and exports
+
+Low-level schema, transform IR, checkpoint and runtime controls remain under **Advanced diagnostics** rather than being required in the normal workflow.
+
+## Run locally
+
+SPOOL has no runtime npm dependencies.
+
+```bash
+git clone https://github.com/dharan1007/spool.git
+cd spool
+npm ci --ignore-scripts
+npm run check
+npm run serve
+```
+
+Open `http://localhost:8765`.
+
+Node.js 22+ is required by the checked-in package contract.
 
 ## Verification
 
@@ -83,9 +169,7 @@ node scripts/static-check.js
 npm run check
 ```
 
-The benchmark report is regenerated into `benchmarks/latest.json` and `docs/BENCHMARKS.md`. Measurements are local deterministic engine/tool-definition measurements, not universal LLM-success claims.
-
-A Chromium smoke harness is included at `scripts/browser-smoke.py`. Managed execution environments that block browser networking are reported as an environment limitation rather than converted into a fake browser pass.
+A Chromium smoke harness is included at `scripts/browser-smoke.py`. Environments that block browser networking are reported as environment limitations rather than converted into fake passes.
 
 ## Architecture
 
@@ -110,12 +194,38 @@ A Chromium smoke harness is included at `scripts/browser-smoke.py`. Managed exec
       checkpoints/lineage       + schema validation
 ```
 
-See `docs/ARCHITECTURE.md`, `docs/WEBMCP.md`, `docs/THREAT_MODEL.md`, `docs/BENCHMARKS.md` and `docs/DEMO_SCRIPT.md`.
+Deeper design documents:
 
-## Privacy
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- [`docs/WEBMCP.md`](docs/WEBMCP.md)
+- [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
+- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
+- [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md)
 
-The production app does not require a dataset API, analytics endpoint, hosted LLM, account system or database service. Static assets are served by Vercel; migration data stays local to the browser.
+## Contributing
+
+Useful contributions are intentionally scoped so first-time contributors can ship real improvements rather than cosmetic churn. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md), then look for [`good first issue`](https://github.com/dharan1007/spool/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) or [`help wanted`](https://github.com/dharan1007/spool/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22).
+
+If you have an ugly real-world migration case that can be shared safely, open a data-case issue. High-value fixtures are one of the best ways to improve SPOOL.
+
+## Roadmap
+
+The public roadmap lives in [`ROADMAP.md`](ROADMAP.md). Priorities are evidence-driven: connector correctness, crash semantics, deterministic reconciliation, migration-case coverage and integration ergonomics come before adding broad but unverifiable feature claims.
+
+## Privacy and security
+
+The production app does not require a dataset API, analytics endpoint, hosted LLM, account system or database service. Static assets are hosted; migration data remains local to the browser for the current product path.
+
+See [`SECURITY.md`](SECURITY.md) and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before proposing changes to execution, storage, connectors or agent surfaces.
+
+## Related projects
+
+- [PACT](https://github.com/dharan1007/pact) — transactional safety for consequential agent actions.
+- [KATA](https://github.com/dharan1007/kata) — deterministic research automation for humans and agents.
+- [FAULTLINE](https://github.com/dharan1007/faultline) — causal reduction of browser failures into reproducible cases.
 
 ## License
 
-MIT
+MIT — see [`LICENSE`](LICENSE).
+
+If SPOOL solves a migration problem you care about, a GitHub star is the simplest way to follow the project and help other data engineers discover it.

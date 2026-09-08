@@ -1,0 +1,10 @@
+# Default owner
+* @dharan1007
+
+# Security, persistence and release boundaries
+/SECURITY.md @dharan1007
+/docs/THREAT_MODEL.md @dharan1007
+/docs/PRODUCTION_AUDIT.md @dharan1007
+/.github/workflows/ @dharan1007
+/src/ @dharan1007
+/benchmarks/ @dharan1007
