@@ -1,0 +1,32 @@
+# SPOOL
+
+> Local-first autonomous data migrations: profile messy CSV, infer a typed target contract, generate constrained deterministic transforms, dry-run, execute with recovery, verify and export without uploading the dataset to an application backend.
+
+Canonical repository: https://github.com/dharan1007/spool
+Live product: https://spool-webmcp.vercel.app/
+
+## Start here
+
+- README: https://github.com/dharan1007/spool/blob/main/README.md
+- Architecture: https://github.com/dharan1007/spool/blob/main/docs/ARCHITECTURE.md
+- WebMCP: https://github.com/dharan1007/spool/blob/main/docs/WEBMCP.md
+- Benchmarks: https://github.com/dharan1007/spool/blob/main/docs/BENCHMARKS.md
+- Threat model: https://github.com/dharan1007/spool/blob/main/docs/THREAT_MODEL.md
+- Production audit: https://github.com/dharan1007/spool/blob/main/docs/PRODUCTION_AUDIT.md
+- Contributing: https://github.com/dharan1007/spool/blob/main/CONTRIBUTING.md
+
+## Core facts
+
+- Runtime: browser-first JavaScript modules and Worker execution.
+- Package contract: Node.js 22+ for development/verification.
+- Runtime npm dependencies: none in the current package.
+- Data plane: current browser product keeps dataset contents local.
+- Transformation execution: constrained deterministic IR; no arbitrary model-generated code execution.
+- Persistence: IndexedDB mission/source/output/checkpoint state.
+- Agent surface: state-dependent native WebMCP when `document.modelContext` is available.
+- Verification: `npm run check`.
+- License: MIT.
+
+## Current boundary
+
+The current browser source path is limited to 50 MB and materializes CSV rows in memory. Native WebMCP availability depends on browser support. Do not describe future connector-native reconciliation or large-file streaming work as already shipped.
