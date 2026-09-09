@@ -1,109 +1,118 @@
 # SPOOL Migration Services
 
-SPOOL's initial commercial model is outcome-based migration work, not a seat-gated "Pro" tier. The open-source repository remains MIT licensed; commercial engagements cover scoped assessment, migration preparation/execution, custom implementation and support.
+Commercial migration work is currently offered personally by **Dharan Tej Reddy Poduvu**, an individual solo builder/service provider. SPOOL is not currently represented as an incorporated company. The open-source repository remains MIT licensed; paid work covers scoped outcomes, execution, support, and implementation.
+
+## Zero-cost delivery model
+
+The first customers do not require a paid SaaS stack. Qualification happens through the public metadata-only Migration Assessment form, then the engagement moves to a private contact channel. Customer data should remain on the customer/local machine wherever practical, and SPOOL is executed locally.
+
+No paid authentication, hosted database, analytics, CRM, checkout, or payment gateway is required to deliver the current services.
 
 ## 1. Migration Preflight
 
-**Use when:** a team is about to import or migrate data and wants to know what will break before touching the target.
+**Use when:** a customer is about to import or migrate data and wants to know what will break before touching the target.
 
-Typical deliverables:
+Deliverables can include:
 
 - source profile and inferred field evidence;
 - deterministic target-schema recommendation;
-- ambiguity and violation categories;
+- ambiguity/violation categories;
 - incompatible date/number/boolean/header findings;
 - target-readiness risks;
-- sanitized migration-readiness report;
-- recommended next migration scope.
+- sanitized readiness report;
+- recommended next scope.
 
-This service does not require SPOOL to mutate a production database.
+Suggested first-customer test price: **₹2,500–₹7,500** for a bounded CSV case.
 
 ## 2. Import-Ready Dataset
 
 **Use when:** a CSV/export must be made safe for another system's importer.
 
-Typical deliverables:
+Deliverables can include:
 
 - normalized output CSV/JSON;
 - declared target schema;
 - transformation plan identity;
 - explicit rejected/invalid rows or grouped violation report;
 - row-accounting summary;
-- reproducible SPOOL release/commands used for preparation.
+- reproducible SPOOL release/commands used.
 
-For sensitive datasets, prefer execution on the customer's environment and share only the resulting evidence/artifacts the customer approves.
+Suggested first-customer test price: **₹5,000–₹15,000** for a bounded CSV case.
+
+For sensitive datasets, prefer execution on the customer's environment and share only approved evidence/artifacts.
 
 ## 3. Migration Rescue
 
-**Use when:** an import is already failing or producing inconsistent outcomes because of mixed formats, invalid rows, schema mismatch or prior partial attempts.
+**Use when:** an import is already failing or producing inconsistent outcomes because of mixed formats, invalid rows, schema mismatch, or prior partial attempts.
 
-The engagement starts with a non-destructive preflight. SPOOL does not respond to uncertain prior writes by blindly replaying them; the target state must be understood before mutation begins.
+The engagement starts with a non-destructive preflight. SPOOL does not respond to uncertain prior writes by blindly replaying them.
 
-## 4. Verified CSV → SQLite Migration
+Suggested first-customer test price: **₹7,500–₹25,000+** depending on urgency and complexity.
 
-**Current production connector scope:** filesystem UTF-8 CSV into an existing ordinary SQLite table using deterministic mapping and **insert** strategy.
+## 4. Verified CSV -> SQLite Migration
+
+**Current production connector scope:** filesystem UTF-8 CSV into an existing ordinary SQLite table using deterministic mapping and `insert` strategy.
 
 The Gate-B execution path includes:
 
 - source content snapshot binding;
 - source/target allow-root containment;
 - live SQLite target-contract introspection/fingerprint;
-- target-write approval bound to the exact plan, source snapshot and live target contract;
+- target-write approval bound to the exact plan, source snapshot, and live target contract;
 - durable lease + fencing;
-- atomic row + per-batch reconciliation ledger transactions;
-- commit-before-checkpoint recovery semantics;
+- atomic migrated rows + per-batch reconciliation ledger;
+- commit-before-checkpoint recovery;
 - exact replay/idempotency conflict detection;
-- fail-closed target schema drift detection inside the write transaction;
+- fail-closed target-schema drift detection inside the write transaction;
 - row-accounting and ledger verification;
 - canonical receipt carrying release/plan/source/target/batch evidence.
 
-The current Gate-B connector deliberately rejects:
+Suggested first-customer test price: **₹10,000–₹30,000+** for a bounded supported migration.
 
-- PostgreSQL/MySQL or arbitrary remote databases;
-- truncate/replace/delete/upsert strategies;
-- SQLite targets with triggers;
-- virtual tables;
-- target contracts incompatible with the declared SPOOL schema;
-- source/target paths outside configured allow-roots;
-- plans without `target_write` approval;
-- changed sources or changed targets after approval;
-- conflicting or indeterminate reconciliation states.
+The current connector deliberately rejects PostgreSQL/MySQL, arbitrary remote DBs, truncate/replace/delete/upsert, SQLite targets with triggers, virtual tables, incompatible target contracts, paths outside allow-roots, missing target-write approval, changed sources/targets after approval, and conflicting/indeterminate reconciliation.
 
-Unsupported capability is a scoped engineering project, not a reason to bypass these controls.
+Unsupported capability is a separate engineering project; do not bypass safety controls to win a sale.
 
 ## Commercial intake
 
-Use the repository's **Migration Assessment** issue form for initial non-sensitive qualification. It is a public issue: provide only system category, approximate size, failure mode, urgency and sensitivity classification. Never attach real rows, database dumps, secrets or customer records.
+Use the repository's **Migration Assessment** issue form for initial non-sensitive qualification. It is public: provide only system category, approximate size, failure mode, urgency, and sensitivity classification. Never attach real rows, database dumps, secrets, private URLs, or customer records.
 
-If the case proceeds, establish a private contact channel and written statement of work before sensitive information is exchanged.
+If the case proceeds, establish a private contact channel and an accepted written quote/order before sensitive information is exchanged.
 
-## Statement of work minimum fields
+## Minimum quote/order fields
 
 Every paid migration should define:
 
-- source system/file(s);
-- target system/table(s);
+- provider: Dharan Tej Reddy Poduvu, individual service provider;
+- customer;
+- source and target;
 - approximate size/rows;
-- declared target contract;
-- allowed write strategy/effects;
+- desired outcome;
+- supported write strategy/effects;
 - data sensitivity;
-- environment/credential ownership;
-- backup and restore responsibility;
-- SPOOL release/runtime to be used;
+- backup/restore responsibility;
+- SPOOL release/commit;
 - verification/acceptance criteria;
-- deliverables;
-- exclusions/known exceptions;
+- deliverables and exclusions;
 - deadline;
-- fee/payment milestones;
-- private support/contact mechanism;
-- any required data-processing/security terms.
+- fee/payment schedule;
+- private contact/payment method;
+- tax/GST treatment appropriate to the provider's actual registration status.
+
+Use [`INVOICE_QUOTE_TEMPLATE.md`](INVOICE_QUOTE_TEMPLATE.md) as the operational starting point.
 
 ## Acceptance evidence
 
-A database migration is not accepted merely because the process exits with code 0. For current SQLite work, acceptance should include the configured verification result and SPOOL receipt. The receipt binds the release commit, plan ID, source snapshot, target identity, live target-contract ID, batch IDs, row counts, violation summary and timestamps.
+A database migration is not accepted merely because the process exits successfully. Current SQLite acceptance should include configured verification and the SPOOL receipt. The receipt binds release commit, plan ID, source snapshot, target identity, target-contract ID, batch IDs, counts, violations, and timestamps.
 
-A SPOOL receipt is technical provenance evidence, not a legal/regulatory certification.
+A SPOOL receipt is technical provenance evidence, not legal/regulatory certification.
 
-## Pricing
+## Pricing policy
 
-Pricing is quoted by migration scope and risk rather than by user seat. Useful commercial units include assessment complexity, dataset size, migration outcome, custom connector work and support obligations. Repository documentation intentionally does not promise a universal price or SLA that has not been agreed for a specific engagement.
+Pricing is per migration outcome/risk, not per seat. The amounts above are launch hypotheses intended to obtain the first paying customers and evidence. Quote after qualification; do not promise fixed scope where the source/target state is unknown.
+
+The fastest revenue path is to sell the customer's immediate problem, not a subscription:
+
+- "I will make this failing CSV import-ready."
+- "I will identify exactly which rows/types will break this migration before you touch production."
+- "I will run the supported CSV -> SQLite migration locally and deliver verification evidence."
