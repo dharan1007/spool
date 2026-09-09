@@ -16,6 +16,18 @@ const txDone = tx => new Promise((resolve, reject) => {
   tx.onerror = () => reject(tx.error || new Error('IndexedDB transaction failed'));
 });
 
+export function markWorkspaceStorageFailure(workspace) {
+  if (!workspace || typeof workspace !== 'object') return workspace;
+  const now = new Date().toISOString();
+  if (workspace.job?.phase === 'COMPLETE') workspace.job = { ...workspace.job, phase: 'FAILED', updatedAt: now };
+  workspace.lastError = {
+    code: 'STORAGE_WRITE_FAILED',
+    message: 'The terminal workspace could not be persisted durably. SPOOL did not publish this run as complete.'
+  };
+  if (workspace.mission?.mode === 'autopilot') workspace.mission = { ...workspace.mission, status: 'FAILED', updatedAt: now };
+  return workspace;
+}
+
 export class IndexedDbWorkspaceStore {
   constructor({ writeLock = new WorkspaceWriteLock(), storageManager = globalThis.navigator?.storage ?? null } = {}) {
     this.dbPromise = null;
@@ -150,6 +162,7 @@ export class IndexedDbWorkspaceStore {
       this.cache = { fingerprint, outputJobId: workspace.job.jobId, outputRevision: workspace.outputRevision, outputLength: workspace.output.length };
     } catch (error) {
       if (error instanceof SpoolError || error instanceof WorkspaceLockedError) throw error;
+      markWorkspaceStorageFailure(workspace);
       fail('STORAGE_WRITE_FAILED', 'Browser workspace could not be persisted durably', { causeName: error?.name ?? 'Error' });
     }
   }
