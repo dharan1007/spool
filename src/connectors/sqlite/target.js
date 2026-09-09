@@ -47,9 +47,18 @@ function validateRows(rows) {
   return columns;
 }
 
+export function sqlitePayloadEvidence(rows) {
+  validateRows(rows);
+  return Object.freeze({
+    rowCount: rows.length,
+    payloadHash: sha256Canonical(PAYLOAD_DOMAIN, rows)
+  });
+}
+
 function evidenceFrom(input, payloadHash, rowCount) {
   const mappingRevision = input.mappingRevision;
-  if (!Number.isInteger(mappingRevision) || mappingRevision < 0) fail('INVALID_BATCH_EVIDENCE', 'mappingRevision must be a non-negative integer');
+  if (!Number.isInteger(mappingRevision) || mappingRevision < 1) fail('INVALID_BATCH_EVIDENCE', 'mappingRevision must be >= 1');
+  if (!Number.isInteger(rowCount) || rowCount < 0) fail('INVALID_BATCH_EVIDENCE', 'rowCount must be a non-negative integer');
   return {
     batchIdentity: requiredHash('batchIdentity', input.batchIdentity),
     migrationId: requiredString('migrationId', input.migrationId),
@@ -112,12 +121,17 @@ export class SqliteTarget {
     `).get(batchIdentity);
   }
 
+  describeBatch(input = {}) {
+    this.#assertOpen();
+    return sqlitePayloadEvidence(input.rows);
+  }
+
   commitBatch(input = {}) {
     this.#assertOpen();
     const rows = input.rows;
     const columns = validateRows(rows);
-    const payloadHash = sha256Canonical(PAYLOAD_DOMAIN, rows);
-    const evidence = evidenceFrom(input, payloadHash, rows.length);
+    const described = sqlitePayloadEvidence(rows);
+    const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
 
     this.db.exec('BEGIN IMMEDIATE;');
     try {
@@ -194,6 +208,17 @@ export class SqliteTarget {
       if (error?.code === 'INVALID_BATCH_EVIDENCE') throw error;
       return Object.freeze({ status: 'INDETERMINATE', batchIdentity: input?.batchIdentity ?? null });
     }
+  }
+
+  ledgerEntries() {
+    this.#assertOpen();
+    return this.db.prepare(`
+      SELECT batch_identity AS batchIdentity, migration_id AS migrationId, plan_id AS planId,
+             source_snapshot_id AS sourceSnapshotId, mapping_revision AS mappingRevision,
+             row_count AS rowCount, payload_hash AS payloadHash, target_table AS targetTable,
+             committed_at AS committedAt
+      FROM ${quoteIdentifier(LEDGER_TABLE)} ORDER BY rowid
+    `).all().map(row => Object.freeze({ ...row }));
   }
 
   close() {
