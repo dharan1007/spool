@@ -1,0 +1,35 @@
+name: validate-vercel-production
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact merged main smoke harness
+        uses: actions/checkout@v4
+        with:
+          ref: feb1cfaab15c44522c594d008a8b0190f400ff52
+      - name: Verify canonical production release identity
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request
+          url='https://spool-webmcp.vercel.app/release.json'
+          expected='feb1cfaab15c44522c594d008a8b0190f400ff52'
+          with urllib.request.urlopen(url, timeout=20) as r: release=json.load(r)
+          assert release.get('commit') == expected, (release, expected)
+          print('production release identity verified', expected)
+          PY
+      - name: Install browser smoke dependency
+        run: python3 -m pip install --disable-pip-version-check websocket-client
+      - name: Run complete-product browser smoke against canonical production
+        env:
+          SPOOL_URL: https://spool-webmcp.vercel.app
+          SPOOL_BROWSER: google-chrome
+        run: python3 scripts/browser-smoke.py
