@@ -1,0 +1,6 @@
+customer_id,full_name,monthly_fee,joined_on,is_active
+1001," Ada Lovelace ","$1,299.00",2026-01-02,YES
+1002,Lin Chen,"1.299,00 €",3 April 2026,no
+1003,Grace Hopper,149.50,04/03/2026,true
+bad,Rejected Customer,50,2026-01-04,true
+1004,Noor Khan,99.00,2026-02-28,1
