@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DatabaseSync } from 'node:sqlite';
+import Database from 'better-sqlite3';
 import { SqliteTarget } from '../src/connectors/sqlite/target.js';
 import { MigrationRunner } from '../src/execution/migration-runner.js';
 
@@ -13,14 +13,14 @@ const sourceSnapshotId = 'sha256:ccccccccccccccccccccccccccccccccccccccccccccccc
 async function setup(fn) {
   const dir = await mkdtemp(join(tmpdir(), 'spool-crash-'));
   const path = join(dir, 'target.db');
-  const db = new DatabaseSync(path);
+  const db = new Database(path);
   db.exec('CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT;');
   db.close();
   try { await fn(path); } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
 function count(path) {
-  const db = new DatabaseSync(path);
+  const db = new Database(path);
   try { return Number(db.prepare('SELECT COUNT(*) AS count FROM customers').get().count); }
   finally { db.close(); }
 }
