@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { fail } from '../../core/errors.js';
+import { fail, SpoolError } from '../../core/errors.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
 
 const CONTRACT_DOMAIN = 'spool-sqlite-target-contract-v1';
@@ -31,13 +31,13 @@ function targetContractRecord(db, table) {
   if (!tableRow || tableRow.type !== 'table') fail('TARGET_TABLE_NOT_FOUND', `SQLite target table ${table} does not exist as an ordinary table`);
   if (/^\s*CREATE\s+VIRTUAL\s+TABLE/i.test(tableRow.sql ?? '')) fail('UNSUPPORTED_TARGET_TABLE', 'Gate B does not support virtual SQLite tables');
 
-  const columns = db.prepare('SELECT cid, name, type, notnull, dflt_value, pk, hidden FROM pragma_table_xinfo(?) ORDER BY cid').all(table)
+  const columns = db.prepare('SELECT cid, name, type, "notnull" AS is_not_null, dflt_value, pk, hidden FROM pragma_table_xinfo(?) ORDER BY cid').all(table)
     .map(row => ({
       cid: Number(row.cid),
       name: row.name,
       declaredType: row.type ?? '',
       affinity: affinity(row.type),
-      notNull: Number(row.notnull) === 1,
+      notNull: Number(row.is_not_null) === 1,
       defaultSql: row.dflt_value ?? null,
       primaryKeyOrder: Number(row.pk),
       hidden: Number(row.hidden)
@@ -49,10 +49,10 @@ function targetContractRecord(db, table) {
       unique: Number(row.is_unique) === 1,
       origin: row.origin,
       partial: Number(row.partial) === 1,
-      columns: db.prepare('SELECT seqno, cid, name, desc, coll, key FROM pragma_index_xinfo(?) ORDER BY seqno').all(row.name)
+      columns: db.prepare('SELECT seqno, cid, name, "desc" AS is_desc, coll, "key" AS is_key FROM pragma_index_xinfo(?) ORDER BY seqno').all(row.name)
         .map(item => ({
           seqno: Number(item.seqno), cid: Number(item.cid), name: item.name ?? null,
-          desc: Number(item.desc) === 1, collation: item.coll ?? null, key: Number(item.key) === 1
+          desc: Number(item.is_desc) === 1, collation: item.coll ?? null, key: Number(item.is_key) === 1
         }))
     }));
 
@@ -117,8 +117,10 @@ export function inspectSqliteTarget({ path, table, targetSchema } = {}) {
       foreignKeys: Object.freeze(record.foreignKeys.map(value => Object.freeze({ ...value })))
     });
   } catch (error) {
-    if (error?.code) throw error;
-    fail('TARGET_PREFLIGHT_FAILED', `SQLite target preflight failed: ${error?.message ?? String(error)}`);
+    if (error instanceof SpoolError) throw error;
+    fail('TARGET_PREFLIGHT_FAILED', `SQLite target preflight failed: ${error?.message ?? String(error)}`, {
+      nativeCode: typeof error?.code === 'string' ? error.code : null
+    });
   } finally {
     try { db?.close(); } catch { /* nothing else to do */ }
   }
