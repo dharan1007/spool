@@ -18,8 +18,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install reproducibly
-        run: npm ci --ignore-scripts
+      - name: Install exactly from committed lockfile
+        run: npm ci
+      - name: Audit production dependency graph
+        run: npm audit --omit=dev --audit-level=high
+      - name: Verify stable SQLite driver loads
+        run: node -e "const D=require('better-sqlite3'); const db=new D(':memory:'); db.exec('CREATE TABLE probe(id INTEGER PRIMARY KEY) STRICT'); db.close(); console.log('better-sqlite3 runtime OK')"
       - name: Run production release gate
         env:
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
