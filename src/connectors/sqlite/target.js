@@ -4,6 +4,7 @@ import { fail } from '../../core/errors.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
 
 const LEDGER_TABLE = '__spool_batch_ledger';
+const LEASE_TABLE = 'spool_execution_leases';
 const PAYLOAD_DOMAIN = 'spool-sqlite-batch-payload-v1';
 const HASH = /^sha256:[0-9a-f]{64}$/;
 
@@ -83,13 +84,17 @@ function ledgerMatches(row, evidence, targetTable) {
 }
 
 export class SqliteTarget {
-  constructor({ path, table, busyTimeoutMs = 5000 } = {}) {
+  constructor({ path, table, busyTimeoutMs = 5000, requireFencing = false, fenceResource = null } = {}) {
     requiredString('path', path);
     requiredString('table', table);
     if (!Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) fail('INVALID_SQLITE_CONFIG', 'busyTimeoutMs must be a non-negative integer');
+    if (typeof requireFencing !== 'boolean') fail('INVALID_SQLITE_CONFIG', 'requireFencing must be boolean');
+    if (requireFencing) requiredString('fenceResource', fenceResource);
     this.path = resolve(path);
     this.table = table;
     this.quotedTable = quoteIdentifier(table);
+    this.requireFencing = requireFencing;
+    this.fenceResource = fenceResource;
     this.db = new DatabaseSync(this.path);
     this.closed = false;
     this.db.exec(`PRAGMA foreign_keys = ON; PRAGMA busy_timeout = ${busyTimeoutMs};`);
@@ -121,6 +126,28 @@ export class SqliteTarget {
     `).get(batchIdentity);
   }
 
+  #assertFenceInTransaction(input) {
+    if (!this.requireFencing) return;
+    if (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1) fail('FENCE_REQUIRED', 'Production SQLite mutation requires a fencing token');
+    const nowMs = input.nowMs ?? Date.now();
+    if (!Number.isSafeInteger(nowMs) || nowMs < 0) fail('INVALID_FENCE_TIME', 'Fence time must be a non-negative safe integer');
+    let row;
+    try {
+      row = this.db.prepare(`SELECT owner, expires_at_ms, fencing_token FROM ${quoteIdentifier(LEASE_TABLE)} WHERE resource = ?`).get(this.fenceResource);
+    } catch (error) {
+      if (/no such table/i.test(String(error?.message ?? ''))) fail('FENCE_REQUIRED', 'Durable execution lease table is missing from the SQLite target');
+      throw error;
+    }
+    if (!row || Number(row.fencing_token) !== input.fencingToken) {
+      fail('STALE_FENCE', 'SQLite mutation fencing token is stale', {
+        resource: this.fenceResource,
+        expected: row ? Number(row.fencing_token) : null,
+        actual: input.fencingToken
+      });
+    }
+    if (Number(row.expires_at_ms) <= nowMs) fail('LEASE_EXPIRED', 'SQLite mutation lease has expired', { resource: this.fenceResource, fencingToken: input.fencingToken });
+  }
+
   describeBatch(input = {}) {
     this.#assertOpen();
     return sqlitePayloadEvidence(input.rows);
@@ -135,6 +162,7 @@ export class SqliteTarget {
 
     this.db.exec('BEGIN IMMEDIATE;');
     try {
+      this.#assertFenceInTransaction(input);
       const existing = this.#readLedger(evidence.batchIdentity);
       if (existing) {
         if (!ledgerMatches(existing, evidence, this.table)) {
