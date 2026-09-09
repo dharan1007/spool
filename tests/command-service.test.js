@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DatabaseSync } from 'node:sqlite';
+import Database from 'better-sqlite3';
 import { SpoolCommandService } from '../src/daemon/command-service.js';
 
 function manifest(sourcePath, targetPath) {
@@ -39,7 +39,7 @@ async function fixture(fn) {
   const sourcePath = join(sourceRoot, 'customers.csv');
   const targetPath = join(targetRoot, 'customers.db');
   await writeFile(sourcePath, 'id,name\n1, Ada \n2,Lin\nbad,Rejected\n');
-  const db = new DatabaseSync(targetPath);
+  const db = new Database(targetPath);
   db.exec('CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT;');
   db.close();
   const service = await SpoolCommandService.create({
@@ -54,7 +54,7 @@ async function fixture(fn) {
 }
 
 function targetRows(path) {
-  const db = new DatabaseSync(path);
+  const db = new Database(path);
   try { return db.prepare('SELECT id, name FROM customers ORDER BY id').all().map(row => ({ id: Number(row.id), name: row.name })); }
   finally { db.close(); }
 }
