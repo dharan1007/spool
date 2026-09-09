@@ -7,6 +7,9 @@ on:
         description: Production base URL
         required: false
         default: https://spool-webmcp.vercel.app
+      expected_sha:
+        description: Exact deployed Git SHA; defaults to the workflow commit
+        required: false
   schedule:
     - cron: '17 3 * * *'
 
@@ -19,6 +22,24 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Verify deployed release identity
+        env:
+          SPOOL_URL: ${{ inputs.url || 'https://spool-webmcp.vercel.app' }}
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          base = os.environ['SPOOL_URL'].rstrip('/')
+          expected = os.environ['EXPECTED_SHA'].lower()
+          with urllib.request.urlopen(base + '/release.json', timeout=20) as response:
+              if response.status != 200:
+                  raise SystemExit(f'release.json returned HTTP {response.status}')
+              release = json.load(response)
+          actual = str(release.get('commit') or '').lower()
+          if actual != expected:
+              raise SystemExit(f'deployed commit mismatch: expected {expected}, got {actual or "<unbound>"}')
+          print(f'deployed release identity verified: {actual}')
+          PY
       - name: Install browser smoke dependency
         run: python3 -m pip install --disable-pip-version-check websocket-client
       - name: Run production browser smoke
