@@ -46,7 +46,8 @@ async function fixture(fn) {
     sourceRoot,
     targetRoot,
     statePath: join(targetRoot, 'spool-state.db'),
-    approvalSigningKey: '0123456789abcdef0123456789abcdef'
+    approvalSigningKey: '0123456789abcdef0123456789abcdef',
+    release: { version: '1.0.0-test', commitSha: '0123456789abcdef0123456789abcdef01234567' }
   });
   try { await fn({ service, sourcePath, targetPath }); }
   finally { service.close(); await rm(dir, { recursive: true, force: true }); }
@@ -54,7 +55,7 @@ async function fixture(fn) {
 
 function targetRows(path) {
   const db = new DatabaseSync(path);
-  try { return db.prepare('SELECT id, name FROM customers ORDER BY id').all(); }
+  try { return db.prepare('SELECT id, name FROM customers ORDER BY id').all().map(row => ({ id: Number(row.id), name: row.name })); }
   finally { db.close(); }
 }
 
