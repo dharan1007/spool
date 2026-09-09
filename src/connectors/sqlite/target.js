@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import Database from 'better-sqlite3';
 import { resolve } from 'node:path';
 import { fail } from '../../core/errors.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
@@ -95,9 +95,10 @@ export class SqliteTarget {
     this.quotedTable = quoteIdentifier(table);
     this.requireFencing = requireFencing;
     this.fenceResource = fenceResource;
-    this.db = new DatabaseSync(this.path);
+    this.db = new Database(this.path);
     this.closed = false;
-    this.db.exec(`PRAGMA foreign_keys = ON; PRAGMA busy_timeout = ${busyTimeoutMs};`);
+    this.db.pragma('foreign_keys = ON');
+    this.db.pragma(`busy_timeout = ${busyTimeoutMs}`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS ${quoteIdentifier(LEDGER_TABLE)} (
         batch_identity TEXT PRIMARY KEY NOT NULL,
