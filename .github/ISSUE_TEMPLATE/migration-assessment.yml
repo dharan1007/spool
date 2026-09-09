@@ -1,0 +1,74 @@
+name: Migration assessment
+about: Request a scoped review of a real migration without publishing customer data
+labels: ["migration-assessment"]
+title: "[Assessment]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form only for non-sensitive scoping metadata. **Do not attach source files, row samples, database dumps, credentials, customer/employee/financial records, or secrets.** This issue is public. If the case is suitable for a commercial engagement, a private channel and written scope must be established before sensitive material is exchanged.
+  - type: input
+    id: source_system
+    attributes:
+      label: Current source/system
+      description: Example: CRM CSV export, ERP export, spreadsheet bundle. Do not include credentials or private URLs.
+      placeholder: CRM CSV export
+    validations:
+      required: true
+  - type: input
+    id: target_system
+    attributes:
+      label: Desired target/outcome
+      description: Example: import-ready CSV, validated SQLite database, migration preflight report.
+      placeholder: Validated SQLite import
+    validations:
+      required: true
+  - type: dropdown
+    id: approximate_size
+    attributes:
+      label: Approximate source size
+      options:
+        - Under 10 MB
+        - 10–50 MB
+        - 50–256 MB
+        - Over 256 MB
+        - Unknown
+    validations:
+      required: true
+  - type: input
+    id: approximate_rows
+    attributes:
+      label: Approximate row count
+      placeholder: 150000
+  - type: textarea
+    id: failure_mode
+    attributes:
+      label: What is going wrong today?
+      description: Describe the migration failure or desired outcome without pasting real records.
+      placeholder: Mixed dates and numeric formats cause the target import to reject some rows.
+    validations:
+      required: true
+  - type: input
+    id: deadline
+    attributes:
+      label: Deadline or urgency
+      placeholder: 2026-09-20
+  - type: dropdown
+    id: sensitivity
+    attributes:
+      label: Does the source contain sensitive or regulated data?
+      options:
+        - Yes
+        - No
+        - Unsure
+    validations:
+      required: true
+  - type: checkboxes
+    id: public_ack
+    attributes:
+      label: Public issue acknowledgement
+      options:
+        - label: I have not included source rows, credentials, private URLs, personal data, or confidential business data in this public issue.
+          required: true
+        - label: I understand that any commercial work requires a separate written scope and private contact channel before sensitive material is exchanged.
+          required: true

@@ -1,12 +1,18 @@
 import { fail } from './errors.js';
 
+export const DEFAULT_BROWSER_CSV_LIMIT_BYTES = 50 * 1024 * 1024;
+
 export function parseCsv(text, options = {}) {
   const {
     maxCellLength = 1024 * 1024,
     maxRows = 1_000_000,
-    maxColumns = 1000
+    maxColumns = 1000,
+    maxInputBytes = DEFAULT_BROWSER_CSV_LIMIT_BYTES
   } = options;
   if (typeof text !== 'string') fail('INVALID_CSV', 'CSV input must be a string');
+  if (!Number.isSafeInteger(maxInputBytes) || maxInputBytes <= 0) fail('INVALID_CSV_LIMIT', 'maxInputBytes must be a positive safe integer');
+  const inputBytes = new TextEncoder().encode(text).byteLength;
+  if (inputBytes > maxInputBytes) fail('SOURCE_TOO_LARGE', `CSV exceeds ${maxInputBytes} byte input limit`, { bytes: inputBytes, limit: maxInputBytes });
   const rows = [];
   let row = [];
   let cell = '';
@@ -20,7 +26,6 @@ export function parseCsv(text, options = {}) {
   };
   const pushRow = () => {
     pushCell();
-    // Ignore one terminal blank row from a trailing newline.
     rows.push(row);
     row = [];
     if (rows.length > maxRows + 1) fail('TOO_MANY_ROWS', `CSV exceeds ${maxRows} data rows`);
@@ -73,9 +78,18 @@ export function parseCsv(text, options = {}) {
   return { headers, rows: objects };
 }
 
+const PLAIN_SIGNED_NUMBER = /^[+-]?(?:(?:\d+\.?\d*)|(?:\.\d+))(?:[eE][+-]?\d+)?$/;
+
+function needsFormulaNeutralization(text) {
+  const trimmed = text.trim();
+  if (!trimmed || !/^[=+\-@]/.test(trimmed)) return false;
+  if (PLAIN_SIGNED_NUMBER.test(trimmed)) return false;
+  return true;
+}
+
 export function escapeCsvCell(value) {
   let text = value == null ? '' : String(value);
-  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  if (needsFormulaNeutralization(text)) text = `'${text}`;
   if (/[",\r\n]/.test(text)) text = `"${text.replaceAll('"', '""')}"`;
   return text;
 }

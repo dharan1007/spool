@@ -1,6 +1,7 @@
 name: release-gate
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -11,14 +12,52 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - name: Install reproducibly
-        run: npm ci --ignore-scripts
+      - name: Install exactly from committed lockfile
+        run: npm ci
+      - name: Audit production dependency graph
+        run: npm audit --omit=dev --audit-level=high
+      - name: Verify stable SQLite driver loads
+        run: node -e "const D=require('better-sqlite3'); const db=new D(':memory:'); db.exec('CREATE TABLE probe(id INTEGER PRIMARY KEY) STRICT'); db.close(); console.log('better-sqlite3 runtime OK')"
       - name: Run production release gate
+        env:
+          SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: npm run check
+      - name: Install browser smoke dependency
+        run: python3 -m pip install --disable-pip-version-check websocket-client
+      - name: Run built-browser smoke through production-style SPA rewrites
+        env:
+          SPOOL_SERVE_DIR: dist
+          SPOOL_BROWSER: google-chrome
+        run: |
+          python3 scripts/spa-server.py --port 8876 --directory dist &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          SPOOL_URL=http://127.0.0.1:8876 python3 scripts/browser-smoke.py
+
+  sqlite-portability:
+    name: sqlite-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exactly from committed lockfile
+        run: npm ci
+      - name: Verify native SQLite driver
+        run: node -e "const D=require('better-sqlite3'); const db=new D(':memory:'); db.exec('CREATE TABLE probe(id INTEGER PRIMARY KEY) STRICT'); console.log(db.prepare('select sqlite_version() as v').get()); db.close();"
+      - name: Run SQLite production conformance
+        run: npm run test:conformance

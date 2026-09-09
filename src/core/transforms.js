@@ -1,4 +1,6 @@
 import { fail } from './errors.js';
+import { parseDeterministicDate } from './deterministic-date.js';
+import { parseDeterministicNumber } from './locale-number.js';
 
 const OPS = new Set([
   'field', 'literal', 'copy', 'trim', 'lowercase', 'uppercase', 'split', 'join', 'coalesce',
@@ -8,7 +10,6 @@ const OPS = new Set([
 
 function isUnsafeRegex(pattern) {
   if (typeof pattern !== 'string' || pattern.length > 256) return true;
-  // Conservative nested-quantifier and repeated-wildcard guard against common catastrophic patterns.
   return /\((?:[^()]|\\.)*[+*](?:[^()]|\\.)*\)[+*{]/.test(pattern) || /(\.\*){2,}|(\.\+){2,}/.test(pattern);
 }
 
@@ -47,11 +48,7 @@ export function validateExpr(expr, options = {}, depth = 0) {
   return expr;
 }
 
-const asNumber = value => {
-  const n = typeof value === 'number' ? value : Number(String(value ?? '').trim());
-  if (!Number.isFinite(n)) fail('INVALID_NUMBER', `Cannot convert ${String(value)} to number`);
-  return n;
-};
+const asNumber = value => parseDeterministicNumber(value) ?? 0;
 
 export function evaluateExpr(expr, row) {
   switch (expr.op) {
@@ -68,16 +65,12 @@ export function evaluateExpr(expr, row) {
       if (['false', '0', 'no', 'n'].includes(v)) return false;
       fail('INVALID_BOOLEAN', `Cannot convert ${v} to boolean`);
     }
-    case 'parse_date': {
-      const v = evaluateExpr(expr.value, row); const d = new Date(v);
-      if (Number.isNaN(d.valueOf())) fail('INVALID_DATE', `Cannot parse ${String(v)} as date`);
-      return d.toISOString();
-    }
+    case 'parse_date': return parseDeterministicDate(evaluateExpr(expr.value, row));
     case 'format_date': {
-      const d = new Date(evaluateExpr(expr.value, row));
-      if (Number.isNaN(d.valueOf())) fail('INVALID_DATE', 'Cannot format invalid date');
-      if (expr.format === 'YYYY-MM-DD') return d.toISOString().slice(0, 10);
-      if (expr.format === 'ISO') return d.toISOString();
+      const iso = parseDeterministicDate(evaluateExpr(expr.value, row));
+      if (iso === null) fail('INVALID_DATE', 'Cannot format empty date');
+      if (expr.format === 'YYYY-MM-DD') return iso.slice(0, 10);
+      if (expr.format === 'ISO') return iso;
       fail('UNSUPPORTED_DATE_FORMAT', `Unsupported date format ${expr.format}`);
     }
     case 'regex_replace': return String(evaluateExpr(expr.value, row) ?? '').replace(new RegExp(expr.pattern, expr.flags ?? 'g'), expr.replacement ?? '');

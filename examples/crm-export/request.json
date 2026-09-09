@@ -1,0 +1,48 @@
+{
+  "migrationId": "crm_import_example_v1",
+  "principal": "operator:example",
+  "planInput": {
+    "planRevision": 1,
+    "sourceRef": {
+      "connector": "filesystem",
+      "connectionId": "example-source",
+      "resource": "source.csv",
+      "path": "source.csv"
+    },
+    "targetRef": {
+      "connector": "sqlite",
+      "connectionId": "example-target",
+      "resource": "customers",
+      "path": "target.db",
+      "table": "customers"
+    },
+    "targetSchema": [
+      { "name": "customer_id", "type": "integer", "nullable": false },
+      { "name": "full_name", "type": "string", "nullable": false },
+      { "name": "monthly_fee", "type": "number", "nullable": false },
+      { "name": "joined_on", "type": "date", "nullable": false },
+      { "name": "is_active", "type": "boolean", "nullable": false }
+    ],
+    "mapping": [
+      { "target": "customer_id", "expr": { "op": "cast_number", "value": { "op": "field", "name": "customer_id" } } },
+      { "target": "full_name", "expr": { "op": "trim", "value": { "op": "field", "name": "full_name" } } },
+      { "target": "monthly_fee", "expr": { "op": "cast_number", "value": { "op": "field", "name": "monthly_fee" } } },
+      { "target": "joined_on", "expr": { "op": "format_date", "value": { "op": "field", "name": "joined_on" }, "format": "YYYY-MM-DD" } },
+      { "target": "is_active", "expr": { "op": "cast_boolean", "value": { "op": "field", "name": "is_active" } } }
+    ],
+    "mappingRevision": 1,
+    "writeStrategy": { "mode": "insert", "batchSize": 2 },
+    "verification": { "checks": ["row_accounting", "ledger_complete"] },
+    "risk": { "level": "medium", "approvals": ["target_write"] },
+    "capabilityAssumptions": {
+      "source": { "snapshotBinding": true },
+      "target": {
+        "transactions": true,
+        "atomicBatchLedger": true,
+        "reconcileAfterCrash": true,
+        "idempotentReplay": true,
+        "fencing": true
+      }
+    }
+  }
+}
