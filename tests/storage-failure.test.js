@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { IndexedDbWorkspaceStore } from '../src/storage/indexeddb.js';
+import { IndexedDbWorkspaceStore, markWorkspaceStorageFailure } from '../src/storage/indexeddb.js';
 import { CommandKernel } from '../src/core/command-kernel.js';
 import { createJob, transition, PHASES } from '../src/core/state-machine.js';
+import { fail } from '../src/core/errors.js';
 
 test('browser storage preflight fails before execution when quota headroom is insufficient', async () => {
   const store = new IndexedDbWorkspaceStore({
@@ -14,12 +15,15 @@ test('browser storage preflight fails before execution when quota headroom is in
   assert.equal(ok.availableBytes, 10);
 });
 
-test('completion is not published when durable workspace save fails', async () => {
+test('completion is not left COMPLETE when durable workspace save fails', async () => {
   const store = {
     load: async () => null,
     preflight: async () => ({ supported: true, availableBytes: 1_000_000 }),
     save: async workspace => {
-      if (workspace.job.phase === PHASES.COMPLETE) throw new Error('quota write failed');
+      if (workspace.job.phase === PHASES.COMPLETE) {
+        markWorkspaceStorageFailure(workspace);
+        fail('STORAGE_WRITE_FAILED', 'quota write failed');
+      }
     }
   };
   const runtime = { start: async () => {}, abort: async () => {}, pause: async () => {} };
@@ -34,7 +38,7 @@ test('completion is not published when durable workspace save fails', async () =
   kernel.workspace.mappingRevision = 1;
   kernel.workspace.outputRevision = 1;
 
-  await kernel.applyComplete({}, kernel.runEpoch);
+  await assert.rejects(() => kernel.applyComplete({}, kernel.runEpoch), /STORAGE_WRITE_FAILED/);
   assert.notEqual(kernel.workspace.job.phase, PHASES.COMPLETE);
   assert.equal(kernel.workspace.job.phase, PHASES.FAILED);
   assert.equal(kernel.workspace.lastError.code, 'STORAGE_WRITE_FAILED');
