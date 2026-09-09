@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Local-first stateful WebMCP data migration studio",
+  "description": "Local-first migration correctness infrastructure with a verified CSV-to-SQLite runner",
   "scripts": {
     "test": "node --test tests/*.test.js tests/conformance/*.test.js",
     "test:core": "node --test tests/core.test.js tests/transforms.test.js tests/migration.test.js",
@@ -12,7 +12,7 @@
     "test:conformance": "node --test tests/sqlite-target.test.js tests/sqlite-preflight.test.js tests/crash-recovery.test.js tests/fencing.test.js tests/conformance/*.test.js",
     "benchmark": "node benchmarks/run.js",
     "check": "npm test && npm run build && npm run benchmark && node scripts/static-check.js",
-    "serve": "python3 -m http.server 8765",
+    "serve": "python3 scripts/spa-server.py --port 8765 --directory dist",
     "build": "node scripts/build-dist.js"
   },
   "dependencies": {
