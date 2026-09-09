@@ -2,12 +2,16 @@
 
 **Migration correctness infrastructure: dirty data in, typed and verified data out.**
 
+SPOOL is an open-source local-first migration product built and commercially supported by **Dharan Tej Reddy Poduvu**, an individual solo builder. There is currently no incorporated SPOOL company and no paid SaaS dependency required to use or buy the supported migration services.
+
 SPOOL has two deliberately separate local-first execution paths:
 
 1. **Browser Studio** — profile, infer, deterministically transform, validate and export CSV data without sending rows to an application backend.
 2. **Gate B local runner** — execute an approved UTF-8 filesystem CSV migration into an existing ordinary SQLite table with source snapshot binding, live target preflight, transactional batch evidence, crash reconciliation, fencing, verification and a commit-bound receipt.
 
-[Try the browser Studio](https://spool-webmcp.vercel.app/) · [Request a Migration Assessment](https://github.com/dharan1007/spool/issues/new?template=migration-assessment.yml) · [Architecture](docs/ARCHITECTURE.md) · [Data handling](docs/DATA_HANDLING.md) · [Commercial support](docs/COMMERCIAL_SUPPORT.md) · [Migration services](docs/MIGRATION_SERVICES.md)
+[Technical browser demo](https://spool-webmcp.vercel.app/) · [Request a Migration Assessment](https://github.com/dharan1007/spool/issues/new?template=migration-assessment.yml) · [Zero-cost solo launch](docs/SOLO_BUILDER_LAUNCH.md) · [Migration services](docs/MIGRATION_SERVICES.md) · [Data handling](docs/DATA_HANDLING.md) · [Commercial support](docs/COMMERCIAL_SUPPORT.md)
+
+> The Vercel endpoint is a technical/open-source demo, not the paid customer data plane or checkout. Current paid migration work is delivered locally/customer-side so no paid hosting is required before revenue.
 
 [![release-gate](https://github.com/dharan1007/spool/actions/workflows/ci.yml/badge.svg)](https://github.com/dharan1007/spool/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -55,37 +59,21 @@ Supported Gate B target:
 - `insert` write strategy only;
 - batches of 1–10,000 rows;
 - destination schema/affinity/nullability checked before approval;
-- target table DDL, columns, indexes and foreign keys fingerprinted as a `targetContractId`;
-- targets with triggers or virtual-table behavior are rejected;
-- the target contract is rechecked inside each write transaction;
-- source and target paths must remain within configured filesystem allow-roots;
-- every production SQLite write requires `target_write` approval bound to the exact plan, source snapshot, target contract, effects, principal and expiry.
+- table DDL, columns, indexes and foreign keys fingerprinted as a `targetContractId`;
+- targets with triggers or virtual-table behavior rejected;
+- target contract rechecked inside every write transaction;
+- source and target paths constrained to configured allow-roots;
+- every SQLite write requires `target_write` approval bound to the exact plan, source snapshot, target contract, effects, principal and expiry.
 
 ## What SPOOL does **not** claim yet
 
-The current production claim does not include:
+The current production claim does not include PostgreSQL/MySQL execution, remote hosted database credentials, `upsert`/`replace`/`delete`/`truncate`, virtual SQLite tables, SQLite targets with triggers, server-side raw-row ingestion, unlimited browser file size, or legal/regulatory certification.
 
-- PostgreSQL or MySQL execution;
-- remote hosted database credentials;
-- `upsert`, `replace`, `delete` or `truncate` strategies;
-- virtual SQLite tables;
-- SQLite targets with triggers;
-- server-side raw-row ingestion;
-- unlimited browser file size;
-- automatic legal/regulatory certification.
-
-Those boundaries are intentional. Unsupported behavior fails closed rather than being described as production-ready.
+Unsupported behavior fails closed instead of being marketed as production-ready.
 
 ## Crash and replay guarantees
 
-Each logical target batch receives a deterministic identity bound to:
-
-- migration ID;
-- plan ID;
-- source snapshot ID;
-- mapping revision;
-- source range;
-- target identity.
+Each logical target batch receives a deterministic identity bound to migration ID, plan ID, source snapshot ID, mapping revision, source range and target identity.
 
 For SQLite, migrated rows and the batch reconciliation ledger are written in the same transaction. If the process stops after target commit but before SPOOL persists its local checkpoint, restart calls `reconcileTargetCommit(batchIdentity)`. Exact committed evidence advances the checkpoint without replaying rows; conflicting or indeterminate evidence stops the migration.
 
@@ -99,31 +87,21 @@ A run cannot produce a receipt until verification passes. Verification proves:
 source rows = written rows + explicitly rejected rows + explicitly filtered rows
 ```
 
-and checks that every expected batch has exact reconciliation-ledger evidence.
+and checks every expected batch has exact reconciliation-ledger evidence.
 
-The final receipt includes the migration/plan/source/target contract identities, batch identities, counts, violation summary, verification result, timestamps, SPOOL version and exact Git commit SHA. The canonical receipt record is SHA-256 hashed.
+The final receipt includes migration/plan/source/target identities, target-contract ID, batch identities, counts, violation summary, verification result, timestamps, SPOOL version and exact Git commit SHA. The canonical receipt is SHA-256 hashed.
 
 ## Real customer-style fixture
 
-`examples/crm-export/` is a checked-in migration case using the same production `SpoolCommandService` path as the local runner. It contains:
+`examples/crm-export/` uses the same production `SpoolCommandService` path as the local runner and includes dirty currency/locale values, canonical/textual dates, an intentionally ambiguous numeric date, mixed booleans, an invalid numeric ID, target DDL and a production migration request.
 
-- dirty currency/locale values;
-- canonical and textual dates;
-- an intentionally ambiguous numeric date that must be rejected;
-- mixed boolean representations;
-- an invalid numeric ID;
-- an existing SQLite target DDL;
-- a production migration request.
-
-`tests/crm-example.test.js` verifies the exact target rows, violations, reconciliation ledger and final receipt.
+`tests/crm-example.test.js` verifies exact target rows, violations, reconciliation ledger and final receipt.
 
 ## Local runner surfaces
 
-The browser UI, CLI/daemon work and production SQLite execution are separated by trust boundary, but the production transports dispatch into the same command service rather than implementing a second migration engine.
+The production transports dispatch into the same command service rather than a second migration engine:
 
-The local transport stack includes:
-
-- `SpoolCommandService` — the production command boundary;
+- `SpoolCommandService` — production command boundary;
 - CLI staged commands;
 - `spoold` — loopback-only authenticated HTTP bridge with Host/Origin checks and bounded requests;
 - durable local run/checkpoint store;
@@ -131,21 +109,7 @@ The local transport stack includes:
 
 ## Deterministic safety properties
 
-SPOOL does not execute arbitrary model-generated JavaScript against migration data. Transform expressions use a constrained IR with bounded recursion and regex rules. Current safety coverage includes:
-
-- deterministic locale-number parsing;
-- deterministic date parsing with ambiguous numeric dates rejected;
-- typed target validation;
-- source snapshot binding;
-- target-contract drift rejection;
-- exact batch replay/idempotency;
-- commit-before-checkpoint recovery;
-- stale-fence rejection;
-- credential-reference redaction/isolation primitives;
-- filesystem traversal and symlink/junction containment;
-- spreadsheet-formula neutralization;
-- browser IndexedDB quota/write failure handling;
-- Worker job/revision/sequence isolation.
+Current safety coverage includes deterministic locale-number/date parsing, ambiguous numeric-date rejection, typed target validation, source snapshot binding, target-contract drift rejection, exact replay/idempotency, commit-before-checkpoint recovery, stale-fence rejection, credential-reference isolation, filesystem traversal/symlink containment, spreadsheet-formula neutralization, browser IndexedDB quota/write failure handling and Worker job/revision/sequence isolation.
 
 ## Release evidence
 
@@ -165,13 +129,13 @@ real built-artifact Chrome smoke
 
 SQLite conformance is also executed on GitHub-hosted Linux, Windows and macOS runners. CodeQL runs independently.
 
-The browser smoke opens the built `dist/`, executes the 25,000-row Autopilot workflow, reaches COMPLETE/results, reloads through SPA deep links, proves IndexedDB restoration and rejects runtime/network-console failures.
+The browser smoke executes the 25,000-row Autopilot workflow, reaches results, reloads through SPA deep links, proves IndexedDB restoration and rejects runtime/network-console failures.
 
-Every production build writes `release.json` containing the exact source commit when `SPOOL_COMMIT_SHA` is supplied. Production rollout is accepted only when the deployed release SHA matches the intended Git commit.
+Every production build can emit `release.json` containing the exact source commit through `SPOOL_COMMIT_SHA`.
 
 ## Run locally
 
-Node.js 22+ is required. Gate B uses the pinned `better-sqlite3` native driver from the committed npm lockfile.
+Node.js 22+ is required. Gate B uses pinned `better-sqlite3` from the committed lockfile.
 
 ```bash
 git clone https://github.com/dharan1007/spool.git
@@ -192,25 +156,37 @@ node scripts/static-check.js
 npm run check
 ```
 
-## Commercial use and support
+## Start paid work with zero infrastructure spend
 
-The open-source repository remains MIT licensed. Commercial value is offered around real migration outcomes rather than a cosmetic premium tier:
+You do **not** need a company, paid hosting, hosted database, auth system, analytics product, or payment gateway to sell the current supported services.
 
-- Migration Preflight;
-- Import-Ready Dataset;
-- Migration Rescue;
-- Verified CSV → SQLite Migration;
-- scoped connector/integration work after the relevant safety contract exists.
+Current commercial offers:
 
-Public intake is **metadata only**. Never post production rows, customer/employee data, credentials, database dumps or private URLs to a GitHub issue. A production migration requires a private channel, written scope, backup/restore responsibility and explicit authorization before target mutation.
+- **Migration Preflight** — suggested first-customer test price ₹2,500–₹7,500;
+- **Import-Ready Dataset** — ₹5,000–₹15,000;
+- **Migration Rescue** — ₹7,500–₹25,000+;
+- **Verified CSV → SQLite Migration** — ₹10,000–₹30,000+.
 
-See:
+These are launch pricing hypotheses and are quoted after qualification, not guaranteed fixed-price tariffs.
 
+The zero-cost flow is:
+
+```text
+GitHub → metadata-only Migration Assessment → private quote/order
+→ customer-local SPOOL execution → verification/receipt → manual payment
+```
+
+Public intake is metadata only. Never post production rows, customer/employee data, credentials, database dumps or private URLs to a GitHub issue. Production target mutation requires written scope, backup/restore responsibility and explicit authorization.
+
+Commercial documents:
+
+- [`docs/SOLO_BUILDER_LAUNCH.md`](docs/SOLO_BUILDER_LAUNCH.md)
+- [`docs/INVOICE_QUOTE_TEMPLATE.md`](docs/INVOICE_QUOTE_TEMPLATE.md)
+- [`docs/MIGRATION_SERVICES.md`](docs/MIGRATION_SERVICES.md)
 - [`docs/DATA_HANDLING.md`](docs/DATA_HANDLING.md)
 - [`docs/COMMERCIAL_SUPPORT.md`](docs/COMMERCIAL_SUPPORT.md)
-- [`docs/MIGRATION_SERVICES.md`](docs/MIGRATION_SERVICES.md)
-- [`docs/TERMS_TEMPLATE.md`](docs/TERMS_TEMPLATE.md) — counsel-review template
-- [`docs/PRIVACY_TEMPLATE.md`](docs/PRIVACY_TEMPLATE.md) — counsel-review template
+- [`docs/TERMS_TEMPLATE.md`](docs/TERMS_TEMPLATE.md)
+- [`docs/PRIVACY_TEMPLATE.md`](docs/PRIVACY_TEMPLATE.md)
 - [`SECURITY.md`](SECURITY.md)
 
 ## Roadmap
