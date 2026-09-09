@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import Database from 'better-sqlite3';
 import { resolve } from 'node:path';
 import { fail } from '../core/errors.js';
 import { canonicalJson } from '../platform/canonical-json.js';
@@ -14,9 +14,10 @@ export class RunStore {
   constructor({ path } = {}) {
     text(path, 'state path');
     this.path = resolve(path);
-    this.db = new DatabaseSync(this.path);
+    this.db = new Database(this.path);
     this.closed = false;
-    this.db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
+    this.db.pragma('busy_timeout = 5000');
+    this.db.pragma('journal_mode = WAL');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS spool_runs (
         migration_id TEXT PRIMARY KEY NOT NULL,
