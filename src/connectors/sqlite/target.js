@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { resolve } from 'node:path';
 import { fail } from '../../core/errors.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
+import { sqliteTargetContractId } from './preflight.js';
 
 const LEDGER_TABLE = '__spool_batch_ledger';
 const LEASE_TABLE = 'spool_execution_leases';
@@ -149,6 +150,18 @@ export class SqliteTarget {
     if (Number(row.expires_at_ms) <= nowMs) fail('LEASE_EXPIRED', 'SQLite mutation lease has expired', { resource: this.fenceResource, fencingToken: input.fencingToken });
   }
 
+  #assertTargetContractInTransaction(input) {
+    if (input.targetContractId == null) return;
+    requiredHash('targetContractId', input.targetContractId);
+    const actual = sqliteTargetContractId(this.db, this.table);
+    if (actual !== input.targetContractId) {
+      fail('TARGET_CONTRACT_CHANGED', 'Live SQLite target contract changed after planning/approval', {
+        expectedTargetContractId: input.targetContractId,
+        actualTargetContractId: actual
+      });
+    }
+  }
+
   describeBatch(input = {}) {
     this.#assertOpen();
     return sqlitePayloadEvidence(input.rows);
@@ -164,6 +177,7 @@ export class SqliteTarget {
     this.db.exec('BEGIN IMMEDIATE;');
     try {
       this.#assertFenceInTransaction(input);
+      this.#assertTargetContractInTransaction(input);
       const existing = this.#readLedger(evidence.batchIdentity);
       if (existing) {
         if (!ledgerMatches(existing, evidence, this.table)) {
