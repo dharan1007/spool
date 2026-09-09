@@ -92,14 +92,26 @@ def main():
 
     profile = tempfile.mkdtemp(prefix='spool-chrome-')
     browser = resolve_browser()
+    browser_log = tempfile.NamedTemporaryFile(prefix='spool-browser-', suffix='.log', delete=False)
+    browser_log_path = browser_log.name
+    browser_log.close()
+    print(json.dumps({'browser': browser, 'target': target, 'serveDir': None if remote else resolve_serve_dir()}), flush=True)
+    log_handle = open(browser_log_path, 'w+', encoding='utf8')
     chrome = subprocess.Popen([
         browser, '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
         '--disable-background-networking', '--remote-allow-origins=*', f'--remote-debugging-port={CDP_PORT}',
         f'--user-data-dir={profile}', target
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ], stdout=log_handle, stderr=log_handle)
     cdp = None
     try:
-        wait_for(lambda: get_json(f'http://127.0.0.1:{CDP_PORT}/json'), timeout=10, label='Chromium CDP')
+        try:
+            wait_for(lambda: get_json(f'http://127.0.0.1:{CDP_PORT}/json'), timeout=10, label='Chromium CDP')
+        except Exception as exc:
+            status = chrome.poll()
+            log_handle.flush()
+            log_handle.seek(0)
+            details = log_handle.read()[-8000:]
+            raise AssertionError(f'Browser failed to expose CDP; executable={browser!r} exit={status!r}; stderr/stdout={details!r}') from exc
         pages = get_json(f'http://127.0.0.1:{CDP_PORT}/json')
         page = next(p for p in pages if p.get('type') == 'page')
         cdp = CDP(page['webSocketDebuggerUrl'])
@@ -175,6 +187,9 @@ def main():
         chrome.terminate()
         try: chrome.wait(timeout=3)
         except subprocess.TimeoutExpired: chrome.kill()
+        log_handle.close()
+        try: os.unlink(browser_log_path)
+        except OSError: pass
         if server:
             server.terminate()
             try: server.wait(timeout=3)
