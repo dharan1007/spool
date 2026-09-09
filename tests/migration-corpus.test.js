@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { escapeCsvCell } from '../src/core/csv.js';
+import { validateOutputRow } from '../src/core/schema.js';
 import { evaluateExpr } from '../src/core/transforms.js';
 
 const field = name => ({ op: 'field', name });
@@ -31,6 +32,13 @@ test('date corpus accepts explicit ISO and English textual dates but rejects num
   assert.equal(spoolCode(() => evaluateExpr(parseDate('date'), { date: '03/04/2026' })), 'AMBIGUOUS_DATE_FORMAT');
   assert.equal(spoolCode(() => evaluateExpr(parseDate('date'), { date: '04/03/2026' })), 'AMBIGUOUS_DATE_FORMAT');
   assert.equal(spoolCode(() => evaluateExpr(parseDate('date'), { date: '2026-02-30' })), 'INVALID_DATE');
+});
+
+test('target date validation does not reintroduce environment-dependent Date.parse behavior', () => {
+  const schema = [{ name: 'date', type: 'date', nullable: false }];
+  assert.equal(validateOutputRow({ date: '2026-04-03T00:00:00.000Z' }, schema).date, '2026-04-03T00:00:00.000Z');
+  assert.equal(spoolCode(() => validateOutputRow({ date: '03/04/2026' }, schema)), 'TYPE_MISMATCH');
+  assert.equal(spoolCode(() => validateOutputRow({ date: '2026-02-30' }, schema)), 'TYPE_MISMATCH');
 });
 
 test('CSV formula corpus neutralizes dangerous text without corrupting ordinary signed numbers', () => {
