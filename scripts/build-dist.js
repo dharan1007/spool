@@ -16,13 +16,33 @@ if (JSON.stringify(config.rewrites) !== JSON.stringify([{ source: '/(.*)', desti
   throw new Error('vercel.json must contain one canonical SPA rewrite to /index.html');
 }
 
+const packageJson = JSON.parse(await readFile('package.json', 'utf8'));
+const suppliedCommit = process.env.SPOOL_COMMIT_SHA?.trim() || '';
+if (suppliedCommit && !/^[a-f0-9]{40}$/i.test(suppliedCommit)) {
+  throw new Error('SPOOL_COMMIT_SHA must be an exact 40-character Git commit SHA when supplied');
+}
+const suppliedBuildTime = process.env.SPOOL_BUILD_TIME?.trim() || '';
+if (suppliedBuildTime && Number.isNaN(Date.parse(suppliedBuildTime))) {
+  throw new Error('SPOOL_BUILD_TIME must be an ISO-compatible date-time when supplied');
+}
+const builtAt = suppliedBuildTime || new Date().toISOString();
+const release = {
+  schemaVersion: 1,
+  version: process.env.SPOOL_RELEASE_VERSION?.trim() || packageJson.version,
+  commit: suppliedCommit ? suppliedCommit.toLowerCase() : null,
+  builtAt,
+  transport: 'same-origin-es-modules'
+};
+await writeFile('dist/release.json', `${JSON.stringify(release, null, 2)}\n`, 'utf8');
+
 const manifest = {
-  generatedAt: new Date().toISOString(),
-  transport: 'same-origin-es-modules',
+  generatedAt: builtAt,
+  transport: release.transport,
   appEntry: '/src/app.js',
   workerEntry: '/src/worker/migration.worker.js',
   compressedBootstrap: false,
-  dynamicBlobAppImport: false
+  dynamicBlobAppImport: false,
+  release: '/release.json'
 };
 await writeFile('dist/release-manifest.json', `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-console.log('Built dist/ as ordinary same-origin static ES modules; no compressed/blob application bootstrap.');
+console.log(`Built dist/ as ordinary same-origin static ES modules; release commit=${release.commit ?? 'unbound-local-build'}.`);
