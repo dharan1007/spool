@@ -123,6 +123,9 @@ export class SpoolCommandService {
     const parsed = parseCsv(text);
     if (parsed.rows.length === 0) fail('EMPTY_SOURCE', 'CSV source must contain at least one data row');
     const plan = await createMigrationPlan(input);
+    if (!plan.risk.approvals.includes('target_write')) {
+      fail('TARGET_WRITE_APPROVAL_REQUIRED', 'Gate B SQLite mutations require target_write in plan.risk.approvals');
+    }
     const targetPreflight = inspectSqliteTarget({ path: targetPath, table: plan.targetRef.table, targetSchema: plan.targetSchema });
     return { request, plan, snapshot, parsed, sourcePath, targetPath, targetPreflight };
   }
@@ -190,14 +193,12 @@ export class SpoolCommandService {
       return Object.freeze({ status: 'COMPLETE', verification: current.verification, receipt: current.receipt, replay: true });
     }
 
-    if (plan.risk.approvals.length) {
-      if (!approval) fail('APPROVAL_REQUIRED', 'This migration plan requires bound approval evidence');
-      assertBoundApproval(
-        approval,
-        approvalBinding(request, plan, snapshot, targetPreflight.targetContractId, approval.record?.expiresAt, approval.record?.nonce),
-        { signingKey: this.approvalSigningKey }
-      );
-    }
+    if (!approval) fail('APPROVAL_REQUIRED', 'This migration plan requires bound approval evidence');
+    assertBoundApproval(
+      approval,
+      approvalBinding(request, plan, snapshot, targetPreflight.targetContractId, approval.record?.expiresAt, approval.record?.nonce),
+      { signingKey: this.approvalSigningKey }
+    );
 
     const startedAt = current?.startedAt ?? new Date().toISOString();
     this.runs.start({ migrationId: request.migrationId, planId: plan.planId, sourceSnapshotId: snapshot.snapshotId, targetIdentity, startedAt });
