@@ -1,0 +1,44 @@
+name: package-exact-main
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact merged main
+        uses: actions/checkout@v4
+        with:
+          ref: feb1cfaab15c44522c594d008a8b0190f400ff52
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exactly from committed lockfile
+        run: npm ci
+      - name: Build exact release artifact
+        env:
+          SPOOL_COMMIT_SHA: feb1cfaab15c44522c594d008a8b0190f400ff52
+        run: npm run build
+      - name: Verify embedded release identity
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const release = JSON.parse(fs.readFileSync('dist/release.json', 'utf8'));
+          const expected = 'feb1cfaab15c44522c594d008a8b0190f400ff52';
+          if (release.commit !== expected) throw new Error(`release mismatch: ${release.commit}`);
+          console.log(`verified ${release.commit}`);
+          NODE
+      - name: Upload exact dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spool-dist-feb1cfa
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
