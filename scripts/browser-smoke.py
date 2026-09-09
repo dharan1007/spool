@@ -84,11 +84,13 @@ def main():
     remote = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('SPOOL_URL')
     server = None
     if remote:
-        target = remote.rstrip('/') + '/studio/new'
+        base_url = remote.rstrip('/')
+        target = base_url + '/studio/new'
     else:
         serve_dir = resolve_serve_dir()
         server = subprocess.Popen(['python3', '-m', 'http.server', str(HTTP_PORT), '--directory', serve_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        target = f'http://127.0.0.1:{HTTP_PORT}/'
+        base_url = f'http://127.0.0.1:{HTTP_PORT}'
+        target = base_url + '/'
 
     profile = tempfile.mkdtemp(prefix='spool-chrome-')
     browser = resolve_browser()
@@ -122,6 +124,27 @@ def main():
 
         wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=20, label='page load')
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='SPOOL app bootstrap')
+
+        # Prove the complete-product routes are real SPA deep links, not source-only copy.
+        product_checks = [
+            ('/local-runner', 'GATE B', 'target_write'),
+            ('/examples', '5 source records', '3 valid'),
+            ('/security', "connect-src 'none'", 'STALE_FENCE'),
+            ('/services', 'Migration Preflight', 'Dharan Tej Reddy Poduvu')
+        ]
+        for route, needle_a, needle_b in product_checks:
+            cdp.call('Page.navigate', {'url': base_url + route})
+            wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=15, label=f'{route} load')
+            wait_for(lambda r=route: cdp.eval(f'document.querySelector("[data-product-route=\\"{r}\\"]") !== null'), timeout=15, label=f'{route} product surface')
+            text = cdp.eval('document.body.innerText')
+            assert needle_a in text, f'{route} missing {needle_a!r}'
+            assert needle_b in text, f'{route} missing {needle_b!r}'
+            assert 'Local-first migration demo' not in cdp.eval('document.title')
+
+        # Return to the working Studio and prove the actual browser product still executes end-to-end.
+        cdp.call('Page.navigate', {'url': base_url + '/studio/new'})
+        wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=15, label='Studio deep-link load')
+        wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='Studio bootstrap after product routes')
         assert cdp.eval('window.__spoolTest.state().job.phase') in ('EMPTY', 'COMPLETE')
 
         if cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'):
@@ -170,6 +193,7 @@ def main():
         print(json.dumps({
             'status': 'PASS',
             'url': target,
+            'productRoutes': [route for route, _, _ in product_checks],
             'rows': state['job']['processedRows'],
             'valid': state['job']['validRows'],
             'invalid': state['job']['invalidRows'],
