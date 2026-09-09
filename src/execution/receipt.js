@@ -38,6 +38,7 @@ export function createMigrationReceipt(input = {}) {
     planId: hash('planId', input.planId),
     sourceSnapshotId: hash('sourceSnapshotId', input.sourceSnapshotId),
     targetIdentity: connectorIdentity(input.targetIdentity),
+    targetContractId: input.targetContractId == null ? null : hash('targetContractId', input.targetContractId),
     batchIdentities: input.batchIdentities.map(value => hash('batchIdentity', value)),
     counts: {
       sourceRows: nonNegative('sourceRows', input.counts.sourceRows),
