@@ -29,6 +29,7 @@ jobs:
       - name: Run built-browser smoke through production-style SPA rewrites
         env:
           SPOOL_SERVE_DIR: dist
+          SPOOL_BROWSER: google-chrome
         run: |
           python3 scripts/spa-server.py --port 8876 --directory dist &
           server_pid=$!
