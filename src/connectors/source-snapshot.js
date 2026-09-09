@@ -1,4 +1,4 @@
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { open, realpath } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { fail } from '../core/errors.js';
 import { sha256Canonical } from '../platform/canonical-json.js';
@@ -12,22 +12,31 @@ function freezeRecord(record) {
 export async function createFileSnapshot(path) {
   if (typeof path !== 'string' || !path.trim()) fail('INVALID_SOURCE_PATH', 'Source path must be a non-empty string');
   const resolvedPath = await realpath(path);
-  const info = await stat(resolvedPath);
-  if (!info.isFile()) fail('INVALID_SOURCE_PATH', 'Source path must resolve to a regular file');
-  const bytes = await readFile(resolvedPath);
-  const contentSha256 = createHash('sha256').update(bytes).digest('hex');
-  const identity = {
-    kind: 'file',
-    path: resolvedPath,
-    size: info.size,
-    contentSha256
-  };
-  const snapshotId = sha256Canonical(SOURCE_SNAPSHOT_ALGORITHM, identity);
-  return freezeRecord({
-    snapshotAlgorithm: SOURCE_SNAPSHOT_ALGORITHM,
-    snapshotId,
-    ...identity
-  });
+  const handle = await open(resolvedPath, 'r');
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) fail('INVALID_SOURCE_PATH', 'Source path must resolve to a regular file');
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs || after.ino !== info.ino || after.dev !== info.dev) {
+      fail('SOURCE_CHANGED_DURING_SNAPSHOT', 'Source changed while its snapshot was being created');
+    }
+    const contentSha256 = createHash('sha256').update(bytes).digest('hex');
+    const identity = {
+      kind: 'file',
+      path: resolvedPath,
+      size: info.size,
+      contentSha256
+    };
+    const snapshotId = sha256Canonical(SOURCE_SNAPSHOT_ALGORITHM, identity);
+    return freezeRecord({
+      snapshotAlgorithm: SOURCE_SNAPSHOT_ALGORITHM,
+      snapshotId,
+      ...identity
+    });
+  } finally {
+    await handle.close();
+  }
 }
 
 export function assertSnapshotBinding(expected, actual) {
