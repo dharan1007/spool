@@ -1,6 +1,5 @@
 import { fail } from './errors.js';
-
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+import { isCanonicalDate, isDeterministicDate } from './deterministic-date.js';
 
 function classify(value) {
   const text = String(value ?? '').trim();
@@ -8,7 +7,7 @@ function classify(value) {
   if (/^[+-]?\d+$/.test(text) && Number.isSafeInteger(Number(text))) return 'integer';
   if (/^[+-]?(?:\d+\.\d+|\d+\.?)(?:[eE][+-]?\d+)?$/.test(text) && Number.isFinite(Number(text))) return 'number';
   if (/^(?:true|false)$/i.test(text)) return 'boolean';
-  if (ISO_DATE.test(text) && !Number.isNaN(Date.parse(text))) return 'date';
+  if (isDeterministicDate(text)) return 'date';
   return 'string';
 }
 
@@ -67,7 +66,7 @@ export function validateOutputRow(row, schema) {
       case 'integer': valid = typeof value === 'number' && Number.isInteger(value); break;
       case 'number': valid = typeof value === 'number' && Number.isFinite(value); break;
       case 'boolean': valid = typeof value === 'boolean'; break;
-      case 'date': valid = typeof value === 'string' && !Number.isNaN(Date.parse(value)); break;
+      case 'date': valid = isCanonicalDate(value); break;
       default: valid = false;
     }
     if (!valid) fail('TYPE_MISMATCH', `Target field ${field.name} expected ${field.type}`, { field: field.name, expected: field.type, actual: typeof value, value });
