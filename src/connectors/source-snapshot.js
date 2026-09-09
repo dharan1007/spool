@@ -9,7 +9,7 @@ function freezeRecord(record) {
   return Object.freeze({ ...record });
 }
 
-export async function createFileSnapshot(path) {
+export async function readFileSnapshot(path) {
   if (typeof path !== 'string' || !path.trim()) fail('INVALID_SOURCE_PATH', 'Source path must be a non-empty string');
   const resolvedPath = await realpath(path);
   const handle = await open(resolvedPath, 'r');
@@ -29,14 +29,21 @@ export async function createFileSnapshot(path) {
       contentSha256
     };
     const snapshotId = sha256Canonical(SOURCE_SNAPSHOT_ALGORITHM, identity);
-    return freezeRecord({
-      snapshotAlgorithm: SOURCE_SNAPSHOT_ALGORITHM,
-      snapshotId,
-      ...identity
+    return Object.freeze({
+      snapshot: freezeRecord({
+        snapshotAlgorithm: SOURCE_SNAPSHOT_ALGORITHM,
+        snapshotId,
+        ...identity
+      }),
+      bytes
     });
   } finally {
     await handle.close();
   }
+}
+
+export async function createFileSnapshot(path) {
+  return (await readFileSnapshot(path)).snapshot;
 }
 
 export function assertSnapshotBinding(expected, actual) {
