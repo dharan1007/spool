@@ -26,6 +26,10 @@ function quoteIdentifier(value) {
   return `"${text.replaceAll('"', '""')}"`;
 }
 
+function sqliteBoundValue(value) {
+  return typeof value === 'boolean' ? (value ? 1 : 0) : value;
+}
+
 function validateRows(rows) {
   if (!Array.isArray(rows)) fail('INVALID_BATCH_ROWS', 'rows must be an array');
   if (rows.length === 0) return [];
@@ -40,7 +44,7 @@ function validateRows(rows) {
     if ([...keys].sort().join('\u0000') !== signature) fail('ROW_SHAPE_MISMATCH', 'All rows in a batch must have the same columns');
     for (const key of keys) {
       const value = row[key];
-      if (value !== null && !['string', 'number', 'bigint'].includes(typeof value) && !(value instanceof Uint8Array)) {
+      if (value !== null && !['string', 'number', 'bigint', 'boolean'].includes(typeof value) && !(value instanceof Uint8Array)) {
         fail('UNSUPPORTED_SQLITE_VALUE', `Unsupported SQLite value for ${key}`);
       }
       if (typeof value === 'number' && !Number.isFinite(value)) fail('UNSUPPORTED_SQLITE_VALUE', `Non-finite SQLite number for ${key}`);
@@ -199,7 +203,7 @@ export class SqliteTarget {
         const quotedColumns = columns.map(quoteIdentifier);
         const placeholders = columns.map(() => '?').join(', ');
         const insert = this.db.prepare(`INSERT INTO ${this.quotedTable} (${quotedColumns.join(', ')}) VALUES (${placeholders})`);
-        for (const row of rows) insert.run(...columns.map(column => row[column]));
+        for (const row of rows) insert.run(...columns.map(column => sqliteBoundValue(row[column])));
       }
 
       this.db.prepare(`
