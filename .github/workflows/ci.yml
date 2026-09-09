@@ -26,17 +26,11 @@ jobs:
         run: npm run check
       - name: Install browser smoke dependency
         run: python3 -m pip install --disable-pip-version-check websocket-client
-      - name: Inventory installed browsers
-        run: |
-          for browser in chromium chromium-browser google-chrome google-chrome-stable; do
-            if command -v "$browser" >/dev/null 2>&1; then
-              echo "$browser=$(command -v "$browser")"
-              "$browser" --version || true
-            else
-              echo "$browser=NOT_FOUND"
-            fi
-          done
-      - name: Run built-browser smoke
+      - name: Run built-browser smoke through production-style SPA rewrites
         env:
           SPOOL_SERVE_DIR: dist
-        run: python3 scripts/browser-smoke.py
+        run: |
+          python3 scripts/spa-server.py --port 8876 --directory dist &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          SPOOL_URL=http://127.0.0.1:8876 python3 scripts/browser-smoke.py
