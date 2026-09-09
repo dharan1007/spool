@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DatabaseSync } from 'node:sqlite';
+import Database from 'better-sqlite3';
 import { LeaseStore } from '../src/execution/lease-store.js';
 import { SqliteTarget } from '../src/connectors/sqlite/target.js';
 
@@ -45,7 +45,7 @@ test('same owner may renew without changing its fencing token', async () => {
 
 test('SQLite production mutation checks the durable fence inside its write transaction', async () => {
   await withStore(async (store, path) => {
-    const db = new DatabaseSync(path);
+    const db = new Database(path);
     db.exec('CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT;');
     db.close();
     const resource = 'sqlite:customers';
