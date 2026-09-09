@@ -61,7 +61,8 @@ test('commit-before-checkpoint crash reconciles exact target commit before repla
 test('runner fails closed on reconciliation conflict instead of replaying', async () => {
   await setup(async path => {
     const target = new SqliteTarget({ path, table: 'customers' });
-    const checkpointStore = { load: () => null, save: () => assert.fail('must not checkpoint conflict') };
+    let checkpoint = null;
+    const checkpointStore = { load: () => checkpoint, save: value => { checkpoint = value; } };
     const runner = new MigrationRunner({ target, checkpointStore });
     const original = {
       migrationId: 'mig_conflict_001',
@@ -74,9 +75,11 @@ test('runner fails closed on reconciliation conflict instead of replaying', asyn
     };
     const first = runner.runBatch(original);
     assert.equal(first.status, 'COMMITTED_EXACT');
+    assert.equal(count(path), 1);
 
+    const conflictStore = { load: () => null, save: () => assert.fail('must not checkpoint conflict') };
     const conflictingTarget = new SqliteTarget({ path, table: 'customers' });
-    const conflictingRunner = new MigrationRunner({ target: conflictingTarget, checkpointStore });
+    const conflictingRunner = new MigrationRunner({ target: conflictingTarget, checkpointStore: conflictStore });
     const changed = { ...original, rows: [{ id: 2, name: 'Changed' }] };
     assert.throws(() => conflictingRunner.runBatch(changed), /TARGET_RECONCILIATION_CONFLICT/);
     assert.equal(count(path), 1);
