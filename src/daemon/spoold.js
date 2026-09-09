@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { fail } from '../core/errors.js';
+import { fail, toErrorEnvelope } from '../core/errors.js';
 
 const COMMANDS = new Set(['inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt']);
 
@@ -65,6 +65,17 @@ async function dispatch(service, body) {
   }
 }
 
+function transportError(error) {
+  const envelope = toErrorEnvelope(error);
+  return Object.freeze({
+    code: envelope.code,
+    message: envelope.message,
+    severity: envelope.severity,
+    retryable: envelope.retryable,
+    nextActions: envelope.nextActions
+  });
+}
+
 export function createSpoolDaemon({ service, token, host = '127.0.0.1', allowedOrigins = [], maxBodyBytes = 1024 * 1024 } = {}) {
   if (!service || typeof service !== 'object') fail('INVALID_DAEMON_CONFIG', 'service is required');
   if (typeof token !== 'string' || token.length < 32) fail('INVALID_DAEMON_CONFIG', 'daemon bearer token must be at least 32 bytes');
@@ -97,9 +108,9 @@ export function createSpoolDaemon({ service, token, host = '127.0.0.1', allowedO
       const result = await dispatch(service, body);
       json(response, 200, { ok: true, result });
     } catch (error) {
-      const code = error?.code ?? 'COMMAND_FAILED';
-      const status = code === 'REQUEST_TOO_LARGE' ? 413 : code === 'INVALID_JSON' || code === 'INVALID_COMMAND' ? 400 : 422;
-      json(response, status, { ok: false, error: { code, message: String(error?.message ?? error) } });
+      const publicError = transportError(error);
+      const status = publicError.code === 'REQUEST_TOO_LARGE' ? 413 : publicError.code === 'INVALID_JSON' || publicError.code === 'INVALID_COMMAND' ? 400 : publicError.code === 'INTERNAL_ERROR' ? 500 : 422;
+      json(response, status, { ok: false, error: publicError });
     }
   });
 
