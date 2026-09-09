@@ -44,7 +44,7 @@ function request(sourcePath, targetPath) {
       mapping: [
         { target: 'id', expr: { op: 'cast_number', value: { op: 'field', name: 'id' } } },
         { target: 'name', expr: { op: 'trim', value: { op: 'field', name: 'name' } } },
-        { target: 'joined_at', expr: { op: 'cast_date', value: { op: 'field', name: 'joined_at' } } }
+        { target: 'joined_at', expr: { op: 'format_date', value: { op: 'field', name: 'joined_at' }, format: 'YYYY-MM-DD' } }
       ],
       mappingRevision: 1,
       writeStrategy: { mode: 'insert', batchSize: 2 },
