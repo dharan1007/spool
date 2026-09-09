@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import base64, json, os, shutil, subprocess, sys, tempfile, time, urllib.parse, urllib.request
+import base64, json, os, shutil, subprocess, sys, tempfile, time, urllib.request
 import websocket
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -11,6 +11,31 @@ def get_json(url, method='GET'):
     req = urllib.request.Request(url, method=method)
     with urllib.request.urlopen(req, timeout=3) as response:
         return json.load(response)
+
+
+def resolve_browser():
+    configured = os.environ.get('SPOOL_BROWSER')
+    if configured:
+        resolved = shutil.which(configured) if os.path.sep not in configured else configured
+        if resolved and os.path.exists(resolved):
+            return resolved
+        raise RuntimeError(f'SPOOL_BROWSER does not resolve to an executable: {configured}')
+    for candidate in ('chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable'):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    raise RuntimeError('No supported Chromium/Chrome executable found')
+
+
+def resolve_serve_dir():
+    configured = os.environ.get('SPOOL_SERVE_DIR')
+    if not configured:
+        return ROOT
+    path = configured if os.path.isabs(configured) else os.path.join(ROOT, configured)
+    path = os.path.realpath(path)
+    if not os.path.isdir(path):
+        raise RuntimeError(f'SPOOL_SERVE_DIR is not a directory: {path}')
+    return path
 
 
 class CDP:
@@ -61,12 +86,14 @@ def main():
     if remote:
         target = remote.rstrip('/') + '/studio/new'
     else:
-        server = subprocess.Popen(['python3', '-m', 'http.server', str(HTTP_PORT), '--directory', ROOT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        target = f'http://127.0.0.1:{HTTP_PORT}/studio/new'
+        serve_dir = resolve_serve_dir()
+        server = subprocess.Popen(['python3', '-m', 'http.server', str(HTTP_PORT), '--directory', serve_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        target = f'http://127.0.0.1:{HTTP_PORT}/'
 
     profile = tempfile.mkdtemp(prefix='spool-chrome-')
+    browser = resolve_browser()
     chrome = subprocess.Popen([
-        'chromium', '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+        browser, '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
         '--disable-background-networking', '--remote-allow-origins=*', f'--remote-debugging-port={CDP_PORT}',
         f'--user-data-dir={profile}', target
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -85,7 +112,6 @@ def main():
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='SPOOL app bootstrap')
         assert cdp.eval('window.__spoolTest.state().job.phase') in ('EMPTY', 'COMPLETE')
 
-        # Reset a prior durable terminal workspace when smoke is rerun against the same browser profile.
         if cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'):
             cdp.eval('window.__spoolTest.invoke("start_new_migration", {})')
             wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "EMPTY"'), label='workspace reset')
@@ -114,7 +140,6 @@ def main():
         wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'), timeout=10, label='IndexedDB restoration')
         assert cdp.eval('window.__spoolTest.state().output.length > 24900')
 
-        # Force one more CDP round-trip so queued exception/network events are collected.
         cdp.eval('document.title')
         exceptions = [e for e in cdp.events if e.get('method') == 'Runtime.exceptionThrown']
         failed = [e for e in cdp.events if e.get('method') == 'Network.loadingFailed' and not e.get('params', {}).get('canceled')]
