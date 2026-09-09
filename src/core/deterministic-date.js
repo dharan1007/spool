@@ -76,3 +76,14 @@ export function isDeterministicDate(value) {
     return false;
   }
 }
+
+export function isCanonicalDate(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (!ISO_DATE.test(text) && !ISO_INSTANT.test(text)) return false;
+  try {
+    return parseDeterministicDate(text) !== null;
+  } catch {
+    return false;
+  }
+}
