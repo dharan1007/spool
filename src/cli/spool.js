@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
-import { SpoolCommandService } from '../daemon/command-service.js';
 
 const COMMANDS = ['inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt'];
 
@@ -78,6 +77,10 @@ async function main() {
   for (const name of ['source-root', 'target-root', 'state']) if (!flags[name]) usage(`--${name} is required`);
   const approvalSigningKey = process.env.SPOOL_APPROVAL_KEY;
   if (typeof approvalSigningKey !== 'string' || approvalSigningKey.length < 16) usage('SPOOL_APPROVAL_KEY must be set to at least 16 bytes');
+
+  // Load the SQLite-backed command service only after pure CLI validation. This keeps
+  // machine-readable usage errors free from Node's experimental sqlite warning noise.
+  const { SpoolCommandService } = await import('../daemon/command-service.js');
   const service = await SpoolCommandService.create({
     sourceRoot: flags['source-root'],
     targetRoot: flags['target-root'],
