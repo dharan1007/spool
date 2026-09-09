@@ -65,12 +65,15 @@ test('command service enforces approval and executes verified fenced CSV-to-SQLi
     const inspected = await service.inspect(request);
     assert.equal(inspected.sourceRows, 3);
     assert.match(inspected.sourceSnapshotId, /^sha256:/);
+    assert.match(inspected.targetContractId, /^sha256:/);
+    assert.equal(inspected.targetPreflight.status, 'READY');
 
     const plan = await service.plan(request);
     assert.match(plan.planId, /^sha256:/);
     const dry = await service.dryRun(request);
     assert.equal(dry.validRows, 2);
     assert.equal(dry.invalidRows, 1);
+    assert.equal(dry.targetContractId, inspected.targetContractId);
     assert.throws(() => service.runSyncGuard(), /ASYNC_COMMAND_ONLY/);
     await assert.rejects(() => service.run(request), /APPROVAL_REQUIRED/);
 
@@ -78,10 +81,12 @@ test('command service enforces approval and executes verified fenced CSV-to-SQLi
       expiresAt: '2099-01-01T00:00:00.000Z',
       nonce: 'approval-001'
     });
+    assert.equal(approval.record.targetContractId, inspected.targetContractId);
     const result = await service.run(request, { approval });
     assert.equal(result.status, 'COMPLETE');
     assert.equal(result.verification.status, 'VERIFIED');
     assert.match(result.receipt.receiptId, /^sha256:/);
+    assert.equal(result.receipt.record.targetContractId, inspected.targetContractId);
     assert.deepEqual(targetRows(targetPath), [{ id: 1, name: 'Ada' }, { id: 2, name: 'Lin' }]);
 
     const status = service.status(request.migrationId);
@@ -99,6 +104,18 @@ test('approval is invalidated if source snapshot changes before execution', asyn
     const request = manifest(sourcePath, targetPath);
     const approval = await service.approve(request, { expiresAt: '2099-01-01T00:00:00.000Z', nonce: 'approval-002' });
     await writeFile(sourcePath, 'id,name\n1,Ada\n2,Lin\n3,Changed\n');
+    await assert.rejects(() => service.run(request, { approval }), /APPROVAL_BINDING_MISMATCH/);
+    assert.equal(targetRows(targetPath).length, 0);
+  });
+});
+
+test('approval is invalidated if the live SQLite target contract changes after approval', async () => {
+  await fixture(async ({ service, sourcePath, targetPath }) => {
+    const request = manifest(sourcePath, targetPath);
+    const approval = await service.approve(request, { expiresAt: '2099-01-01T00:00:00.000Z', nonce: 'approval-003' });
+    const db = new Database(targetPath);
+    db.exec('CREATE UNIQUE INDEX ux_customers_name ON customers(name);');
+    db.close();
     await assert.rejects(() => service.run(request, { approval }), /APPROVAL_BINDING_MISMATCH/);
     assert.equal(targetRows(targetPath).length, 0);
   });
