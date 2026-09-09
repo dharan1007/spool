@@ -20,7 +20,6 @@ export function parseCsv(text, options = {}) {
   };
   const pushRow = () => {
     pushCell();
-    // Ignore one terminal blank row from a trailing newline.
     rows.push(row);
     row = [];
     if (rows.length > maxRows + 1) fail('TOO_MANY_ROWS', `CSV exceeds ${maxRows} data rows`);
@@ -73,9 +72,18 @@ export function parseCsv(text, options = {}) {
   return { headers, rows: objects };
 }
 
+const PLAIN_SIGNED_NUMBER = /^[+-]?(?:(?:\d+\.?\d*)|(?:\.\d+))(?:[eE][+-]?\d+)?$/;
+
+function needsFormulaNeutralization(text) {
+  const trimmed = text.trim();
+  if (!trimmed || !/^[=+\-@]/.test(trimmed)) return false;
+  if (PLAIN_SIGNED_NUMBER.test(trimmed)) return false;
+  return true;
+}
+
 export function escapeCsvCell(value) {
   let text = value == null ? '' : String(value);
-  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  if (needsFormulaNeutralization(text)) text = `'${text}`;
   if (/[",\r\n]/.test(text)) text = `"${text.replaceAll('"', '""')}"`;
   return text;
 }
