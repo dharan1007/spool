@@ -26,12 +26,19 @@ async function walk(dir) {
   return out;
 }
 
-for (const file of [...(await walk('src')).filter(f => f.endsWith('.js')), 'boot-watchdog.js']) {
+const sourceFiles = [...(await walk('src')).filter(f => f.endsWith('.js')), 'boot-watchdog.js'];
+for (const file of sourceFiles) {
   const text = await readFile(file, 'utf8');
   if (/\beval\s*\(/.test(text) || /new\s+Function\s*\(/.test(text)) failures.push(`${file}: arbitrary code execution primitive detected`);
   if (/\bfetch\s*\(|\bXMLHttpRequest\b|\bnavigator\.sendBeacon\b|\bWebSocket\s*\(/.test(text)) failures.push(`${file}: outbound network primitive detected`);
+  if (/from\s+['"]node:sqlite['"]|require\(['"]node:sqlite['"]\)/.test(text)) failures.push(`${file}: node:sqlite is not allowed in the production runtime; use the pinned stable driver`);
   const checked = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' });
   if (checked.status !== 0) failures.push(`${file}: syntax check failed: ${checked.stderr.trim()}`);
+}
+
+for (const file of (await walk('tests')).filter(f => f.endsWith('.js'))) {
+  const text = await readFile(file, 'utf8');
+  if (/from\s+['"]node:sqlite['"]|require\(['"]node:sqlite['"]\)/.test(text)) failures.push(`${file}: test still depends on node:sqlite instead of the production driver`);
 }
 
 try {
@@ -52,4 +59,4 @@ if (failures.length) {
   failures.forEach(f => console.error(`- ${f}`));
   process.exit(1);
 }
-console.log(`Static release check passed (${required.length} required artifacts, no source-network primitives, JS syntax valid).`);
+console.log(`Static release check passed (${required.length} required artifacts, stable SQLite runtime, no source-network primitives, JS syntax valid).`);
