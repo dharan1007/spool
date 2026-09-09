@@ -60,6 +60,7 @@ export function buildApprovalRecord(binding = {}) {
     planRevision: binding.planRevision,
     sourceSnapshotId: hash('sourceSnapshotId', binding.sourceSnapshotId),
     targetIdentity: connectorIdentity(binding.targetIdentity),
+    targetContractId: binding.targetContractId == null ? null : hash('targetContractId', binding.targetContractId),
     effects: normalizeEffects(binding.effects),
     writeStrategy: normalizeStrategy(binding.writeStrategy),
     principal: text('principal', binding.principal, 256),
