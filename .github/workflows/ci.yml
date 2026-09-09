@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,4 +21,12 @@ jobs:
       - name: Install reproducibly
         run: npm ci --ignore-scripts
       - name: Run production release gate
+        env:
+          SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: npm run check
+      - name: Install browser smoke dependency
+        run: python3 -m pip install --disable-pip-version-check websocket-client
+      - name: Run built-browser smoke
+        env:
+          SPOOL_SERVE_DIR: dist
+        run: python3 scripts/browser-smoke.py
