@@ -1,0 +1,35 @@
+name: package-production-artifact
+
+on:
+  push:
+    branches: [ops/package-main-57cabe9]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 57cabe993b621b026ccb06cce95b1656dfbcded3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build exact merged-main artifact
+        env:
+          SPOOL_COMMIT_SHA: 57cabe993b621b026ccb06cce95b1656dfbcded3
+          SPOOL_RELEASE_VERSION: 1.0.0
+        run: npm run build
+      - name: Verify release identity before packaging
+        run: node -e "const r=require('./dist/release.json'); if(r.commit!=='57cabe993b621b026ccb06cce95b1656dfbcded3') process.exit(1); console.log(r)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spool-production-57cabe9
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
