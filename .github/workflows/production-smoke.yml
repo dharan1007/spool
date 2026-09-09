@@ -45,4 +45,5 @@ jobs:
       - name: Run production browser smoke
         env:
           SPOOL_URL: ${{ inputs.url || 'https://spool-webmcp.vercel.app' }}
+          SPOOL_BROWSER: google-chrome
         run: python3 scripts/browser-smoke.py
