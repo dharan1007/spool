@@ -5,6 +5,7 @@ import { inferSchema } from '../core/schema.js';
 import { MigrationEngine } from '../core/migration.js';
 import { readFileSnapshot } from '../connectors/source-snapshot.js';
 import { SqliteTarget } from '../connectors/sqlite/target.js';
+import { inspectSqliteTarget } from '../connectors/sqlite/preflight.js';
 import { createPathPolicy } from '../platform/path-policy.js';
 import { connectorIdentity } from '../platform/contracts.js';
 import { createMigrationPlan } from '../platform/plan.js';
@@ -34,13 +35,14 @@ function approvalEffects(plan) {
   ].sort();
 }
 
-function approvalBinding(request, plan, snapshot, expiresAt, nonce) {
+function approvalBinding(request, plan, snapshot, targetContractId, expiresAt, nonce) {
   return {
     migrationId: request.migrationId,
     planId: plan.planId,
     planRevision: plan.planRevision,
     sourceSnapshotId: snapshot.snapshotId,
     targetIdentity: plan.targetRef,
+    targetContractId,
     effects: approvalEffects(plan),
     writeStrategy: plan.writeStrategy,
     principal: request.principal,
@@ -121,7 +123,8 @@ export class SpoolCommandService {
     const parsed = parseCsv(text);
     if (parsed.rows.length === 0) fail('EMPTY_SOURCE', 'CSV source must contain at least one data row');
     const plan = await createMigrationPlan(input);
-    return { request, plan, snapshot, parsed, sourcePath, targetPath };
+    const targetPreflight = inspectSqliteTarget({ path: targetPath, table: plan.targetRef.table, targetSchema: plan.targetSchema });
+    return { request, plan, snapshot, parsed, sourcePath, targetPath, targetPreflight };
   }
 
   async inspect(request) {
@@ -133,6 +136,13 @@ export class SpoolCommandService {
       sourceSnapshotId: prepared.snapshot.snapshotId,
       sourceSchema: Object.freeze(inferSchema(prepared.parsed.rows).map(field => Object.freeze({ ...field }))),
       target: Object.freeze(connectorIdentity(prepared.plan.targetRef)),
+      targetContractId: prepared.targetPreflight.targetContractId,
+      targetPreflight: Object.freeze({
+        status: prepared.targetPreflight.status,
+        columns: prepared.targetPreflight.columns,
+        indexes: prepared.targetPreflight.indexes,
+        foreignKeys: prepared.targetPreflight.foreignKeys
+      }),
       maxSourceBytes: this.maxSourceBytes
     });
   }
@@ -148,6 +158,7 @@ export class SpoolCommandService {
       migrationId: request.migrationId,
       planId: prepared.plan.planId,
       sourceSnapshotId: prepared.snapshot.snapshotId,
+      targetContractId: prepared.targetPreflight.targetContractId,
       processedRows: result.processedRows,
       validRows: result.validRows,
       invalidRows: result.invalidRows,
@@ -159,7 +170,7 @@ export class SpoolCommandService {
     const prepared = await this.#prepare(request);
     if (typeof expiresAt !== 'string' || typeof nonce !== 'string') fail('INVALID_APPROVAL_REQUEST', 'expiresAt and nonce are required');
     return createBoundApproval(
-      approvalBinding(request, prepared.plan, prepared.snapshot, expiresAt, nonce),
+      approvalBinding(request, prepared.plan, prepared.snapshot, prepared.targetPreflight.targetContractId, expiresAt, nonce),
       { signingKey: this.approvalSigningKey }
     );
   }
@@ -168,12 +179,13 @@ export class SpoolCommandService {
 
   async run(request, { approval = null } = {}) {
     const prepared = await this.#prepare(request);
-    const { plan, snapshot, parsed, targetPath } = prepared;
+    const { plan, snapshot, parsed, targetPath, targetPreflight } = prepared;
     const current = this.runs.get(request.migrationId);
     const targetIdentity = connectorIdentity(plan.targetRef);
     if (current?.status === 'COMPLETE') {
-      if (current.planId !== plan.planId || current.sourceSnapshotId !== snapshot.snapshotId || JSON.stringify(current.targetIdentity) !== JSON.stringify(targetIdentity)) {
-        fail('MIGRATION_ID_REUSE_CONFLICT', 'Completed migrationId cannot be reused for changed semantics');
+      const priorContractId = current.receipt?.record?.targetContractId ?? null;
+      if (current.planId !== plan.planId || current.sourceSnapshotId !== snapshot.snapshotId || JSON.stringify(current.targetIdentity) !== JSON.stringify(targetIdentity) || priorContractId !== targetPreflight.targetContractId) {
+        fail('MIGRATION_ID_REUSE_CONFLICT', 'Completed migrationId cannot be reused for changed semantics or target contract');
       }
       return Object.freeze({ status: 'COMPLETE', verification: current.verification, receipt: current.receipt, replay: true });
     }
@@ -182,7 +194,7 @@ export class SpoolCommandService {
       if (!approval) fail('APPROVAL_REQUIRED', 'This migration plan requires bound approval evidence');
       assertBoundApproval(
         approval,
-        approvalBinding(request, plan, snapshot, approval.record?.expiresAt, approval.record?.nonce),
+        approvalBinding(request, plan, snapshot, targetPreflight.targetContractId, approval.record?.expiresAt, approval.record?.nonce),
         { signingKey: this.approvalSigningKey }
       );
     }
@@ -228,6 +240,7 @@ export class SpoolCommandService {
           mappingRevision: plan.mappingRevision,
           sourceRange,
           targetIdentity: plan.targetRef,
+          targetContractId: targetPreflight.targetContractId,
           rows: transformed.output,
           fencingToken: lease.fencingToken
         });
@@ -250,6 +263,7 @@ export class SpoolCommandService {
         planId: plan.planId,
         sourceSnapshotId: snapshot.snapshotId,
         targetIdentity: plan.targetRef,
+        targetContractId: targetPreflight.targetContractId,
         batchIdentities: expectedBatchIdentities,
         counts: { sourceRows: parsed.rows.length, writtenRows: dry.validRows, rejectedRows: dry.invalidRows, filteredRows: 0 },
         violationsSummary: canonicalViolationSummary(dry.violations).map(({ code, count }) => ({ code, count })),
