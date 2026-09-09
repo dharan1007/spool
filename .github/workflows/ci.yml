@@ -26,6 +26,16 @@ jobs:
         run: npm run check
       - name: Install browser smoke dependency
         run: python3 -m pip install --disable-pip-version-check websocket-client
+      - name: Inventory installed browsers
+        run: |
+          for browser in chromium chromium-browser google-chrome google-chrome-stable; do
+            if command -v "$browser" >/dev/null 2>&1; then
+              echo "$browser=$(command -v "$browser")"
+              "$browser" --version || true
+            else
+              echo "$browser=NOT_FOUND"
+            fi
+          done
       - name: Run built-browser smoke
         env:
           SPOOL_SERVE_DIR: dist
