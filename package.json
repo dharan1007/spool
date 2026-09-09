@@ -5,10 +5,11 @@
   "type": "module",
   "description": "Local-first stateful WebMCP data migration studio",
   "scripts": {
-    "test": "node --test tests/*.test.js",
+    "test": "node --test tests/*.test.js tests/conformance/*.test.js",
     "test:core": "node --test tests/core.test.js tests/transforms.test.js tests/migration.test.js",
     "test:webmcp": "node --test tests/webmcp.test.js",
-    "test:security": "node --test tests/security.test.js",
+    "test:security": "node --test tests/security.test.js tests/platform-security.test.js tests/credential-broker.test.js tests/path-policy.test.js",
+    "test:conformance": "node --test tests/sqlite-target.test.js tests/sqlite-preflight.test.js tests/crash-recovery.test.js tests/fencing.test.js tests/conformance/*.test.js",
     "benchmark": "node benchmarks/run.js",
     "check": "npm test && npm run build && npm run benchmark && node scripts/static-check.js",
     "serve": "python3 -m http.server 8765",
