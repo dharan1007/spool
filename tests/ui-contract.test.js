@@ -27,6 +27,38 @@ test('product frontend defines separate explanatory and Studio routes', () => {
   assert.match(app, /inspect_mission/);
 });
 
+test('complete website exposes the verified local-runner product instead of only the browser demo', () => {
+  for (const route of ['/local-runner', '/examples', '/security', '/services']) {
+    assert.match(app, new RegExp(route.replaceAll('/', '\\/')), `missing complete-product route ${route}`);
+  }
+
+  for (const phrase of [
+    'Browser Studio',
+    'Local runner',
+    'source snapshot',
+    'target contract',
+    'target_write',
+    'fencing',
+    'reconciliation',
+    'verification',
+    'receipt',
+    'spoold',
+    'PostgreSQL',
+    'MySQL'
+  ]) assert.match(app, new RegExp(phrase, 'i'), `missing local-runner product truth: ${phrase}`);
+
+  for (const phrase of ['Migration Preflight', 'Import-Ready Dataset', 'Migration Rescue', 'Verified CSV', 'Dharan Tej Reddy Poduvu', 'metadata-only']) {
+    assert.match(app, new RegExp(phrase, 'i'), `missing services copy: ${phrase}`);
+  }
+
+  for (const phrase of ['5 source', '3 valid', '2 rejected', 'ambiguous', 'CRM', 'ledger']) {
+    assert.match(app, new RegExp(phrase, 'i'), `missing real example evidence: ${phrase}`);
+  }
+
+  assert.match(app, /connect-src 'none'/);
+  assert.doesNotMatch(html, /technical demo|migration demo/i);
+});
+
 test('boot path renders a visible failure state instead of leaving Loading SPOOL forever', () => {
   assert.match(watchdog, /Startup timed out/);
   assert.match(watchdog, /__spoolMarkBooted/);
