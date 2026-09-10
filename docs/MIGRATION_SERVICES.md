@@ -8,6 +8,8 @@ The first customers do not require a paid SaaS stack. Qualification happens thro
 
 No paid authentication, hosted database, analytics, CRM, checkout, or payment gateway is required to deliver the current services.
 
+The durable operating workflow is documented in [`CUSTOMER_ENGAGEMENT.md`](CUSTOMER_ENGAGEMENT.md), with separate target-authorization, delivery/acceptance, and optional case-study-consent templates.
+
 ## 1. Migration Preflight
 
 **Use when:** a customer is about to import or migrate data and wants to know what will break before touching the target.
@@ -77,7 +79,7 @@ Unsupported capability is a separate engineering project; do not bypass safety c
 
 Use the repository's **Migration Assessment** issue form for initial non-sensitive qualification. It is public: provide only system category, approximate size, failure mode, urgency, and sensitivity classification. Never attach real rows, database dumps, secrets, private URLs, or customer records.
 
-If the case proceeds, establish a private contact channel and an accepted written quote/order before sensitive information is exchanged.
+If the case proceeds, establish a private contact channel and an accepted written quote/order before sensitive information is exchanged. Follow [`CUSTOMER_ENGAGEMENT.md`](CUSTOMER_ENGAGEMENT.md) from qualification through closeout.
 
 ## Minimum quote/order fields
 
@@ -101,9 +103,17 @@ Every paid migration should define:
 
 Use [`INVOICE_QUOTE_TEMPLATE.md`](INVOICE_QUOTE_TEMPLATE.md) as the operational starting point.
 
+## Required pre-write authorization
+
+Before target mutation, obtain written scope using [`AUTHORIZATION_TEMPLATE.md`](AUTHORIZATION_TEMPLATE.md) or an equivalent customer-approved document. It must identify the customer-authorized target, permitted operation, source/scope, execution window, explicit exclusions, and backup/restore responsibility.
+
+No written authorization means no production target write.
+
 ## Acceptance evidence
 
 A database migration is not accepted merely because the process exits successfully. Current SQLite acceptance should include configured verification and the SPOOL receipt. The receipt binds release commit, plan ID, source snapshot, target identity, target-contract ID, batch IDs, counts, violations, and timestamps.
+
+Use [`DELIVERY_ACCEPTANCE_TEMPLATE.md`](DELIVERY_ACCEPTANCE_TEMPLATE.md) for the delivery manifest and written customer acceptance. Case-study permission is independent and optional; if requested, use [`CASE_STUDY_CONSENT_TEMPLATE.md`](CASE_STUDY_CONSENT_TEMPLATE.md).
 
 A SPOOL receipt is technical provenance evidence, not legal/regulatory certification.
 
