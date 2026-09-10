@@ -11,10 +11,12 @@ on:
       version:
         description: Semantic version without v prefix
         required: false
+        type: string
         default: '1.0.0'
       commit_sha:
         description: Exact protected-main commit SHA; required when release is true
         required: false
+        type: string
         default: ''
   push:
     branches: [main]
@@ -93,158 +95,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Validate release request
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REF" = "refs/heads/main" || { echo "Releases must be dispatched from protected main" >&2; exit 1; }
-          EXPECTED="${{ inputs.commit_sha }}"
-          [[ "$EXPECTED" =~ ^[a-f0-9]{40}$ ]] || { echo "commit_sha must be an exact lowercase 40-character Git SHA" >&2; exit 1; }
-
-      - name: Checkout exact release commit
+      - name: Checkout exact requested commit
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 0
-
-      - name: Prove exact SHA is current protected main
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch origin main --depth=1
-          HEAD_SHA="$(git rev-parse HEAD)"
-          MAIN_SHA="$(git rev-parse origin/main)"
-          EXPECTED="${{ inputs.commit_sha }}"
-          test "$HEAD_SHA" = "$EXPECTED"
-          test "$MAIN_SHA" = "$EXPECTED"
-
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
-      - name: Validate release version
-        shell: bash
-        run: |
-          set -euo pipefail
-          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          test "$PACKAGE_VERSION" = "${{ inputs.version }}" || { echo "package version $PACKAGE_VERSION does not match requested version ${{ inputs.version }}" >&2; exit 1; }
-
-      - name: Install and audit locked dependencies
-        run: |
-          npm ci
-          npm audit --omit=dev --audit-level=high
-
-      - name: Re-run exact release verification
-        env:
-          SPOOL_COMMIT_SHA: ${{ inputs.commit_sha }}
-          SPOOL_RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          npm run check
-          npm run pack:verify
-
-      - name: Build release assets and checksums
-        shell: bash
-        env:
-          SPOOL_COMMIT_SHA: ${{ inputs.commit_sha }}
-          SPOOL_RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          rm -rf release
-          mkdir release
-          PACK_JSON="$(npm pack --json --pack-destination release)"
-          ARTIFACT="release/$(node -e "const x=JSON.parse(process.argv[1]); if(!Array.isArray(x)||!x[0]?.filename) process.exit(2); process.stdout.write(x[0].filename)" "$PACK_JSON")"
-          test -s "$ARTIFACT"
-          node scripts/release-manifest.js --version "${{ inputs.version }}" --commit "${{ inputs.commit_sha }}" --artifact "$ARTIFACT" --out release/release-record.json
-          (
-            cd release
-            sha256sum "$(basename "$ARTIFACT")" release-record.json > SHA256SUMS
-            sha256sum -c SHA256SUMS
-          )
-
-      - name: Create or verify exact immutable tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="v${{ inputs.version }}"
-          SHA="${{ inputs.commit_sha }}"
-          git fetch origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            EXISTING="$(git rev-parse "refs/tags/$TAG^{}")"
-            test "$EXISTING" = "$SHA" || { echo "Tag $TAG already points to $EXISTING; refusing to move an immutable release tag" >&2; exit 1; }
-          else
-            git tag -a "$TAG" "$SHA" -m "SPOOL $TAG"
-            git push origin "refs/tags/$TAG"
-          fi
-
-      - name: Write release notes
-        shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          version = os.environ['VERSION']
-          Path('release-notes.md').write_text(f'''# SPOOL v{version}
-
-Evidence-backed SPOOL release for zero-cost customer-local operation.
-
-## Production-supported scope
-
-- Browser Studio: local-first CSV profiling, deterministic transformation, validation and export; 50 MiB browser boundary.
-- Local Runner: UTF-8 filesystem CSV into an existing ordinary SQLite table, INSERT only.
-- Source snapshot, live target contract, bound target_write approval, lease/fencing, atomic batch ledger, crash reconciliation, verification and commit-bound receipt.
-- Installed `spool` CLI and authenticated loopback `spoold` share the production command service.
-
-## Install
-
-```bash
-npm install -g github:dharan1007/spool#v{version}
-spool --help
-```
-
-The attached package tarball, `SHA256SUMS`, and `release-record.json` provide a verifiable artifact path.
-
-## Explicit boundary
-
-This release does not claim hosted raw-row ingestion, unsupported write strategies, virtual/triggered SQLite targets, or legal/regulatory certification. See `docs/LOCAL_RUNNER.md`, `SECURITY.md`, `docs/DATA_HANDLING.md`, and `docs/CUSTOMER_ENGAGEMENT.md`.
-''', encoding='utf-8')
-          PY
-
-      - name: Publish once or verify the immutable existing release
-        shell: bash
+      - name: Install exactly from committed lockfile
+        run: npm ci
+      - name: Publish or verify immutable release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_COMMIT: ${{ inputs.commit_sha }}
-        run: |
-          set -euo pipefail
-          TAG="v${{ inputs.version }}"
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            rm -rf existing-release
-            mkdir existing-release
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir existing-release --pattern '*.tgz' --pattern 'SHA256SUMS' --pattern 'release-record.json'
-            (
-              cd existing-release
-              sha256sum -c SHA256SUMS
-            )
-            node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync('existing-release/release-record.json','utf8'));if(r.version!==process.env.RELEASE_VERSION)throw new Error('Existing release version mismatch: '+r.version);if(r.commit!==process.env.RELEASE_COMMIT)throw new Error('Existing release commit mismatch: '+r.commit);if(!r.artifact?.filename||!r.artifact.filename.endsWith('.tgz'))throw new Error('Existing release record lacks package artifact');if(!fs.existsSync('existing-release/'+r.artifact.filename))throw new Error('Existing package artifact named by release record is missing');"
-          else
-            gh release create "$TAG" release/*.tgz release/SHA256SUMS release/release-record.json --verify-tag --title "SPOOL $TAG" --notes-file release-notes.md --repo "$GITHUB_REPOSITORY"
-          fi
-
-      - name: Verify published release identity and assets
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TAG="v${{ inputs.version }}"
-          git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
-          test "$(git rev-parse "refs/tags/$TAG^{}")" = "${{ inputs.commit_sha }}"
-          gh release view "$TAG" --json tagName,assets,url --repo "$GITHUB_REPOSITORY" > release/github-release.json
-          grep -q 'SHA256SUMS' release/github-release.json
-          grep -q 'release-record.json' release/github-release.json
-          grep -q '\.tgz' release/github-release.json
+        run: bash scripts/publish-release.sh
