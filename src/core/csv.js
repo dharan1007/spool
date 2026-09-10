@@ -1,6 +1,7 @@
 import { fail } from './errors.js';
 
 export const DEFAULT_BROWSER_CSV_LIMIT_BYTES = 50 * 1024 * 1024;
+const UNSAFE_HEADERS = new Set(['__proto__', 'prototype', 'constructor']);
 
 export function parseCsv(text, options = {}) {
   const {
@@ -62,7 +63,7 @@ export function parseCsv(text, options = {}) {
   const headers = rows.shift().map((h, index) => {
     const name = h.trim();
     if (!name) fail('EMPTY_HEADER', `Header ${index + 1} is empty`);
-    if (['__proto__', 'prototype', 'constructor'].includes(name)) fail('UNSAFE_HEADER', `Header ${name} is not allowed`);
+    if (UNSAFE_HEADERS.has(name)) fail('UNSAFE_HEADER', `Header ${name} is not allowed`);
     return name;
   });
   if (new Set(headers).size !== headers.length) fail('DUPLICATE_HEADER', 'CSV headers must be unique');
@@ -95,8 +96,13 @@ export function escapeCsvCell(value) {
 }
 
 export function toCsv(rows, headers = rows.length ? Object.keys(rows[0]) : []) {
-  const safeHeaders = headers.filter(h => !['__proto__', 'prototype', 'constructor'].includes(h));
-  const lines = [safeHeaders.map(escapeCsvCell).join(',')];
-  for (const row of rows) lines.push(safeHeaders.map(h => escapeCsvCell(row?.[h])).join(','));
+  if (!Array.isArray(headers)) fail('INVALID_CSV_HEADERS', 'CSV headers must be an array');
+  for (const header of headers) {
+    if (typeof header !== 'string' || !header) fail('INVALID_CSV_HEADERS', 'CSV headers must be non-empty strings');
+    if (UNSAFE_HEADERS.has(header)) fail('UNSAFE_HEADER', `Header ${header} is not allowed`);
+  }
+  if (new Set(headers).size !== headers.length) fail('DUPLICATE_HEADER', 'CSV headers must be unique');
+  const lines = [headers.map(escapeCsvCell).join(',')];
+  for (const row of rows) lines.push(headers.map(h => escapeCsvCell(row?.[h])).join(','));
   return lines.join('\r\n');
 }
