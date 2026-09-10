@@ -48,8 +48,8 @@ export function validateExpr(expr, options = {}, depth = 0) {
   return expr;
 }
 
-const asNumber = value => parseDeterministicNumber(value) ?? 0;
 const isEmptyValue = value => value === null || value === undefined || String(value).trim() === '';
+const asNullableNumber = value => isEmptyValue(value) ? null : parseDeterministicNumber(value);
 
 export function evaluateExpr(expr, row) {
   switch (expr.op) {
@@ -86,13 +86,23 @@ export function evaluateExpr(expr, row) {
       if (!Object.hasOwn(expr.map, key)) fail('UNMAPPED_ENUM', `No enum mapping for ${key}`);
       return expr.map[key];
     }
-    case 'multiply': return asNumber(evaluateExpr(expr.left, row)) * asNumber(evaluateExpr(expr.right, row));
-    case 'divide': {
-      const denominator = asNumber(evaluateExpr(expr.right, row));
-      if (denominator === 0) fail('DIVIDE_BY_ZERO', 'Division by zero');
-      return asNumber(evaluateExpr(expr.left, row)) / denominator;
+    case 'multiply': {
+      const left = asNullableNumber(evaluateExpr(expr.left, row));
+      const right = asNullableNumber(evaluateExpr(expr.right, row));
+      if (left === null || right === null) return null;
+      return left * right;
     }
-    case 'round': return Math.round(asNumber(evaluateExpr(expr.value, row)));
+    case 'divide': {
+      const numerator = asNullableNumber(evaluateExpr(expr.left, row));
+      const denominator = asNullableNumber(evaluateExpr(expr.right, row));
+      if (numerator === null || denominator === null) return null;
+      if (denominator === 0) fail('DIVIDE_BY_ZERO', 'Division by zero');
+      return numerator / denominator;
+    }
+    case 'round': {
+      const value = asNullableNumber(evaluateExpr(expr.value, row));
+      return value === null ? null : Math.round(value);
+    }
     case 'split': return String(evaluateExpr(expr.value, row) ?? '').split(expr.separator);
     case 'join': return expr.values.map(v => evaluateExpr(v, row)).join(expr.separator ?? '');
     case 'coalesce': {
