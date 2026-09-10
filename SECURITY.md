@@ -1,6 +1,6 @@
 # Security policy
 
-SPOOL treats migration correctness as a security property. The browser Studio processes untrusted CSV locally; the Gate B local runner additionally performs approved filesystem CSV → SQLite mutation under explicit path, source, target, concurrency and authorization boundaries.
+SPOOL treats migration correctness as a security property. The browser Studio processes untrusted CSV locally; the Gate B Local Runner additionally performs approved filesystem CSV → SQLite mutation under explicit path, source, target, concurrency, authorization, memory, and recovery boundaries.
 
 ## Report a vulnerability
 
@@ -17,16 +17,22 @@ Every browser release is expected to preserve:
 - Worker messages bound to job ID, mapping revision and monotonic sequence;
 - replacement-source abort semantics;
 - durable IndexedDB completion semantics: failed persistence cannot remain COMPLETE;
-- explicit 50 MiB source boundary and storage-capacity preflight;
+- explicit **50 MiB** source boundary and storage-capacity preflight;
 - spreadsheet-formula neutralization on CSV export;
 - bounded agent-facing row access.
 
-## Gate B local-runner properties
+## Gate B Local Runner properties
 
 The production CSV → SQLite path is expected to preserve all of the following:
 
-- source bytes are hashed through the same opened file object whose bytes are migrated;
-- source resume is bound to a content snapshot identity;
+- bounded-memory UTF-8 CSV parsing and transformation: no whole-dataset source/output array is required by the Local Runner;
+- a **256 MiB default source ceiling**, separate from Browser Studio's 50 MiB boundary;
+- source bytes are copied incrementally into a customer-local durable snapshot while being SHA-256 hashed;
+- source snapshot identity binds canonical original path, exact byte length and content digest;
+- durable snapshot filenames are filesystem-safe and non-semantic; POSIX snapshot files are owner-only;
+- an approved original source is revalidated before target lease acquisition, and changed/replaced/missing input fails `SOURCE_CHANGED` before mutation;
+- failed/interrupted runs retain the immutable snapshot for recovery, while VERIFIED completion performs per-migration snapshot cleanup;
+- restart recovery re-scans the exact snapshot, skips rows before the durable whole-batch checkpoint, and reconciles target evidence before replay;
 - source and target paths are restricted to configured allow-roots;
 - path checks reject lexical traversal and symlink/junction escape after canonicalization;
 - SQLite target preflight validates the existing ordinary table before approval;
@@ -43,6 +49,8 @@ The production CSV → SQLite path is expected to preserve all of the following:
 - receipts are canonical hashes bound to the SPOOL release commit;
 - `spoold` binds only to loopback, requires a bearer token, validates Host/Origin and body size, and sanitizes unexpected internal failures instead of exposing stack traces or internal paths.
 
+The durable snapshot is a deliberate recovery asset, not a hidden hosted copy. Operators must budget local disk space for roughly one additional source-sized snapshot plus target/WAL growth. Deleting an interrupted run's snapshot intentionally gives up deterministic resume from that approved source identity.
+
 ## Dependency/release gates
 
 Production release validation includes:
@@ -52,6 +60,8 @@ npm ci
 npm audit --omit=dev --audit-level=high
 native SQLite driver load
 full test suite
+streaming parser boundary/fault suite
+>50 MiB Local Runner migration with V8 max-old-space constrained to 48 MiB
 SQLite conformance/fault suite
 Linux + Windows + macOS SQLite matrix
 build + benchmark + static checks
@@ -63,6 +73,6 @@ The production deployment is accepted only when `/release.json` reports the exac
 
 ## Supported production mutation scope
 
-Gate B currently supports only filesystem UTF-8 CSV → an existing ordinary SQLite table using `insert` mode. PostgreSQL/MySQL, destructive write strategies, trigger-bearing targets, virtual SQLite tables and hosted raw-row ingestion are outside the current production claim.
+Gate B currently supports only filesystem UTF-8 CSV → an existing ordinary SQLite table using `insert` mode. The Local Runner defaults to a 256 MiB source ceiling and uses bounded-memory streaming over a local durable snapshot. PostgreSQL/MySQL, destructive write strategies, trigger-bearing targets, virtual SQLite tables, unlimited/1-GB streaming and hosted raw-row ingestion are outside the current production claim.
 
 See `docs/THREAT_MODEL.md`, `docs/DATA_HANDLING.md`, `docs/RELEASE_PROCESS.md` and `README.md` for detailed boundaries and operational evidence.
