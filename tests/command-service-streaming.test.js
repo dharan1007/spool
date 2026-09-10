@@ -5,6 +5,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { SpoolCommandService } from '../src/daemon/command-service.js';
+import { durableSnapshotPath } from '../src/connectors/source-snapshot.js';
+import { streamCsvRows } from '../src/connectors/filesystem/stream-csv.js';
+import { MigrationEngine } from '../src/core/migration.js';
+import { SqliteTarget } from '../src/connectors/sqlite/target.js';
+import { MigrationRunner } from '../src/execution/migration-runner.js';
+import { LeaseStore } from '../src/execution/lease-store.js';
 
 function requestFor(sourcePath, targetPath, { migrationId = 'stream_service_001', batchSize = 127 } = {}) {
   return {
@@ -84,6 +90,47 @@ async function allSnapshotFiles(root) {
   return found;
 }
 
+async function prepareApprovedBatch(f, request, nonce) {
+  const inspected = await f.service.inspect(request);
+  const plan = await f.service.plan(request);
+  const approval = await f.service.approve(request, { expiresAt: '2099-01-01T00:00:00.000Z', nonce });
+  const snapshotPath = durableSnapshotPath(join(f.snapshotDir, encodeURIComponent(request.migrationId)), approval.record.sourceSnapshotId);
+  const accumulator = new MigrationEngine().createAccumulator(plan.mapping, plan.mappingRevision, plan.targetSchema);
+  const rows = [];
+  const batchSize = plan.writeStrategy.batchSize;
+  for await (const { rowIndex, row } of streamCsvRows(snapshotPath)) {
+    if (rowIndex >= batchSize) break;
+    const transformed = accumulator.process(row, rowIndex);
+    if (transformed.ok) rows.push(transformed.row);
+  }
+  return { inspected, plan, approval, rows, sourceRange: { start: 0, endExclusive: batchSize } };
+}
+
+function commitFirstBatch(f, request, prepared, { faultAfterTargetCommit = false } = {}) {
+  const resource = `sqlite:${f.targetPath}:rows`;
+  const leaseStore = new LeaseStore({ path: f.targetPath });
+  const lease = leaseStore.acquire({ resource, owner: `fault-fixture:${request.migrationId}`, ttlMs: 60_000 });
+  const target = new SqliteTarget({ path: f.targetPath, table: 'rows', requireFencing: true, fenceResource: resource });
+  try {
+    const runner = new MigrationRunner({ target, checkpointStore: f.service.runs.checkpointStore(request.migrationId) });
+    return runner.runBatch({
+      migrationId: request.migrationId,
+      planId: prepared.plan.planId,
+      sourceSnapshotId: prepared.approval.record.sourceSnapshotId,
+      mappingRevision: prepared.plan.mappingRevision,
+      sourceRange: prepared.sourceRange,
+      targetIdentity: prepared.plan.targetRef,
+      targetContractId: prepared.inspected.targetContractId,
+      rows: prepared.rows,
+      fencingToken: lease.fencingToken
+    }, { faultAfterTargetCommit });
+  } finally {
+    target.close();
+    leaseStore.release({ resource, owner: lease.owner, fencingToken: lease.fencingToken });
+    leaseStore.close();
+  }
+}
+
 test('inspect and dry-run use a durable per-migration snapshot with exact streamed row counts', async () => {
   const f = await fixture();
   try {
@@ -142,6 +189,48 @@ test('approved snapshot survives service restart and verified completion cleans 
     assert.equal((await allSnapshotFiles(f.snapshotDir)).length, 0);
   } finally {
     service.close();
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('streamed execution reconciles a real commit-before-checkpoint fault without duplicate rows', async () => {
+  const f = await fixture(12);
+  try {
+    const request = requestFor(f.sourcePath, f.targetPath, { migrationId: 'stream_commit_crash', batchSize: 5 });
+    const prepared = await prepareApprovedBatch(f, request, 'stream-commit-crash');
+    assert.throws(
+      () => commitFirstBatch(f, request, prepared, { faultAfterTargetCommit: true }),
+      error => error?.code === 'FAULT_AFTER_TARGET_COMMIT'
+    );
+    assert.deepEqual(targetStats(f.targetPath), { rows: 5, ledgers: 1 });
+    assert.equal(f.service.runs.checkpointStore(request.migrationId).load(), null);
+
+    const result = await f.service.run(request, { approval: prepared.approval });
+    assert.equal(result.verification.status, 'VERIFIED');
+    assert.deepEqual(result.receipt.record.counts, { sourceRows: 13, writtenRows: 12, rejectedRows: 1, filteredRows: 0 });
+    assert.deepEqual(targetStats(f.targetPath), { rows: 12, ledgers: 3 });
+  } finally {
+    f.service.close();
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('streamed execution resumes from a durable batch checkpoint by re-scanning the immutable snapshot', async () => {
+  const f = await fixture(12);
+  try {
+    const request = requestFor(f.sourcePath, f.targetPath, { migrationId: 'stream_checkpoint_resume', batchSize: 5 });
+    const prepared = await prepareApprovedBatch(f, request, 'stream-checkpoint-resume');
+    const first = commitFirstBatch(f, request, prepared);
+    assert.equal(first.checkpoint.nextOffset, 5);
+    assert.deepEqual(targetStats(f.targetPath), { rows: 5, ledgers: 1 });
+
+    const result = await f.service.run(request, { approval: prepared.approval });
+    assert.equal(result.verification.status, 'VERIFIED');
+    assert.deepEqual(result.receipt.record.counts, { sourceRows: 13, writtenRows: 12, rejectedRows: 1, filteredRows: 0 });
+    assert.deepEqual(targetStats(f.targetPath), { rows: 12, ledgers: 3 });
+    assert.equal(f.service.runs.checkpointStore(request.migrationId).load(), null);
+  } finally {
+    f.service.close();
     await rm(f.dir, { recursive: true, force: true });
   }
 });
