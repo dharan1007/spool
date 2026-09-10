@@ -76,3 +76,29 @@ jobs:
           path: /tmp/spool-local-runner-size-probe.json
           if-no-files-found: warn
           retention-days: 2
+
+  real-data-diagnostics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Install browser smoke dependency
+        run: python3 -m pip install --disable-pip-version-check websocket-client
+      - name: Verify browser preserve mode and Gate B on the same NYC 311 data
+        env:
+          SPOOL_BROWSER: google-chrome
+        run: python3 scripts/audit-nyc311-diagnostics.py
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nyc311-real-data-diagnostics
+          path: /tmp/spool-nyc311-diagnostics.json
+          if-no-files-found: warn
+          retention-days: 2
