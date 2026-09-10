@@ -1,4 +1,4 @@
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+import { isDeterministicDate, isDeterministicLocalDateTime } from './deterministic-date.js';
 const NUMBER = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 const INTEGER = /^[+-]?\d+$/;
 
@@ -30,6 +30,13 @@ function nonEmptyValues(rows, field, limit = 1000) {
   return values;
 }
 
+function sourceAllowsNull(rows, fieldName) {
+  return rows.some(row => {
+    const value = row?.[fieldName];
+    return value === null || value === undefined || String(value).trim() === '';
+  });
+}
+
 function score(values, predicate) {
   if (!values.length) return { successCount: 0, sampleCount: 0, confidence: 0 };
   const successCount = values.reduce((count, value) => count + (predicate(value) ? 1 : 0), 0);
@@ -55,7 +62,8 @@ function inferPromotedType(field, rows) {
     ['boolean', value => /^(?:true|false|yes|no|y|n|0|1)$/i.test(value)],
     ['integer', value => INTEGER.test(value) && Number.isSafeInteger(Number(value))],
     ['number', value => NUMBER.test(value) && Number.isFinite(Number(value))],
-    ['date', value => ISO_DATE.test(value) && !Number.isNaN(Date.parse(value))]
+    ['local_datetime', value => isDeterministicLocalDateTime(value)],
+    ['date', value => isDeterministicDate(value)]
   ];
   const scored = candidates.map(([type, predicate]) => ({ type, ...score(values, predicate) }));
   const winner = scored.sort((a, b) => b.confidence - a.confidence || b.successCount - a.successCount)[0];
@@ -68,6 +76,7 @@ function expressionFor(sourceField, type) {
   if (type === 'integer' || type === 'number') return { op: 'cast_number', value: field };
   if (type === 'boolean') return { op: 'cast_boolean', value: field };
   if (type === 'date') return { op: 'parse_date', value: field };
+  if (type === 'local_datetime') return { op: 'parse_local_datetime', value: field };
   return { op: 'trim', value: field };
 }
 
@@ -112,11 +121,19 @@ export function planAutopilot({ sourceSchema, rows, outcome = AUTOPILOT_OUTCOMES
   for (let index = 0; index < schema.length; index += 1) {
     const field = schema[index];
     const targetName = names[index].targetName;
-    const inferred = outcome === AUTOPILOT_OUTCOMES.DATABASE_READY
-      ? inferPromotedType(field, sourceRows)
-      : { type: field.type, confidence: 1, successCount: Math.min(sourceRows.length, 1000), sampleCount: Math.min(sourceRows.length, 1000), reason: 'preserve_type' };
-    targetSchema.push({ name: targetName, type: inferred.type, nullable: Boolean(field.nullable) });
-    mapping.push({ target: targetName, expr: expressionFor(field.name, inferred.type) });
+    const preserveCsv = outcome === AUTOPILOT_OUTCOMES.PRESERVE_CONTRACT;
+    const inferred = preserveCsv
+      ? { type: 'string', confidence: 1, successCount: Math.min(sourceRows.length, 1000), sampleCount: Math.min(sourceRows.length, 1000), reason: 'preserve_csv_contract' }
+      : outcome === AUTOPILOT_OUTCOMES.DATABASE_READY
+        ? inferPromotedType(field, sourceRows)
+        : { type: field.type, confidence: 1, successCount: Math.min(sourceRows.length, 1000), sampleCount: Math.min(sourceRows.length, 1000), reason: 'preserve_type' };
+    const nullable = preserveCsv
+      ? true
+      : outcome === AUTOPILOT_OUTCOMES.DATABASE_READY
+        ? Boolean(field.nullable) || sourceAllowsNull(sourceRows, field.name)
+        : Boolean(field.nullable);
+    targetSchema.push({ name: targetName, type: inferred.type, nullable });
+    mapping.push({ target: targetName, expr: preserveCsv ? { op: 'copy', name: field.name } : expressionFor(field.name, inferred.type) });
     evidence.push({
       sourceField: field.name,
       targetField: targetName,

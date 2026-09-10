@@ -22,7 +22,7 @@ function compatible(fieldType, sqliteAffinity) {
   if (fieldType === 'integer') return sqliteAffinity === 'INTEGER';
   if (fieldType === 'number') return ['INTEGER', 'REAL', 'NUMERIC'].includes(sqliteAffinity);
   if (fieldType === 'boolean') return ['INTEGER', 'NUMERIC'].includes(sqliteAffinity);
-  if (fieldType === 'date' || fieldType === 'string') return sqliteAffinity === 'TEXT';
+  if (fieldType === 'date' || fieldType === 'local_datetime' || fieldType === 'string') return sqliteAffinity === 'TEXT';
   return false;
 }
 

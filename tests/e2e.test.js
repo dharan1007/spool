@@ -62,7 +62,7 @@ test('complete product command chain migrates real dirty demo rows to durable te
   assert.equal(persisted.output.length, state.output.length);
 });
 
-test('Autopilot completes the 5k dirty demo end-to-end with no manual schema or mapping commands', async () => {
+test('Autopilot completes the 5k dirty demo with an explicit partial-quality terminal status', async () => {
   const store = new MemoryWorkspaceStore();
   const kernel = new CommandKernel({ store, runtime: new InlineChunkRuntime() });
   await kernel.initialize();
@@ -78,7 +78,7 @@ test('Autopilot completes the 5k dirty demo end-to-end with no manual schema or 
   await waitFor(() => kernel.snapshot().job.phase === PHASES.COMPLETE);
   await kernel.whenRuntimeIdle();
   const state = kernel.snapshot();
-  assert.equal(state.mission.status, 'COMPLETE');
+  assert.equal(state.mission.status, 'COMPLETE_WITH_REJECTIONS');
   assert.equal(state.job.processedRows, 5000);
   assert.ok(state.job.validRows > 4900);
   assert.ok(state.job.invalidRows > 0);

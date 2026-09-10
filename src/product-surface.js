@@ -6,7 +6,6 @@ const PRODUCT_NAV = [
   ['/services', 'Services']
 ];
 const REPO = 'https://github.com/dharan1007/spool';
-const ASSESSMENT = `${REPO}/issues/new?template=migration-assessment.yml`;
 
 function currentPath() {
   return window.location.pathname.replace(/\/+$/, '') || '/';
@@ -84,11 +83,24 @@ function localRunnerPage() {
       <div><span class="kicker">NOT CLAIMED</span><h2>Unsupported means unsupported.</h2><ul class="deny-list"><li>PostgreSQL</li><li>MySQL</li><li>Remote hosted database credentials</li><li>upsert / replace / delete / truncate</li><li>Triggered SQLite targets</li><li>Virtual SQLite tables</li><li>Hosted raw-row ingestion</li></ul></div>
     </section>
 
-    <section class="section"><div class="code-workflow"><div><span class="kicker">RUN IT LOCALLY</span><h2>Install from the verified repository.</h2><p>Node.js 22+ is required. The committed lockfile pins the production SQLite dependency graph.</p></div><pre>git clone https://github.com/dharan1007/spool.git
+    <section class="section"><div class="code-workflow"><div><span class="kicker">RUN IT ON YOUR DEVICE</span><h2>Clone, verify, configure, inspect, approve, run.</h2><p>Node.js 22+ is required. Browser Studio stays capped at 50 MiB; for production SQLite mutation or larger CSV files use this customer-local runner. The current local-runner source ceiling is 256 MiB and the source/target/state paths stay on your machine.</p></div><pre>git clone https://github.com/dharan1007/spool.git
 cd spool
 npm ci
 npm run check
-node src/cli/spool.js --help</pre></div></section>
+
+# Generate a local approval-signing key and bind the exact checkout.
+export SPOOL_APPROVAL_KEY="$(openssl rand -hex 32)"
+export SPOOL_COMMIT_SHA="$(git rev-parse HEAD)"
+
+# Create migration.json from docs/LOCAL_RUNNER.md, then use the same roots/state file.
+node src/cli/spool.js inspect --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
+node src/cli/spool.js plan --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
+node src/cli/spool.js dry-run --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
+node src/cli/spool.js approve --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db --expires 2026-12-31T23:59:59.000Z --nonce first-run --out approval.json
+node src/cli/spool.js run --request migration.json --approval approval.json --source-root ./data --target-root ./data --state ./data/spool-state.db --out run-result.json
+node src/cli/spool.js status --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db
+node src/cli/spool.js verify --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db
+node src/cli/spool.js receipt --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db --out receipt.json</pre><div class="hero-actions"><a class="button primary" href="${REPO}/blob/main/docs/LOCAL_RUNNER.md">Open full migration.json guide →</a><a class="button secondary" href="${REPO}/tree/main/examples/crm-export">Use the verified example</a></div></div></section>
   `);
 }
 
@@ -133,16 +145,16 @@ function securityPage() {
 
 function servicesPage() {
   return productShell('/services', `
-    <section class="product-hero compact-product-hero"><div><span class="eyebrow-chip">SOLO BUILDER SERVICES</span><h1>Pay for a migration outcome, not a cosmetic “Pro” badge.</h1><p class="lede">Commercial migration work is offered personally by <strong>Dharan Tej Reddy Poduvu</strong>, individual solo builder/service provider. The open-source SPOOL repository remains MIT licensed.</p><div class="hero-actions"><a class="button primary" href="${ASSESSMENT}">Request a Migration Assessment →</a><a class="button secondary" href="${REPO}/blob/main/docs/MIGRATION_SERVICES.md">Service scope</a></div><p class="privacy-note">Public assessment is metadata-only. Never post production rows, customer/employee data, credentials, database dumps or private URLs.</p></div></section>
+    <section class="product-hero compact-product-hero"><div><span class="eyebrow-chip">DEPLOYMENT + SUPPORT</span><h1>This hosted site is the documentation and Browser Studio surface. <em>Production target writes stay local.</em></h1><p class="lede">The public deployment does not receive SQLite credentials or customer database rows. Clone SPOOL and run Gate B on the device that owns the source and target. This hosted surface is intentionally non-commercial while it is deployed on a personal Hobby workspace.</p><div class="hero-actions"><a class="button primary" href="/local-runner">Run SPOOL locally →</a><a class="button secondary" href="${REPO}">Open source repository</a></div></div></section>
 
     <section class="section"><div class="service-grid">
-      <article><span>01</span><h2>Migration Preflight</h2><p>Know what will fail before import: source profile, inferred schema, ambiguity/violation classes, target-readiness risks and a recommended migration scope.</p><strong>Launch test range: ₹2,500–₹7,500</strong></article>
-      <article><span>02</span><h2>Import-Ready Dataset</h2><p>Receive normalized output, declared target schema, deterministic transformation evidence and explicit rejected/invalid rows.</p><strong>Launch test range: ₹5,000–₹15,000</strong></article>
-      <article><span>03</span><h2>Migration Rescue</h2><p>Diagnose a failing or inconsistent import without blindly replaying uncertain writes. Start non-destructively, repair the data/contract problem, then verify the result.</p><strong>Launch test range: ₹7,500–₹25,000+</strong></article>
-      <article class="accent"><span>04</span><h2>Verified CSV → SQLite Migration</h2><p>Execute the production Gate-B path locally with source snapshot, target preflight, approval, fencing, atomic ledger, reconciliation, verification and receipt.</p><strong>Launch test range: ₹10,000–₹30,000+</strong></article>
+      <article><span>01</span><h2>Browser Studio</h2><p>Use the hosted UI for browser-local CSV inspection, deterministic transformation, quality review and safe export up to the documented Browser limit.</p></article>
+      <article><span>02</span><h2>Local Runner</h2><p>Use the CLI for real CSV → SQLite mutation with source snapshot binding, target preflight, bound approval, fencing, reconciliation, verification and receipt.</p></article>
+      <article><span>03</span><h2>Local Bridge</h2><p>Use <code>spoold</code> when a local developer tool or agent needs authenticated loopback access to the same command service.</p></article>
+      <article class="accent"><span>04</span><h2>Self-host the public surface</h2><p>Organizations that need their own hosted documentation/UI can build the static <code>dist/</code> output and deploy it under infrastructure and terms appropriate to their use.</p></article>
     </div></section>
 
-    <section class="section split-section"><div><span class="kicker">HOW A PAID JOB WORKS</span><h2>No paid SaaS infrastructure required.</h2><ol class="number-list"><li>Metadata-only qualification</li><li>Private scope + quote</li><li>Customer-local execution</li><li>Output + violations + verification/receipt</li><li>Written acceptance</li></ol></div><div><span class="kicker">DATA BOUNDARY</span><h2>The website is not the customer-data plane.</h2><p>Sensitive rows do not need to be uploaded to a SPOOL-controlled backend for the current services. Payment instructions and private billing details are exchanged outside the public repository.</p><a class="text-link" href="${REPO}/blob/main/docs/DATA_HANDLING.md">Read data handling →</a></div></section>
+    <section class="section split-section"><div><span class="kicker">SUPPORT</span><h2>Public issues are metadata-only.</h2><p>Report reproducible bugs and non-sensitive feature requests in GitHub. Do not attach production datasets, credentials, private URLs, database dumps, or personal/customer records to a public issue.</p><a class="text-link" href="${REPO}/issues">Open GitHub issues →</a></div><div><span class="kicker">SELF-HOSTING</span><h2>Keep production control with the operator.</h2><p>The repository documents the release build, exact-SHA provenance, static hosting model, and local mutation boundary. The hosted UI is not a remote database execution service.</p><a class="text-link" href="${REPO}/blob/main/docs/SELF_HOSTING.md">Read self-hosting guide →</a></div></section>
   `);
 }
 

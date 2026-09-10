@@ -37,7 +37,7 @@ const OUTCOMES = Object.freeze([
     id: 'preserve_contract',
     title: 'Preserve contract',
     eyebrow: 'Minimal change',
-    copy: 'Keep source field names and types, but run deterministic validation, checkpointing, quality grouping, and safe export.'
+    copy: 'Keep source field names and raw CSV values losslessly as nullable strings, then checkpoint, validate structure, and export safely.'
   }
 ]);
 
@@ -105,6 +105,8 @@ function missionHeadline(status) {
     RECOVERING: 'Recovering from the last checkpoint',
     NEEDS_ATTENTION: 'A decision needs your attention',
     COMPLETE: 'Migration complete',
+    COMPLETE_VERIFIED: 'Migration complete and verified',
+    COMPLETE_WITH_REJECTIONS: 'Migration complete with rejected rows',
     FAILED: 'Migration stopped safely',
     ABORTED: 'Migration aborted'
   })[status] ?? status;
@@ -191,7 +193,7 @@ function overviewPage(state) {
           <div class="transform-column"><small>PLAN</small><span>normalize</span><span>number</span><span>date</span><span>boolean</span></div>
           <div class="data-column target"><small>TARGET</small><code>customer_id</code><code>monthly_fee</code><code>joined</code><code>is_active</code></div>
         </div>
-        <div class="visual-progress"><div><span>Validated plan</span><strong>99.0% inference confidence</strong></div><div class="progress"><i style="width:84%"></i></div><div class="visual-stats"><span>25,000 rows</span><span>typed output</span><span>checkpointed</span></div></div>
+        <div class="visual-progress"><div><span>Validated plan</span><strong>99.0% inference confidence</strong></div><progress class="progress progress-meter" max="100" value="84">84%</progress><div class="visual-stats"><span>25,000 rows</span><span>typed output</span><span>checkpointed</span></div></div>
       </div>
     </section>
 
@@ -233,7 +235,7 @@ function autopilotPage(state) {
     ['PROFILE', 'Understand the source', 'Field types, nullability, representative values, parseability and source fingerprint.'],
     ['INFER', 'Propose the clean contract', 'Names are normalized and strongly evidenced numeric/date/boolean fields can be promoted.'],
     ['PLAN', 'Build deterministic transforms', 'Every target is expressed as constrained transformation data, never generated JavaScript.'],
-    ['DRY RUN', 'Test the real engine', 'A bounded sample goes through the same transform and typed validation path as the full run.'],
+    ['DRY RUN', 'Test the real engine', 'A representative 100-row sample is spread across the full source and goes through the same transform and typed validation path as the full run. Below 95% acceptance stops execution.'],
     ['ASSESS', 'Decide whether it is safe', 'Confident changes continue. Destructive ambiguity becomes a small decision instead of a silent guess.'],
     ['EXECUTE', 'Run with checkpoints', 'Worker batches update durable progress, grouped violations and output revision state.'],
     ['VERIFY', 'Close the loop', 'Processed, valid, invalid, revision and export identity are checked before the result is presented.']
@@ -375,12 +377,14 @@ function missionPage(state) {
   const paused = [PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(state.job.phase);
   const complete = state.job.phase === PHASES.COMPLETE;
   return shell('/studio/mission', `
-    <section class="mission-header"><div><span class="kicker">MISSION · ${esc(mission?.outcome ?? 'not planned')}</span><h1>${esc(missionHeadline(status))}</h1><p>${status === 'RUNNING' ? 'No action required. You can leave this page; durable checkpoints protect progress and Autopilot resumes a valid interrupted mission when you return.' : status === 'NEEDS_ATTENTION' ? 'SPOOL refused to guess. Resolve the bounded ambiguity before execution.' : status === 'COMPLETE' ? 'The final output is tied to one mapping revision and the quality report is ready.' : 'Mission state is stored locally in this browser.'}</p></div><span class="status-pill ${phaseTone(state.job.phase)} large-pill"><i></i>${esc(status)}</span></section>
+    <section class="mission-header"><div><span class="kicker">MISSION · ${esc(mission?.outcome ?? 'not planned')}</span><h1>${esc(missionHeadline(status))}</h1><p>${status === 'RUNNING' ? 'No action required. You can leave this page; durable checkpoints protect progress and Autopilot resumes a valid interrupted mission when you return.' : status === 'NEEDS_ATTENTION' ? 'SPOOL refused to guess. Resolve the bounded ambiguity before execution.' : status === 'COMPLETE_VERIFIED' ? 'Every processed row satisfied the target contract and the final revision is ready.' : status === 'COMPLETE_WITH_REJECTIONS' ? 'Valid output is ready, and rejected rows remain explicit in the quality report.' : 'Mission state is stored locally in this browser.'}</p></div><span class="status-pill ${phaseTone(state.job.phase)} large-pill"><i></i>${esc(status)}</span></section>
 
     ${status === 'NEEDS_ATTENTION' ? `<section class="attention-panel"><div><span class="kicker">REVIEW REQUIRED</span><h2>${ambiguities.length} decision${ambiguities.length === 1 ? '' : 's'} block automatic execution</h2><p>These choices can change the target contract destructively, so SPOOL fails closed instead of choosing silently.</p></div><div class="ambiguity-list">${ambiguities.map(item => `<article><span>${esc(item.code)}</span><h3>${esc(item.message)}</h3><p>Source fields: ${(item.sourceFields ?? []).map(esc).join(', ')}</p></article>`).join('')}</div><div class="attention-note">For this release, destructive name collisions require correcting the source headers before rerunning Autopilot. SPOOL will not invent a rename.</div></section>` : ''}
 
+    ${mission?.dryRun?.assessment === 'WARNING' ? `<div class="attention-note"><strong>Dry-run warning:</strong> ${number(mission.dryRun.validRows)} / ${number(mission.dryRun.processedRows)} representative rows passed (${Math.round((mission.dryRun.acceptanceRate ?? 0) * 100)}%). Execution continued because the result met the ${Math.round((mission.dryRun.minimumAcceptance ?? 0.95) * 100)}% safety floor; rejected rows remain explicit.</div>` : ''}
+
     <section class="mission-grid">
-      <article class="mission-progress-card wide"><div class="card-head"><div><span class="kicker">EXECUTION</span><h2>${active ? 'Working automatically' : complete ? 'Execution finished' : paused ? 'Checkpoint paused' : 'Waiting to execute'}</h2></div><strong class="progress-number">${progress.toFixed(1)}%</strong></div><div class="progress large"><i style="width:${progress}%"></i></div>${missionMiniStats(state)}${active ? '<div class="no-action"><i></i><div><strong>No action required</strong><p>SPOOL is processing bounded Worker batches and persisting checkpoints.</p></div></div>' : ''}${paused ? '<button class="button primary" data-action="resume-run">Resume from checkpoint</button>' : ''}${complete ? '<a href="/studio/results" data-route="/studio/results" class="button primary">Open verified results →</a>' : ''}</article>
+      <article class="mission-progress-card wide"><div class="card-head"><div><span class="kicker">EXECUTION</span><h2>${active ? 'Working automatically' : complete ? 'Execution finished' : paused ? 'Checkpoint paused' : 'Waiting to execute'}</h2></div><strong class="progress-number">${progress.toFixed(1)}%</strong></div><progress class="progress progress-meter large" max="100" value="${progress.toFixed(1)}">${progress.toFixed(1)}%</progress>${missionMiniStats(state)}${active ? '<div class="no-action"><i></i><div><strong>No action required</strong><p>SPOOL is processing bounded Worker batches and persisting checkpoints.</p></div></div>' : ''}${paused ? '<button class="button primary" data-action="resume-run">Resume from checkpoint</button>' : ''}${complete ? '<a href="/studio/results" data-route="/studio/results" class="button primary">Open verified results →</a>' : ''}</article>
       <article class="mission-progress-card"><span class="kicker">PLAN CONFIDENCE</span><strong class="big-stat">${mission ? `${Math.round((mission.confidence ?? 0) * 100)}%` : '—'}</strong><p>Minimum recorded field-level inference confidence for the current Autopilot plan.</p></article>
       <article class="mission-progress-card"><span class="kicker">HUMAN INTERVENTIONS</span><strong class="big-stat">${number(mission?.interventions ?? 0)}</strong><p>SPOOL only increments this when automatic execution is blocked by explicit ambiguity.</p></article>
     </section>

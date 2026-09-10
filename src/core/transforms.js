@@ -1,10 +1,10 @@
 import { fail } from './errors.js';
-import { parseDeterministicDate } from './deterministic-date.js';
+import { parseDeterministicDate, parseDeterministicLocalDateTime } from './deterministic-date.js';
 import { parseDeterministicNumber } from './locale-number.js';
 
 const OPS = new Set([
   'field', 'literal', 'copy', 'trim', 'lowercase', 'uppercase', 'split', 'join', 'coalesce',
-  'cast_string', 'cast_number', 'cast_boolean', 'parse_date', 'format_date', 'regex_replace',
+  'cast_string', 'cast_number', 'cast_boolean', 'parse_date', 'parse_local_datetime', 'format_date', 'regex_replace',
   'enum_map', 'multiply', 'divide', 'round', 'concat', 'conditional'
 ]);
 
@@ -25,7 +25,7 @@ export function validateExpr(expr, options = {}, depth = 0) {
       if (typeof expr.name !== 'string' || !expr.name) fail('INVALID_FIELD', 'field/copy requires a name');
       break;
     case 'literal': break;
-    case 'trim': case 'lowercase': case 'uppercase': case 'cast_string': case 'cast_number': case 'cast_boolean': case 'parse_date': case 'round':
+    case 'trim': case 'lowercase': case 'uppercase': case 'cast_string': case 'cast_number': case 'cast_boolean': case 'parse_date': case 'parse_local_datetime': case 'round':
       child(expr.value); break;
     case 'format_date':
       child(expr.value); if (typeof expr.format !== 'string') fail('INVALID_FORMAT', 'format_date requires format'); break;
@@ -49,6 +49,7 @@ export function validateExpr(expr, options = {}, depth = 0) {
 }
 
 const asNumber = value => parseDeterministicNumber(value) ?? 0;
+const isEmptyValue = value => value === null || value === undefined || String(value).trim() === '';
 
 export function evaluateExpr(expr, row) {
   switch (expr.op) {
@@ -58,14 +59,20 @@ export function evaluateExpr(expr, row) {
     case 'lowercase': return String(evaluateExpr(expr.value, row) ?? '').toLowerCase();
     case 'uppercase': return String(evaluateExpr(expr.value, row) ?? '').toUpperCase();
     case 'cast_string': return String(evaluateExpr(expr.value, row) ?? '');
-    case 'cast_number': return asNumber(evaluateExpr(expr.value, row));
+    case 'cast_number': {
+      const value = evaluateExpr(expr.value, row);
+      return isEmptyValue(value) ? null : parseDeterministicNumber(value);
+    }
     case 'cast_boolean': {
-      const v = String(evaluateExpr(expr.value, row) ?? '').trim().toLowerCase();
+      const value = evaluateExpr(expr.value, row);
+      if (isEmptyValue(value)) return null;
+      const v = String(value).trim().toLowerCase();
       if (['true', '1', 'yes', 'y'].includes(v)) return true;
       if (['false', '0', 'no', 'n'].includes(v)) return false;
       fail('INVALID_BOOLEAN', `Cannot convert ${v} to boolean`);
     }
     case 'parse_date': return parseDeterministicDate(evaluateExpr(expr.value, row));
+    case 'parse_local_datetime': return parseDeterministicLocalDateTime(evaluateExpr(expr.value, row));
     case 'format_date': {
       const iso = parseDeterministicDate(evaluateExpr(expr.value, row));
       if (iso === null) fail('INVALID_DATE', 'Cannot format empty date');

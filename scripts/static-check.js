@@ -30,6 +30,7 @@ const sourceFiles = [...(await walk('src')).filter(f => f.endsWith('.js')), 'boo
 for (const file of sourceFiles) {
   const text = await readFile(file, 'utf8');
   if (/\beval\s*\(/.test(text) || /new\s+Function\s*\(/.test(text)) failures.push(`${file}: arbitrary code execution primitive detected`);
+  if (/\sstyle\s*=\s*['"]/i.test(text)) failures.push(`${file}: inline style attribute violates strict production CSP`);
   if (/\bfetch\s*\(|\bXMLHttpRequest\b|\bnavigator\.sendBeacon\b|\bWebSocket\s*\(/.test(text)) failures.push(`${file}: outbound network primitive detected`);
   if (/from\s+['"]node:sqlite['"]|require\(['"]node:sqlite['"]\)/.test(text)) failures.push(`${file}: node:sqlite is not allowed in the production runtime; use the pinned stable driver`);
   const checked = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' });

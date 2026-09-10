@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 
 const COMMANDS = ['inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt'];
@@ -8,7 +8,7 @@ function help() {
   return {
     name: 'spool',
     commands: COMMANDS,
-    usage: 'spool <command> --request migration.json --source-root DIR --target-root DIR --state FILE [--approval FILE] [--expires ISO --nonce VALUE]',
+    usage: 'spool <command> --request migration.json --source-root DIR --target-root DIR --state FILE [--approval FILE] [--expires ISO --nonce VALUE] [--out FILE]',
     environment: ['SPOOL_APPROVAL_KEY (required, >=16 bytes)', 'SPOOL_COMMIT_SHA (optional when git checkout is available)', 'SPOOL_RELEASE_VERSION (optional)']
   };
 }
@@ -108,7 +108,12 @@ async function main() {
         result = await service.run(request, { approval });
       }
     }
-    process.stdout.write(`${JSON.stringify({ ok: true, result }, null, 2)}\n`);
+    if (flags.out) {
+      await writeFile(flags.out, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
+      process.stdout.write(`${JSON.stringify({ ok: true, out: flags.out })}\n`);
+    } else {
+      process.stdout.write(`${JSON.stringify({ ok: true, result }, null, 2)}\n`);
+    }
   } finally { service.close(); }
 }
 

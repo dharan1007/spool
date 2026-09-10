@@ -120,7 +120,7 @@ export class SpoolCommandService {
     let text;
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
     catch { fail('INVALID_SOURCE_ENCODING', 'Gate B CSV source must be valid UTF-8'); }
-    const parsed = parseCsv(text);
+    const parsed = parseCsv(text, { maxInputBytes: this.maxSourceBytes });
     if (parsed.rows.length === 0) fail('EMPTY_SOURCE', 'CSV source must contain at least one data row');
     const plan = await createMigrationPlan(input);
     if (!plan.risk.approvals.includes('target_write')) {

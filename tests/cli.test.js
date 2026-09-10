@@ -7,6 +7,7 @@ test('CLI exposes staged production commands and machine-readable help', () => {
   assert.equal(child.status, 0, child.stderr);
   const help = JSON.parse(child.stdout);
   assert.equal(help.name, 'spool');
+  assert.match(help.usage, /--out/);
   for (const command of ['inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt']) {
     assert.ok(help.commands.includes(command));
   }

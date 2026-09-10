@@ -1,5 +1,5 @@
 import { fail } from './errors.js';
-import { isCanonicalDate, isDeterministicDate } from './deterministic-date.js';
+import { isCanonicalDate, isCanonicalLocalDateTime, isDeterministicDate, isDeterministicLocalDateTime } from './deterministic-date.js';
 
 function classify(value) {
   const text = String(value ?? '').trim();
@@ -7,6 +7,7 @@ function classify(value) {
   if (/^[+-]?\d+$/.test(text) && Number.isSafeInteger(Number(text))) return 'integer';
   if (/^[+-]?(?:\d+\.\d+|\d+\.?)(?:[eE][+-]?\d+)?$/.test(text) && Number.isFinite(Number(text))) return 'number';
   if (/^(?:true|false)$/i.test(text)) return 'boolean';
+  if (isDeterministicLocalDateTime(text)) return 'local_datetime';
   if (isDeterministicDate(text)) return 'date';
   return 'string';
 }
@@ -30,7 +31,7 @@ export function inferSchema(rows, { sampleSize = 1000 } = {}) {
 
 export function validateTargetSchema(schema) {
   if (!Array.isArray(schema) || schema.length === 0) fail('INVALID_TARGET_SCHEMA', 'Target schema must contain at least one field');
-  const allowedTypes = new Set(['string', 'integer', 'number', 'boolean', 'date']);
+  const allowedTypes = new Set(['string', 'integer', 'number', 'boolean', 'date', 'local_datetime']);
   const names = new Set();
   for (const field of schema) {
     if (!field || typeof field.name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(field.name)) fail('INVALID_FIELD_NAME', `Invalid field name ${field?.name}`);
@@ -67,6 +68,7 @@ export function validateOutputRow(row, schema) {
       case 'number': valid = typeof value === 'number' && Number.isFinite(value); break;
       case 'boolean': valid = typeof value === 'boolean'; break;
       case 'date': valid = isCanonicalDate(value); break;
+      case 'local_datetime': valid = isCanonicalLocalDateTime(value); break;
       default: valid = false;
     }
     if (!valid) fail('TYPE_MISMATCH', `Target field ${field.name} expected ${field.type}`, { field: field.name, expected: field.type, actual: typeof value, value });
