@@ -1,0 +1,57 @@
+name: fix-commercial-v1-contract
+
+on:
+  push:
+    branches: [release/commercial-ready-v1]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/commercial-ready-v1
+      - name: Replace stale source-CLI assertions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/production-hardening-regressions.test.js')
+          s = p.read_text()
+          old = """    'npm ci',
+              'npm run check',
+              'SPOOL_APPROVAL_KEY',
+              'src/cli/spool.js inspect',
+              'src/cli/spool.js dry-run',
+              'src/cli/spool.js approve',
+              'src/cli/spool.js run',
+              'migration.json'
+"""
+          new = """    'npm install -g github:dharan1007/spool#v1.0.0',
+              'spool --help',
+              'SPOOL_APPROVAL_KEY',
+              'spool inspect',
+              'spool dry-run',
+              'spool approve',
+              'spool run',
+              'spool verify',
+              'spool receipt',
+              'migration.json'
+"""
+          if old not in s:
+              raise SystemExit('stale CLI assertion block not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: Verify focused contract
+        run: node --test tests/production-hardening-regressions.test.js tests/product-surface.test.js
+      - name: Remove one-shot workflow and commit
+        run: |
+          rm -f .github/workflows/fix-commercial-v1-contract.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "test: align local runner contract with installed cli"
+          git push origin HEAD:release/commercial-ready-v1
