@@ -221,22 +221,14 @@ export class CommandKernel {
     }
 
     validateTargetSchema(plan.targetSchema);
-    this.workspace.targetSchema = clone(plan.targetSchema);
-    this.workspace.targetSchemaRevision += 1;
-    this.workspace.job = transition(this.workspace.job, PHASES.TARGET_READY, { targetSchemaRevision: this.workspace.targetSchemaRevision });
-
-    this.workspace.mapping = clone(plan.mapping);
-    this.workspace.job = transition(this.workspace.job, PHASES.MAPPING_DRAFT);
-    const compiled = compileMapping(this.workspace.mapping);
-    ensureTargetsMatch(this.workspace.targetSchema, compiled.entries);
-    this.workspace.mappingRevision += 1;
-    this.workspace.job = transition(this.workspace.job, PHASES.MAPPING_VALID, { mappingRevision: this.workspace.mappingRevision });
-
+    const compiled = compileMapping(plan.mapping);
+    ensureTargetsMatch(plan.targetSchema, compiled.entries);
+    const previewRevision = this.workspace.mappingRevision + 1;
     const preview = this.engine.run(
       this.workspace.source.rows.slice(0, Math.min(100, this.workspace.source.rows.length)),
-      this.workspace.mapping,
-      this.workspace.mappingRevision,
-      this.workspace.targetSchema
+      plan.mapping,
+      previewRevision,
+      plan.targetSchema
     );
     this.workspace.mission.dryRun = {
       processedRows: preview.processedRows,
@@ -244,6 +236,34 @@ export class CommandKernel {
       invalidRows: preview.invalidRows,
       violationGroups: preview.violations.map(group => ({ code: group.code, count: group.count }))
     };
+    if (preview.processedRows > 0 && preview.validRows === 0) {
+      const decision = {
+        code: 'DRY_RUN_ZERO_ACCEPTANCE',
+        message: 'Autopilot dry run accepted zero rows. Execution was not started; revise the outcome or target interpretation.',
+        sourceFields: []
+      };
+      this.workspace.mission.status = 'NEEDS_ATTENTION';
+      this.workspace.mission.ambiguities = [...(this.workspace.mission.ambiguities ?? []), decision];
+      this.workspace.mission.interventions += 1;
+      this.workspace.mission.updatedAt = new Date().toISOString();
+      await this.persist();
+      return this.envelope({
+        status: 'NEEDS_ATTENTION',
+        reason: decision.code,
+        ambiguityCount: this.workspace.mission.ambiguities.length,
+        ambiguities: clone(this.workspace.mission.ambiguities),
+        dryRun: clone(this.workspace.mission.dryRun),
+        confidence: plan.confidence
+      });
+    }
+
+    this.workspace.targetSchema = clone(plan.targetSchema);
+    this.workspace.targetSchemaRevision += 1;
+    this.workspace.job = transition(this.workspace.job, PHASES.TARGET_READY, { targetSchemaRevision: this.workspace.targetSchemaRevision });
+    this.workspace.mapping = clone(plan.mapping);
+    this.workspace.job = transition(this.workspace.job, PHASES.MAPPING_DRAFT);
+    this.workspace.mappingRevision = previewRevision;
+    this.workspace.job = transition(this.workspace.job, PHASES.MAPPING_VALID, { mappingRevision: this.workspace.mappingRevision });
     this.workspace.mission.status = 'RUNNING';
     this.workspace.mission.updatedAt = new Date().toISOString();
     return this.cmd_start_migration();
@@ -379,9 +399,14 @@ export class CommandKernel {
     this.workspace.outputRevision = this.workspace.mappingRevision;
     this.workspace.job = transition(this.workspace.job, PHASES.COMPLETE);
     if (this.workspace.mission?.mode === 'autopilot') {
+      const completionStatus = this.workspace.job.validRows === 0 && this.workspace.job.totalRows > 0
+        ? 'NEEDS_ATTENTION'
+        : this.workspace.job.invalidRows > 0
+          ? 'COMPLETE_WITH_REJECTIONS'
+          : 'COMPLETE_VERIFIED';
       this.workspace.mission = {
         ...this.workspace.mission,
-        status: 'COMPLETE',
+        status: completionStatus,
         completedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         quality: {

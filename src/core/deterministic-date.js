@@ -2,6 +2,8 @@ import { fail } from './errors.js';
 
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/;
+const LOCAL_DATETIME = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?$/;
+const CANONICAL_LOCAL_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?$/;
 const AMBIGUOUS_NUMERIC_DATE = /^\d{1,4}[/.]\d{1,2}[/.]\d{1,4}$/;
 const TEXT_DAY_MONTH = /^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/;
 const TEXT_MONTH_DAY = /^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/;
@@ -28,6 +30,51 @@ function utcDate(year, month, day, original) {
     fail('INVALID_DATE', `Invalid date ${original}`);
   }
   return date.toISOString();
+}
+
+function validateLocalDateTimeMatch(match, original) {
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6] ?? 0);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day
+      || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    fail('INVALID_LOCAL_DATETIME', `Invalid local datetime ${original}`);
+  }
+  const fraction = match[7] ? `.${match[7]}` : '';
+  return `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${String(second).padStart(2, '0')}${fraction}`;
+}
+
+export function parseDeterministicLocalDateTime(value) {
+  if (value === null || value === undefined || String(value).trim() === '') return null;
+  const original = String(value);
+  const text = original.trim();
+  const match = LOCAL_DATETIME.exec(text);
+  if (!match) fail('INVALID_LOCAL_DATETIME', `Unsupported local datetime format: ${original}`);
+  return validateLocalDateTimeMatch(match, original);
+}
+
+export function isDeterministicLocalDateTime(value) {
+  try {
+    return parseDeterministicLocalDateTime(value) !== null;
+  } catch {
+    return false;
+  }
+}
+
+export function isCanonicalLocalDateTime(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  const match = CANONICAL_LOCAL_DATETIME.exec(text);
+  if (!match) return false;
+  try {
+    return validateLocalDateTimeMatch(match, value) === text;
+  } catch {
+    return false;
+  }
 }
 
 function textualMatch(text, original) {
