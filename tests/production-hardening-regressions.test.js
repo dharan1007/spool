@@ -179,13 +179,15 @@ test('strict production CSP has no inline style attributes in the application re
 test('deployed Local Runner page contains a complete copyable CLI path for real device use', async () => {
   const surface = await readFile(new URL('../src/product-surface.js', import.meta.url), 'utf8');
   for (const required of [
-    'npm ci',
-    'npm run check',
+    'npm install -g github:dharan1007/spool#v1.0.0',
+    'spool --help',
     'SPOOL_APPROVAL_KEY',
-    'src/cli/spool.js inspect',
-    'src/cli/spool.js dry-run',
-    'src/cli/spool.js approve',
-    'src/cli/spool.js run',
+    'spool inspect',
+    'spool dry-run',
+    'spool approve',
+    'spool run',
+    'spool verify',
+    'spool receipt',
     'migration.json'
   ]) assert.match(surface, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });

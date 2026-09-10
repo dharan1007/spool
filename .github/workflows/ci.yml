@@ -2,6 +2,22 @@ name: release-gate
 
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Create or verify an immutable GitHub release from protected main
+        required: false
+        type: boolean
+        default: false
+      version:
+        description: Semantic version without v prefix
+        required: false
+        type: string
+        default: '1.0.0'
+      commit_sha:
+        description: Exact protected-main commit SHA; required when release is true
+        required: false
+        type: string
+        default: ''
   push:
     branches: [main]
   pull_request:
@@ -12,7 +28,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,6 +45,10 @@ jobs:
         env:
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: npm run check
+      - name: Verify packed and globally installed CLI
+        env:
+          SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run pack:verify
       - name: Install browser smoke dependency
         run: python3 -m pip install --disable-pip-version-check websocket-client
       - name: Run built-browser smoke through production-style SPA rewrites
@@ -48,7 +68,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -61,3 +81,35 @@ jobs:
         run: node -e "const D=require('better-sqlite3'); const db=new D(':memory:'); db.exec('CREATE TABLE probe(id INTEGER PRIMARY KEY) STRICT'); console.log(db.prepare('select sqlite_version() as v').get()); db.close();"
       - name: Run SQLite production conformance
         run: npm run test:conformance
+      - name: Verify packed and globally installed CLI
+        env:
+          SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run pack:verify
+
+  release:
+    name: publish-release
+    if: github.event_name == 'workflow_dispatch' && inputs.release == true
+    needs: [verify, sqlite-portability]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact requested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exactly from committed lockfile
+        run: npm ci
+      - name: Publish or verify immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit_sha }}
+        run: bash scripts/publish-release.sh
