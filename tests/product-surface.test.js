@@ -2,10 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-test('Local Runner surface exposes the released install and full installed-CLI lifecycle', async () => {
-  const source = await readFile('src/product-surface.js', 'utf8');
-  assert.match(source, /npm install -g github:dharan1007\/spool#v1\.0\.0/);
-  assert.match(source, /releases\/tag\/v1\.0\.0/);
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+test('Local Runner surface exposes the current package release and full installed-CLI lifecycle', async () => {
+  const [source, pkgText] = await Promise.all([
+    readFile('src/product-surface.js', 'utf8'),
+    readFile('package.json', 'utf8')
+  ]);
+  const version = JSON.parse(pkgText).version;
+  const escapedVersion = escapeRegex(version);
+  assert.match(source, new RegExp(`npm install -g github:dharan1007/spool#v${escapedVersion}`));
+  assert.match(source, new RegExp(`releases/tag/v${escapedVersion}`));
   for (const command of ['spool inspect', 'spool plan', 'spool dry-run', 'spool approve', 'spool run', 'spool status', 'spool verify', 'spool receipt']) {
     assert.ok(source.includes(command), `Local Runner page must show ${command}`);
   }
