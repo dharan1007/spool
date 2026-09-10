@@ -133,12 +133,12 @@ test('checkpoint cleanup failure after verified completion cannot downgrade dura
   });
 });
 
-test('approval is invalidated if source snapshot changes before execution', async () => {
+test('approved execution fails explicitly if the original source changes before target mutation', async () => {
   await fixture(async ({ service, sourcePath, targetPath }) => {
     const request = manifest(sourcePath, targetPath);
     const approval = await service.approve(request, { expiresAt: '2099-01-01T00:00:00.000Z', nonce: 'approval-002' });
     await writeFile(sourcePath, 'id,name\n1,Ada\n2,Lin\n3,Changed\n');
-    await assert.rejects(() => service.run(request, { approval }), /APPROVAL_BINDING_MISMATCH/);
+    await assert.rejects(() => service.run(request, { approval }), error => error?.code === 'SOURCE_CHANGED');
     assert.equal(targetRows(targetPath).length, 0);
   });
 });
