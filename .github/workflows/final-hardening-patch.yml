@@ -1,3 +1,4 @@
+# Trigger after TDD red: release-gate run 304 proved the full-source 95% acceptance contract fails before implementation.
 name: final-hardening-patch
 
 on:
