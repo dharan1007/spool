@@ -118,6 +118,21 @@ test('a separately held execution lease blocks a second command-service run and 
   });
 });
 
+test('checkpoint cleanup failure after verified completion cannot downgrade durable terminal truth', async () => {
+  await fixture(async ({ service, sourcePath, targetPath }) => {
+    const request = manifest(sourcePath, targetPath);
+    const approval = await service.approve(request, { expiresAt: '2099-01-01T00:00:00.000Z', nonce: 'approval-cleanup-failure' });
+    service.runs.clearCheckpoint = () => { throw new Error('injected checkpoint cleanup failure'); };
+
+    const result = await service.run(request, { approval });
+    assert.equal(result.status, 'COMPLETE');
+    assert.equal(result.verification.status, 'VERIFIED');
+    assert.equal(service.status(request.migrationId).status, 'COMPLETE');
+    assert.equal(service.receipt(request.migrationId).receiptId, result.receipt.receiptId);
+    assert.deepEqual(targetRows(targetPath), [{ id: 1, name: 'Ada' }, { id: 2, name: 'Lin' }]);
+  });
+});
+
 test('approval is invalidated if source snapshot changes before execution', async () => {
   await fixture(async ({ service, sourcePath, targetPath }) => {
     const request = manifest(sourcePath, targetPath);
