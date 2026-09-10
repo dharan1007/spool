@@ -30,6 +30,13 @@ function nonEmptyValues(rows, field, limit = 1000) {
   return values;
 }
 
+function sourceAllowsNull(rows, fieldName) {
+  return rows.some(row => {
+    const value = row?.[fieldName];
+    return value === null || value === undefined || String(value).trim() === '';
+  });
+}
+
 function score(values, predicate) {
   if (!values.length) return { successCount: 0, sampleCount: 0, confidence: 0 };
   const successCount = values.reduce((count, value) => count + (predicate(value) ? 1 : 0), 0);
@@ -120,7 +127,12 @@ export function planAutopilot({ sourceSchema, rows, outcome = AUTOPILOT_OUTCOMES
       : outcome === AUTOPILOT_OUTCOMES.DATABASE_READY
         ? inferPromotedType(field, sourceRows)
         : { type: field.type, confidence: 1, successCount: Math.min(sourceRows.length, 1000), sampleCount: Math.min(sourceRows.length, 1000), reason: 'preserve_type' };
-    targetSchema.push({ name: targetName, type: inferred.type, nullable: preserveCsv ? true : Boolean(field.nullable) });
+    const nullable = preserveCsv
+      ? true
+      : outcome === AUTOPILOT_OUTCOMES.DATABASE_READY
+        ? Boolean(field.nullable) || sourceAllowsNull(sourceRows, field.name)
+        : Boolean(field.nullable);
+    targetSchema.push({ name: targetName, type: inferred.type, nullable });
     mapping.push({ target: targetName, expr: preserveCsv ? { op: 'copy', name: field.name } : expressionFor(field.name, inferred.type) });
     evidence.push({
       sourceField: field.name,
