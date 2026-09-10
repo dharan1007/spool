@@ -21,7 +21,7 @@ const FIELD_SCHEMA = {
   additionalProperties: false,
   properties: {
     name: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$', maxLength: 128 },
-    type: { type: 'string', enum: ['string', 'integer', 'number', 'boolean', 'date'] },
+    type: { type: 'string', enum: ['string', 'integer', 'number', 'boolean', 'date', 'local_datetime'] },
     nullable: { type: 'boolean' }
   }
 };
@@ -38,7 +38,7 @@ const MAPPING_ENTRY_SCHEMA = {
 
 const DEFINITIONS = Object.freeze({
   inspect_mission: { description: 'Inspect bounded Autopilot mission state, inference evidence, ambiguities, progress and quality without dumping the dataset.', properties: {}, readOnly: true },
-  run_autopilot: { description: 'Profile the loaded source, infer a target contract and deterministic mapping, dry-run it, and start execution automatically when no destructive ambiguity remains.', properties: { outcome: { type: 'string', enum: ['database_ready', 'clean_standardize', 'preserve_contract'], default: 'database_ready' } } },
+  run_autopilot: { description: 'Profile the loaded source, infer a target contract and deterministic mapping, dry-run a representative sample, and start execution automatically only when the configured acceptance floor is satisfied.', properties: { outcome: { type: 'string', enum: ['database_ready', 'clean_standardize', 'preserve_contract'], default: 'database_ready' } } },
   inspect_workspace: { description: 'Inspect workflow metadata only: phase, revisions, counts, fingerprints and valid next actions. Never dumps source or output rows.', properties: {}, readOnly: true },
   describe_supported_formats: { description: 'Describe accepted source/export formats, hard safety limits and local-only privacy behavior.', properties: {}, readOnly: true },
   inspect_source_schema: { description: 'Inspect inferred source fields, types and nullability without returning the full dataset.', properties: {}, readOnly: true, untrusted: true },
@@ -118,7 +118,7 @@ export class TemporalRegistry {
 
         const controller = new AbortController();
         try {
-          await this.modelContext.registerTool(makeTool(name, this.kernel), { signal: controller.signal });
+          await this.modelContext.registerTool(makeTool(name, kernel), { signal: controller.signal });
         } catch (error) {
           controller.abort();
           throw error;
