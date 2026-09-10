@@ -217,31 +217,23 @@ This release does not claim hosted raw-row ingestion, unsupported write strategi
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit_sha }}
         run: |
           set -euo pipefail
           TAG="v${{ inputs.version }}"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            mkdir -p existing-release
+            rm -rf existing-release
+            mkdir existing-release
             gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir existing-release --pattern '*.tgz' --pattern 'SHA256SUMS' --pattern 'release-record.json'
             (
               cd existing-release
               sha256sum -c SHA256SUMS
             )
-            node - <<'NODE'
-          const fs = require('fs');
-          const record = JSON.parse(fs.readFileSync('existing-release/release-record.json', 'utf8'));
-          if (record.version !== process.env.RELEASE_VERSION) throw new Error(`Existing release version mismatch: ${record.version}`);
-          if (record.commit !== process.env.RELEASE_COMMIT) throw new Error(`Existing release commit mismatch: ${record.commit}`);
-          if (!record.artifact?.filename || !/\.tgz$/.test(record.artifact.filename)) throw new Error('Existing release record lacks package artifact');
-          if (!fs.existsSync(`existing-release/${record.artifact.filename}`)) throw new Error('Existing package artifact named by release record is missing');
-          NODE
+            node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync('existing-release/release-record.json','utf8'));if(r.version!==process.env.RELEASE_VERSION)throw new Error('Existing release version mismatch: '+r.version);if(r.commit!==process.env.RELEASE_COMMIT)throw new Error('Existing release commit mismatch: '+r.commit);if(!r.artifact?.filename||!r.artifact.filename.endsWith('.tgz'))throw new Error('Existing release record lacks package artifact');if(!fs.existsSync('existing-release/'+r.artifact.filename))throw new Error('Existing package artifact named by release record is missing');"
           else
             gh release create "$TAG" release/*.tgz release/SHA256SUMS release/release-record.json --verify-tag --title "SPOOL $TAG" --notes-file release-notes.md --repo "$GITHUB_REPOSITORY"
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
-          RELEASE_COMMIT: ${{ inputs.commit_sha }}
 
       - name: Verify published release identity and assets
         shell: bash
