@@ -7,7 +7,7 @@ SPOOL is an open-source local-first migration product built and commercially sup
 SPOOL has two deliberately separate local-first execution paths:
 
 1. **Browser Studio** — profile, infer, deterministically transform, validate and export CSV data without sending rows to an application backend.
-2. **Gate B local runner** — execute an approved UTF-8 filesystem CSV migration into an existing ordinary SQLite table with source snapshot binding, live target preflight, transactional batch evidence, crash reconciliation, fencing, verification and a commit-bound receipt.
+2. **Gate B Local Runner** — bounded-memory streaming execution of an approved UTF-8 filesystem CSV into an existing ordinary SQLite table with a durable content-bound source snapshot, live target preflight, transactional batch evidence, crash reconciliation, fencing, verification and a commit-bound receipt. The Local Runner defaults to a **256 MiB** source ceiling while Browser Studio remains capped at **50 MiB**.
 
 [Technical browser surface](https://spool-webmcp.vercel.app/) · [Request a Migration Assessment](https://github.com/dharan1007/spool/issues/new?template=migration-assessment.yml) · [Local Runner](docs/LOCAL_RUNNER.md) · [Customer engagement workflow](docs/CUSTOMER_ENGAGEMENT.md) · [Migration services](docs/MIGRATION_SERVICES.md) · [Security](SECURITY.md)
 
@@ -20,7 +20,7 @@ SPOOL has two deliberately separate local-first execution paths:
 
 Node.js 22+ is required. The release remains protected against accidental npm-registry publication; installation is directly from the signed/versioned GitHub source or release artifact.
 
-After `v1.0.0` is published:
+For the current published release:
 
 ```bash
 npm install -g github:dharan1007/spool#v1.0.0
@@ -56,31 +56,35 @@ messy CSV
 
 The browser path is local-first and retains the production CSP boundary `connect-src 'none'`. The current browser input limit is **50 MiB**. SPOOL fails closed on ambiguous dates/numbers, invalid target values, storage-capacity failure and unsafe export cells.
 
-### Gate B local runner
+### Gate B Local Runner
 
-The production connector scope is intentionally narrow and evidence-backed:
+The production connector scope is intentionally narrow and evidence-backed. The Local Runner uses bounded-memory streaming and defaults to a **256 MiB** source ceiling; the ceiling is a deliberate product boundary, not a claim that a 256 MiB dataset is retained in JavaScript memory.
 
 ```text
 UTF-8 filesystem CSV
-  → content-bound source snapshot
-  → deterministic plan + dry run
+  → durable content-bound local source snapshot
+  → streamed profile / deterministic plan / streamed dry run
   → live SQLite target preflight
   → bound approval
+  → revalidate original source against approved snapshot
   → durable lease + fencing token
-  → batch transaction
+  → stream immutable snapshot in bounded batches
        migrated rows
        + SPOOL reconciliation ledger
        commit atomically
-  → reconcile on restart
+  → re-scan immutable snapshot from a durable checkpoint on restart
   → exact row/ledger verification
   → hashed migration receipt bound to release commit
+  → verified snapshot cleanup
 ```
 
-Supported Gate B target:
+Supported Gate B target and execution boundaries:
 
 - an **existing ordinary SQLite table**;
 - `insert` write strategy only;
-- batches of 1–10,000 rows;
+- batches of 1–10,000 source rows;
+- default Local Runner source ceiling of **256 MiB**;
+- bounded-memory CSV parsing/transformation rather than a whole-dataset JS array;
 - destination schema/affinity/nullability checked before approval;
 - table DDL, columns, indexes and foreign keys fingerprinted as a `targetContractId`;
 - targets with triggers or virtual-table behavior rejected;
@@ -88,9 +92,21 @@ Supported Gate B target:
 - source and target paths constrained to configured allow-roots;
 - every SQLite write requires `target_write` approval bound to the exact plan, source snapshot, target contract, effects, principal and expiry.
 
+## Durable snapshot and bounded-memory lifecycle
+
+The Local Runner copies the source to a **customer-local durable snapshot** while hashing it. The semantic snapshot identity continues to bind the original canonical source path, byte length and SHA-256 content digest. Snapshot filenames are filesystem-safe across Linux, macOS and Windows; their paths are intentionally non-semantic and are never part of approval or receipt identity.
+
+`inspect`, `dry-run`, `approve` and `run` read CSV records incrementally. Schema inference retains only a bounded sample and transform validation keeps bounded violation samples. Execution retains only the current target batch plus bounded evidence, not a second in-memory copy of the source dataset. CI includes a real Local Runner migration of a source larger than the Browser Studio 50 MiB boundary while V8 old-space is explicitly constrained to 48 MiB.
+
+The durable snapshot is what makes deterministic restart possible. After a crash or restart, SPOOL loads the exact approved snapshot, re-scans it from the beginning, discards records before the durable checkpoint, reconciles target evidence before replay, and continues at the next whole batch. This trades sequential disk reads for deterministic bounded memory and exact replay semantics.
+
+Before target mutation, the original source is revalidated against the approved snapshot. A changed, replaced or missing approved source fails as `SOURCE_CHANGED` before a target write lease is acquired. After VERIFIED completion and a durable receipt, SPOOL cleans the per-migration snapshot directory. Interrupted or failed runs keep their snapshot so a later retry can prove and resume the same approved bytes.
+
+Plan disk space accordingly: snapshot creation temporarily requires roughly one additional source-file-sized allocation, and the SQLite target needs its own growth/WAL/headroom. The 256 MiB default ceiling is therefore not a promise that any machine with 256 MiB free RAM can run the migration, and it is not a 1-GB/unlimited-file claim.
+
 ## What SPOOL does **not** claim yet
 
-The current production claim does not include PostgreSQL/MySQL execution, remote hosted database credentials, `upsert`/`replace`/`delete`/`truncate`, virtual SQLite tables, SQLite targets with triggers, server-side raw-row ingestion, unlimited browser file size, or legal/regulatory certification.
+The current production claim does not include PostgreSQL/MySQL execution, remote hosted database credentials, `upsert`/`replace`/`delete`/`truncate`, virtual SQLite tables, SQLite targets with triggers, server-side raw-row ingestion, unlimited browser file size, unlimited Local Runner source size, or legal/regulatory certification.
 
 Unsupported behavior fails closed instead of being marketed as production-ready.
 
@@ -116,11 +132,11 @@ The final receipt includes migration/plan/source/target identities, target-contr
 
 ## Real customer-style fixture
 
-`examples/crm-export/` uses the same production `SpoolCommandService` path as the local runner and includes dirty currency/locale values, canonical/textual dates, an intentionally ambiguous numeric date, mixed booleans, an invalid numeric ID, target DDL and a production migration request.
+`examples/crm-export/` uses the same production `SpoolCommandService` path as the Local Runner and includes dirty currency/locale values, canonical/textual dates, an intentionally ambiguous numeric date, mixed booleans, an invalid numeric ID, target DDL and a production migration request.
 
 `tests/crm-example.test.js` verifies exact target rows, violations, reconciliation ledger and final receipt. `npm run pack:verify` additionally packs SPOOL, installs the resulting artifact into a clean temporary prefix, and runs that same CRM path through the installed `spool` executable.
 
-## Local runner surfaces
+## Local Runner surfaces
 
 The production transports dispatch into the same command service rather than a second migration engine:
 
@@ -134,7 +150,7 @@ For the complete command lifecycle and `migration.json`, see [`docs/LOCAL_RUNNER
 
 ## Deterministic safety properties
 
-Current safety coverage includes deterministic locale-number/date/local-datetime parsing, ambiguous numeric-date rejection, typed target validation, source snapshot binding, target-contract drift rejection, exact replay/idempotency, commit-before-checkpoint recovery, stale-fence rejection, credential-reference isolation, filesystem traversal/symlink containment, spreadsheet-formula neutralization, browser IndexedDB quota/write failure handling and Worker job/revision/sequence isolation.
+Current safety coverage includes bounded-memory streaming CSV parsing, deterministic locale-number/date/local-datetime parsing, ambiguous numeric-date rejection, typed target validation, durable source snapshot binding and cleanup, source revalidation, target-contract drift rejection, exact replay/idempotency, commit-before-checkpoint recovery, checkpoint re-scan, stale-fence rejection, credential-reference isolation, filesystem traversal/symlink containment, spreadsheet-formula neutralization, browser IndexedDB quota/write failure handling and Worker job/revision/sequence isolation.
 
 ## Release evidence
 
@@ -146,6 +162,8 @@ npm audit --omit=dev --audit-level=high
 stable SQLite native-driver load check
 full tests
 Gate B SQLite conformance/fault suite
+streaming parser boundary/fault tests
+>50 MiB constrained-old-space Local Runner proof
 build
 benchmark
 static security/release checks

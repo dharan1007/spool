@@ -21,30 +21,38 @@ The production claim is intentionally limited to filesystem UTF-8 CSV → existi
 
 Implemented safety contract:
 
-1. Content-bound source snapshots using the same opened source bytes that are migrated.
-2. Deterministic plan, batch and checkpoint identities.
-3. Live SQLite destination preflight with target contract fingerprinting.
-4. Approval bound to the plan, source snapshot, live target contract, effects, principal and expiry.
-5. Durable per-batch target ledger committed atomically with migrated rows.
-6. Exact `reconcileTargetCommit(batchIdentity)` semantics.
-7. Commit-before-checkpoint crash recovery without duplicate replay.
-8. Idempotent exact replay and hard conflict on changed evidence.
-9. Durable leases plus monotonic fencing tokens checked inside target transactions.
-10. Filesystem allow-root enforcement with traversal and symlink/junction containment.
-11. Exact row-accounting and ledger-completeness verification.
-12. Canonical commit-bound migration receipts.
-13. Shared production command service used by CLI/`spoold` transports.
-14. Loopback-only authenticated `spoold` transport with Host/Origin and request-boundary checks.
-15. Dedicated SQLite conformance/fault suite and Linux/Windows/macOS native-driver matrix.
-16. Canonical customer-style CRM migration fixture using the real command-service path.
+1. Durable content-bound customer-local source snapshots created incrementally while hashing.
+2. Bounded-memory UTF-8 CSV parsing, dry-run and execution with a 256 MiB default Local Runner ceiling.
+3. Bounded schema/violation sampling and target-batch accumulation instead of whole-dataset source/output arrays.
+4. Cross-platform-safe snapshot filenames with semantic identity independent of the snapshot path.
+5. Approved-source revalidation before target mutation; changed/replaced/missing input fails `SOURCE_CHANGED`.
+6. Deterministic plan, batch and checkpoint identities.
+7. Live SQLite destination preflight with target contract fingerprinting.
+8. Approval bound to the plan, source snapshot, live target contract, effects, principal and expiry.
+9. Durable per-batch target ledger committed atomically with migrated rows.
+10. Exact `reconcileTargetCommit(batchIdentity)` semantics.
+11. Commit-before-checkpoint crash recovery without duplicate replay.
+12. Durable checkpoint restart by re-scanning the immutable snapshot and skipping proven source ranges.
+13. Idempotent exact replay and hard conflict on changed evidence.
+14. Durable leases plus monotonic fencing tokens checked inside target transactions.
+15. Filesystem allow-root enforcement with traversal and symlink/junction containment.
+16. Exact row-accounting and ledger-completeness verification.
+17. Canonical commit-bound migration receipts.
+18. Snapshot cleanup only after VERIFIED terminal truth; interrupted runs retain recovery material.
+19. Shared production command service used by CLI/`spoold` transports.
+20. Loopback-only authenticated `spoold` transport with Host/Origin and request-boundary checks.
+21. Dedicated SQLite conformance/fault suite and Linux/Windows/macOS native-driver matrix.
+22. Streaming malformed-input, source-ceiling, source-change, target-lock and crash/restart fault coverage.
+23. Constrained-old-space large-source proof above the Browser Studio 50 MiB boundary.
+24. Canonical customer-style CRM migration fixture using the real command-service path.
 
-Gate B explicitly rejects virtual/triggered SQLite targets and unsupported destructive/write strategies.
+Gate B explicitly rejects virtual/triggered SQLite targets, unsupported destructive/write strategies, unlimited source size and hosted raw-row ingestion.
 
 ## Next — broaden only after the same contract is proven
 
 ### PostgreSQL adapter
 
-PostgreSQL is the next likely destination, but it must implement the same safety semantics rather than becoming a thin connector wrapper:
+PostgreSQL is the next destination, but it must implement the same safety semantics rather than becoming a thin connector wrapper:
 
 - source/target identity and snapshot semantics;
 - transactional batch evidence;
@@ -60,9 +68,9 @@ SPOOL will not label PostgreSQL production-ready until its connector conformance
 
 ### Scale
 
-- Streaming local-runner ingestion so memory is bounded by batch size rather than dataset size.
 - Browser OPFS/streaming only after quota/recovery behavior is measured.
-- Large-data load and soak tests with explicit resource ceilings.
+- Larger-than-256-MiB Local Runner ceilings only after explicit disk, runtime and soak evidence supports a new boundary.
+- Long-duration load and soak tests with explicit resource ceilings.
 
 ### Enterprise/control plane
 

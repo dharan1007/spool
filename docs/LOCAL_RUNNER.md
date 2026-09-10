@@ -1,6 +1,6 @@
 # SPOOL Local Runner
 
-The Local Runner is the production target-mutation surface for SPOOL Gate B. It runs on the machine that owns the source CSV and SQLite database. Source rows, target credentials, and database contents are not uploaded to the hosted Browser Studio.
+The Local Runner is the production target-mutation surface for SPOOL Gate B. It runs on the machine that owns the source CSV and SQLite database. Source rows, target credentials, durable snapshots, and database contents are not uploaded to the hosted Browser Studio.
 
 ## Requirements
 
@@ -9,8 +9,19 @@ The Local Runner is the production target-mutation surface for SPOOL Gate B. It 
 - A UTF-8 CSV source file.
 - An existing ordinary SQLite database and table with a schema compatible with the declared target contract.
 - Source, target, and state files must remain inside the allow-roots supplied to the CLI.
+- Enough local disk space for a source-sized durable snapshot plus SQLite target/WAL growth and ordinary filesystem headroom.
 
-Browser Studio intentionally limits selected files to 50 MiB. The Local Runner currently permits sources up to 256 MiB by default. It still materializes the source in memory, so leave substantial RAM headroom and do not treat 256 MiB as a streaming/1-GB claim.
+Browser Studio intentionally limits selected files to **50 MiB**. The Local Runner defaults to a **256 MiB** source ceiling and now uses bounded-memory streaming: it does not retain the whole CSV or the whole transformed dataset in one JavaScript array. The limit remains deliberate; 256 MiB is not a 1-GB/unlimited-file claim and does not remove the need for sufficient RAM, disk, and database headroom.
+
+## Snapshot and recovery lifecycle
+
+Before planning, SPOOL copies the source incrementally into a customer-local durable snapshot while computing its SHA-256 content digest. The snapshot identity binds the canonical original path, exact byte count, and content digest. On POSIX systems the snapshot file is owner-only; its generated filename is cross-platform safe and is not part of the semantic approval/receipt identity.
+
+`inspect`, `dry-run`, and execution stream rows from that snapshot. Schema inference keeps only a bounded sample; validation keeps bounded violation samples; execution keeps the current target batch and bounded evidence. This makes memory usage primarily a function of parser state, sample limits, and batch size instead of source-file size. The release gate includes a source larger than the 50 MiB Browser Studio limit executed with V8 `--max-old-space-size=48` and exact target/receipt verification.
+
+An approved run also revalidates the original source against the approved snapshot **before any target write lease is acquired**. If the approved source is changed, replaced, or missing, execution stops with `SOURCE_CHANGED` and target mutation does not begin.
+
+For restart/recovery, SPOOL loads the exact durable snapshot, re-scans it sequentially from the beginning, discards rows before the durable whole-batch checkpoint, and reconciles target batch evidence before replay. A commit-before-checkpoint crash therefore does not duplicate rows. After VERIFIED completion and durable receipt persistence, the per-migration snapshot directory is cleaned. A failed or interrupted migration retains its snapshot so the same approved bytes can be resumed; do not manually delete an abandoned run's snapshot if you still intend to resume it.
 
 ## 1. Install and verify the exact checkout
 
@@ -49,6 +60,7 @@ data/
   customers.csv
   customers.db
   spool-state.db        # created/used by SPOOL
+  spool-state.db.snapshots/  # durable recovery snapshots, created as needed
 migration.json
 ```
 
@@ -135,7 +147,7 @@ node src/cli/spool.js inspect \
   --state ./data/spool-state.db
 ```
 
-Inspection binds the source snapshot and checks the live SQLite table contract.
+Inspection creates/reuses the durable content-bound source snapshot, streams the source for row count/schema sampling, and checks the live SQLite table contract. The returned customer-facing payload exposes semantic source identity and counts, not the private snapshot path.
 
 ## 5. Review the authoritative plan
 
@@ -157,7 +169,7 @@ node src/cli/spool.js dry-run \
   --state ./data/spool-state.db
 ```
 
-Do not approve a migration merely because the command ran. Check valid/rejected counts and violation classes. Revise the declared contract/mapping when the result is not acceptable.
+Dry-run reuses the durable snapshot and streams every row through the exact transform/validation semantics without materializing successful output rows. Do not approve a migration merely because the command ran. Check valid/rejected counts and violation classes. Revise the declared contract/mapping when the result is not acceptable.
 
 ## 7. Create bound approval evidence
 
@@ -188,7 +200,7 @@ node src/cli/spool.js run \
   --out run-result.json
 ```
 
-The SQLite path uses a durable execution lease/fencing token, commits migrated rows and SPOOL batch-ledger evidence in the same SQLite transaction, and reconciles exact target evidence before replay after a crash.
+The SQLite path revalidates the original approved source, uses a durable execution lease/fencing token, streams the immutable snapshot in bounded source batches, commits migrated rows and SPOOL batch-ledger evidence in the same SQLite transaction, checkpoints only whole source ranges, and reconciles exact target evidence before replay after a crash.
 
 ## 9. Read status, verification, and receipt
 
@@ -219,12 +231,12 @@ A production success requires verification evidence, not only a zero process exi
 source rows = written rows + rejected rows + explicitly filtered rows
 ```
 
-The final receipt binds the release commit, plan, source snapshot, target contract, batch identities, counts, violation summary, and verification result.
+The final receipt binds the release commit, plan, source snapshot, target contract, batch identities, counts, violation summary, and verification result. Snapshot cleanup happens only after this verified terminal truth is durable.
 
 ## Current Gate B boundaries
 
-Supported now: UTF-8 filesystem CSV, existing ordinary SQLite table, insert-only writes, 1–10,000 rows per batch, customer-local execution, snapshot binding, target preflight, approval, fencing, reconciliation, verification, and receipts.
+Supported now: UTF-8 filesystem CSV, existing ordinary SQLite table, insert-only writes, 1–10,000 source rows per batch, **256 MiB default Local Runner source ceiling**, bounded-memory streaming, customer-local durable snapshots, source revalidation, snapshot cleanup after VERIFIED completion, target preflight, approval, fencing, reconciliation, checkpoint re-scan, verification, and receipts.
 
-Not claimed: PostgreSQL/MySQL execution, hosted raw-row ingestion, delete/truncate/upsert/replace, triggered or virtual SQLite targets, 1-GB streaming, or remote credential custody.
+Not claimed: PostgreSQL/MySQL execution, hosted raw-row ingestion, delete/truncate/upsert/replace, triggered or virtual SQLite targets, 1-GB/unlimited streaming, or remote credential custody.
 
 For a known working fixture, see `examples/crm-export/` and `tests/crm-example.test.js`.
