@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { MigrationEngine } from '../src/core/migration.js';
 
 const mapping = [
-  { source: 'id', target: 'id', transforms: [{ op: 'cast_number' }] },
-  { source: 'name', target: 'name', transforms: [{ op: 'trim' }] }
+  { target: 'id', expr: { op: 'cast_number', value: { op: 'field', name: 'id' } } },
+  { target: 'name', expr: { op: 'trim', value: { op: 'field', name: 'name' } } }
 ];
 const schema = [
   { name: 'id', type: 'number', nullable: false },
