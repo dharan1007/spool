@@ -13,37 +13,66 @@ function groupViolation(groups, error, rowIndex, row, sampleLimit) {
   if (group.samples.length < sampleLimit) group.samples.push({ rowIndex, row: structuredClone(row) });
 }
 
+function sortedViolations(groups) {
+  return [...groups.values()].sort((a, b) => b.count - a.count || a.code.localeCompare(b.code));
+}
+
 export class MigrationEngine {
   constructor({ chunkSize = 1000, sampleLimit = 10 } = {}) {
     this.chunkSize = chunkSize;
     this.sampleLimit = sampleLimit;
   }
 
-  run(rows, mappingEntries, revision = 1, targetSchema = null) {
+  createAccumulator(mappingEntries, revision = 1, targetSchema = null) {
     const compiled = compileMapping(mappingEntries);
+    const groups = new Map();
+    let processedRows = 0;
+    let validRows = 0;
+
+    return Object.freeze({
+      process: (row, rowIndex = processedRows) => {
+        processedRows += 1;
+        try {
+          const transformed = compiled.mapRow(row);
+          validateOutputRow(transformed, targetSchema);
+          validRows += 1;
+          return Object.freeze({ ok: true, row: transformed, revision });
+        } catch (error) {
+          groupViolation(groups, error, rowIndex, row, this.sampleLimit);
+          return Object.freeze({ ok: false, code: error?.code ?? 'TRANSFORM_ERROR' });
+        }
+      },
+      summary: () => {
+        const violations = sortedViolations(groups);
+        const invalidRows = violations.reduce((sum, group) => sum + group.count, 0);
+        return {
+          processedRows,
+          totalRows: processedRows,
+          validRows,
+          invalidRows,
+          outputRevision: revision,
+          violations
+        };
+      }
+    });
+  }
+
+  run(rows, mappingEntries, revision = 1, targetSchema = null) {
+    const accumulator = this.createAccumulator(mappingEntries, revision, targetSchema);
     const output = [];
     const rowRevisions = [];
-    const groups = new Map();
     for (let i = 0; i < rows.length; i++) {
-      try {
-        const transformed = compiled.mapRow(rows[i]);
-        validateOutputRow(transformed, targetSchema);
-        output.push(transformed);
+      const result = accumulator.process(rows[i], i);
+      if (result.ok) {
+        output.push(result.row);
         rowRevisions.push(revision);
-      } catch (error) {
-        groupViolation(groups, error, i, rows[i], this.sampleLimit);
       }
     }
-    const invalidRows = [...groups.values()].reduce((sum, group) => sum + group.count, 0);
+    const summary = accumulator.summary();
     return {
-      processedRows: rows.length,
-      totalRows: rows.length,
-      validRows: output.length,
-      invalidRows,
+      ...summary,
       output,
-      rowRevisions,
-      outputRevision: revision,
-      violations: [...groups.values()].sort((a, b) => b.count - a.count || a.code.localeCompare(b.code))
+      rowRevisions
     };
   }
 
