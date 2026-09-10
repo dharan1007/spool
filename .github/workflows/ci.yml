@@ -12,7 +12,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,6 +29,10 @@ jobs:
         env:
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: npm run check
+      - name: Verify packed and globally installed CLI
+        env:
+          SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run pack:verify
       - name: Install browser smoke dependency
         run: python3 -m pip install --disable-pip-version-check websocket-client
       - name: Run built-browser smoke through production-style SPA rewrites
@@ -48,7 +52,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -61,3 +65,7 @@ jobs:
         run: node -e "const D=require('better-sqlite3'); const db=new D(':memory:'); db.exec('CREATE TABLE probe(id INTEGER PRIMARY KEY) STRICT'); console.log(db.prepare('select sqlite_version() as v').get()); db.close();"
       - name: Run SQLite production conformance
         run: npm run test:conformance
+      - name: Verify packed and globally installed CLI
+        env:
+          SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run pack:verify
