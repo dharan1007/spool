@@ -2,19 +2,42 @@
 
 **Migration correctness infrastructure: dirty data in, typed and verified data out.**
 
-SPOOL is an open-source local-first migration product built and commercially supported by **Dharan Tej Reddy Poduvu**, an individual solo builder. There is currently no incorporated SPOOL company and no paid SaaS dependency required to use or buy the supported migration services.
+SPOOL is an open-source local-first migration product built and commercially supported by **Dharan Tej Reddy Poduvu**, an individual solo builder. There is currently no incorporated SPOOL company and no paid SaaS dependency required to use or buy supported migration services.
 
 SPOOL has two deliberately separate local-first execution paths:
 
 1. **Browser Studio** — profile, infer, deterministically transform, validate and export CSV data without sending rows to an application backend.
 2. **Gate B local runner** — execute an approved UTF-8 filesystem CSV migration into an existing ordinary SQLite table with source snapshot binding, live target preflight, transactional batch evidence, crash reconciliation, fencing, verification and a commit-bound receipt.
 
-[Technical browser demo](https://spool-webmcp.vercel.app/) · [Request a Migration Assessment](https://github.com/dharan1007/spool/issues/new?template=migration-assessment.yml) · [Zero-cost solo launch](docs/SOLO_BUILDER_LAUNCH.md) · [Migration services](docs/MIGRATION_SERVICES.md) · [Data handling](docs/DATA_HANDLING.md) · [Commercial support](docs/COMMERCIAL_SUPPORT.md)
+[Technical browser surface](https://spool-webmcp.vercel.app/) · [Request a Migration Assessment](https://github.com/dharan1007/spool/issues/new?template=migration-assessment.yml) · [Local Runner](docs/LOCAL_RUNNER.md) · [Customer engagement workflow](docs/CUSTOMER_ENGAGEMENT.md) · [Migration services](docs/MIGRATION_SERVICES.md) · [Security](SECURITY.md)
 
-> The Vercel endpoint is a technical/open-source demo, not the paid customer data plane or checkout. Current paid migration work is delivered locally/customer-side so no paid hosting is required before revenue.
+> The Vercel endpoint is a technical/open-source Browser Studio and documentation surface, not a paid customer data plane or checkout. Paid target work is delivered locally/customer-side so no paid hosting is required before revenue.
 
 [![release-gate](https://github.com/dharan1007/spool/actions/workflows/ci.yml/badge.svg)](https://github.com/dharan1007/spool/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+## Install the Local Runner
+
+Node.js 22+ is required. The release remains protected against accidental npm-registry publication; installation is directly from the signed/versioned GitHub source or release artifact.
+
+After `v1.0.0` is published:
+
+```bash
+npm install -g github:dharan1007/spool#v1.0.0
+spool --help
+```
+
+Source-verification path:
+
+```bash
+git clone --branch v1.0.0 https://github.com/dharan1007/spool.git
+cd spool
+npm ci
+npm run check
+npm run pack:verify
+```
+
+The GitHub Release also carries the packed `.tgz` plus SHA-256 release evidence so it can be installed locally without publishing SPOOL to the npm registry.
 
 ## What SPOOL is production-claiming
 
@@ -25,7 +48,7 @@ messy CSV
   → PROFILE
   → INFER
   → deterministic PLAN
-  → DRY RUN
+  → representative DRY RUN
   → EXECUTE in Worker
   → VERIFY
   → typed output + violations + lineage
@@ -95,21 +118,23 @@ The final receipt includes migration/plan/source/target identities, target-contr
 
 `examples/crm-export/` uses the same production `SpoolCommandService` path as the local runner and includes dirty currency/locale values, canonical/textual dates, an intentionally ambiguous numeric date, mixed booleans, an invalid numeric ID, target DDL and a production migration request.
 
-`tests/crm-example.test.js` verifies exact target rows, violations, reconciliation ledger and final receipt.
+`tests/crm-example.test.js` verifies exact target rows, violations, reconciliation ledger and final receipt. `npm run pack:verify` additionally packs SPOOL, installs the resulting artifact into a clean temporary prefix, and runs that same CRM path through the installed `spool` executable.
 
 ## Local runner surfaces
 
 The production transports dispatch into the same command service rather than a second migration engine:
 
 - `SpoolCommandService` — production command boundary;
-- CLI staged commands;
+- installed `spool` CLI staged commands;
 - `spoold` — loopback-only authenticated HTTP bridge with Host/Origin checks and bounded requests;
 - durable local run/checkpoint store;
 - SQLite target, lease and reconciliation stores.
 
+For the complete command lifecycle and `migration.json`, see [`docs/LOCAL_RUNNER.md`](docs/LOCAL_RUNNER.md).
+
 ## Deterministic safety properties
 
-Current safety coverage includes deterministic locale-number/date parsing, ambiguous numeric-date rejection, typed target validation, source snapshot binding, target-contract drift rejection, exact replay/idempotency, commit-before-checkpoint recovery, stale-fence rejection, credential-reference isolation, filesystem traversal/symlink containment, spreadsheet-formula neutralization, browser IndexedDB quota/write failure handling and Worker job/revision/sequence isolation.
+Current safety coverage includes deterministic locale-number/date/local-datetime parsing, ambiguous numeric-date rejection, typed target validation, source snapshot binding, target-contract drift rejection, exact replay/idempotency, commit-before-checkpoint recovery, stale-fence rejection, credential-reference isolation, filesystem traversal/symlink containment, spreadsheet-formula neutralization, browser IndexedDB quota/write failure handling and Worker job/revision/sequence isolation.
 
 ## Release evidence
 
@@ -124,70 +149,53 @@ Gate B SQLite conformance/fault suite
 build
 benchmark
 static security/release checks
+packed/global-installed CLI CRM smoke
 real built-artifact Chrome smoke
 ```
 
-SQLite conformance is also executed on GitHub-hosted Linux, Windows and macOS runners. CodeQL runs independently.
+SQLite conformance and installed-package verification run on GitHub-hosted Linux, Windows and macOS runners. CodeQL runs independently.
 
-The browser smoke executes the 25,000-row Autopilot workflow, reaches results, reloads through SPA deep links, proves IndexedDB restoration and rejects runtime/network-console failures.
+Every production build can emit `release.json` containing the exact source commit through `SPOOL_COMMIT_SHA`. GitHub releases additionally publish an artifact checksum manifest and release record.
 
-Every production build can emit `release.json` containing the exact source commit through `SPOOL_COMMIT_SHA`.
-
-## Run locally
-
-Node.js 22+ is required. Gate B uses pinned `better-sqlite3` from the committed lockfile.
-
-```bash
-git clone https://github.com/dharan1007/spool.git
-cd spool
-npm ci
-npm run check
-npm run serve
-```
-
-Useful verification commands:
-
-```bash
-npm test
-npm run test:conformance
-npm run build
-npm run benchmark
-node scripts/static-check.js
-npm run check
-```
-
-## Start paid work with zero infrastructure spend
+## Commercial work with zero infrastructure spend
 
 You do **not** need a company, paid hosting, hosted database, auth system, analytics product, or payment gateway to sell the current supported services.
 
-Current commercial offers:
+Current launch-price hypotheses:
 
-- **Migration Preflight** — suggested first-customer test price ₹2,500–₹7,500;
+- **Migration Preflight** — ₹2,500–₹7,500;
 - **Import-Ready Dataset** — ₹5,000–₹15,000;
 - **Migration Rescue** — ₹7,500–₹25,000+;
 - **Verified CSV → SQLite Migration** — ₹10,000–₹30,000+.
 
-These are launch pricing hypotheses and are quoted after qualification, not guaranteed fixed-price tariffs.
+These are quoted after qualification, not guaranteed fixed tariffs. Paid work is the scoped service outcome, execution and support—not paid access to the MIT-licensed source.
 
-The zero-cost flow is:
+The zero-cost customer flow is:
 
 ```text
-GitHub → metadata-only Migration Assessment → private quote/order
-→ customer-local SPOOL execution → verification/receipt → manual payment
+metadata-only assessment
+→ private qualification + quote
+→ written target authorization + backup responsibility
+→ customer-local SPOOL execution
+→ verification/receipt + delivery manifest
+→ written acceptance
+→ optional case-study consent
 ```
 
-Public intake is metadata only. Never post production rows, customer/employee data, credentials, database dumps or private URLs to a GitHub issue. Production target mutation requires written scope, backup/restore responsibility and explicit authorization.
+Operational documents:
 
-Commercial documents:
-
-- [`docs/SOLO_BUILDER_LAUNCH.md`](docs/SOLO_BUILDER_LAUNCH.md)
+- [`docs/CUSTOMER_ENGAGEMENT.md`](docs/CUSTOMER_ENGAGEMENT.md)
+- [`docs/AUTHORIZATION_TEMPLATE.md`](docs/AUTHORIZATION_TEMPLATE.md)
+- [`docs/DELIVERY_ACCEPTANCE_TEMPLATE.md`](docs/DELIVERY_ACCEPTANCE_TEMPLATE.md)
+- [`docs/CASE_STUDY_CONSENT_TEMPLATE.md`](docs/CASE_STUDY_CONSENT_TEMPLATE.md)
 - [`docs/INVOICE_QUOTE_TEMPLATE.md`](docs/INVOICE_QUOTE_TEMPLATE.md)
 - [`docs/MIGRATION_SERVICES.md`](docs/MIGRATION_SERVICES.md)
 - [`docs/DATA_HANDLING.md`](docs/DATA_HANDLING.md)
 - [`docs/COMMERCIAL_SUPPORT.md`](docs/COMMERCIAL_SUPPORT.md)
 - [`docs/TERMS_TEMPLATE.md`](docs/TERMS_TEMPLATE.md)
 - [`docs/PRIVACY_TEMPLATE.md`](docs/PRIVACY_TEMPLATE.md)
-- [`SECURITY.md`](SECURITY.md)
+
+Public intake is metadata only. Never post production rows, customer/employee data, credentials, database dumps, private URLs, payment details, or identity documents to a GitHub issue.
 
 ## Roadmap
 
