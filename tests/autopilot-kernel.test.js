@@ -85,7 +85,7 @@ test('run_autopilot fails closed on destructive ambiguity and exposes one bounde
   assert.equal(Object.hasOwn(inspected.result, 'sourceRows'), false);
 });
 
-test('autopilot terminal mission becomes COMPLETE after worker execution with dirty rows grouped as quality violations', async () => {
+test('autopilot terminal mission becomes COMPLETE_WITH_REJECTIONS when any source rows are rejected', async () => {
   const kernel = new CommandKernel({ store: new MemoryWorkspaceStore(), runtime: new InlineRuntime() });
   await kernel.initialize();
   const rows = Array.from({ length: 500 }, (_, i) => `${i + 1},${i === 100 ? 'not-a-number' : `${10 + i}.25`},${i === 200 ? 'bad-date' : `2026-04-${String((i % 27) + 1).padStart(2, '0')}`}`);
@@ -95,11 +95,26 @@ test('autopilot terminal mission becomes COMPLETE after worker execution with di
   await waitFor(() => kernel.snapshot().job.phase === PHASES.COMPLETE);
   await kernel.whenRuntimeIdle();
   const state = kernel.snapshot();
-  assert.equal(state.mission.status, 'COMPLETE');
+  assert.equal(state.mission.status, 'COMPLETE_WITH_REJECTIONS');
   assert.equal(state.job.processedRows, 500);
   assert.ok(state.job.validRows >= 498);
   assert.ok(state.job.invalidRows >= 1);
   assert.ok(state.violations.length >= 1);
+});
+
+test('autopilot terminal mission becomes COMPLETE_VERIFIED when every source row satisfies the contract', async () => {
+  const kernel = new CommandKernel({ store: new MemoryWorkspaceStore(), runtime: new InlineRuntime() });
+  await kernel.initialize();
+  const rows = Array.from({ length: 120 }, (_, i) => `${i + 1},${10 + i}.25,2026-04-${String((i % 27) + 1).padStart(2, '0')}`);
+  await kernel.loadSourceText(`id,amount,joined\n${rows.join('\n')}`, 'clean.csv');
+  const start = await kernel.invoke('run_autopilot', { outcome: 'database_ready' });
+  assert.equal(start.ok, true);
+  await waitFor(() => kernel.snapshot().job.phase === PHASES.COMPLETE);
+  await kernel.whenRuntimeIdle();
+  const state = kernel.snapshot();
+  assert.equal(state.mission.status, 'COMPLETE_VERIFIED');
+  assert.equal(state.job.validRows, 120);
+  assert.equal(state.job.invalidRows, 0);
 });
 
 test('autopilot refresh recovery resumes from the durable checkpoint automatically', async () => {
