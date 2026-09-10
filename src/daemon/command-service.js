@@ -277,12 +277,17 @@ export class SpoolCommandService {
         completedAt
       });
       this.runs.complete({ migrationId: request.migrationId, verification, receipt, completedAt });
-      this.runs.clearCheckpoint(request.migrationId);
+      try {
+        this.runs.clearCheckpoint(request.migrationId);
+      } catch {
+        // Completion and receipt are already durable. An obsolete checkpoint is ignored
+        // by the COMPLETE replay path and must never rewrite verified terminal truth.
+      }
       return Object.freeze({ status: 'COMPLETE', verification, receipt, replay: false });
     } catch (error) {
       if (ownsRunState) {
         const existing = this.runs.get(request.migrationId);
-        if (existing) this.runs.fail({ migrationId: request.migrationId, errorCode: error?.code ?? 'MIGRATION_FAILED' });
+        if (existing?.status !== 'COMPLETE') this.runs.fail({ migrationId: request.migrationId, errorCode: error?.code ?? 'MIGRATION_FAILED' });
       }
       throw error;
     } finally {
