@@ -1,0 +1,46 @@
+name: production-public-smoke
+
+on:
+  push:
+    branches:
+      - ops/production-smoke-9fb9966
+
+permissions:
+  contents: read
+
+env:
+  SPOOL_EXPECTED_SHA: 9fb9966088e7a7c185ce1ff97b0cb0a7d78e7b8a
+  SPOOL_URL: https://spool-webmcp.vercel.app
+  SPOOL_BROWSER: google-chrome
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 9fb9966088e7a7c185ce1ff97b0cb0a7d78e7b8a
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exact dependency graph
+        run: npm ci
+      - name: Install browser smoke dependency
+        run: python3 -m pip install --disable-pip-version-check websocket-client
+      - name: Verify canonical production release identity
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          url = os.environ['SPOOL_URL'].rstrip('/') + '/release.json'
+          with urllib.request.urlopen(url, timeout=20) as response:
+              release = json.load(response)
+          expected = os.environ['SPOOL_EXPECTED_SHA']
+          actual = release.get('commit')
+          print({'expected': expected, 'actual': actual, 'release': release})
+          if actual != expected:
+              raise SystemExit(f'production release mismatch: expected {expected}, got {actual}')
+          PY
+      - name: Run real Chrome against public production
+        run: python3 scripts/browser-smoke.py "$SPOOL_URL"
