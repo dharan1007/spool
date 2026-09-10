@@ -96,7 +96,7 @@ export SPOOL_COMMIT_SHA="$(git rev-parse HEAD)"
 node src/cli/spool.js inspect --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
 node src/cli/spool.js plan --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
 node src/cli/spool.js dry-run --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
-node src/cli/spool.js approve --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db --expires 2026-12-31T23:59:59Z --nonce first-run --out approval.json
+node src/cli/spool.js approve --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db --expires 2026-12-31T23:59:59.000Z --nonce first-run --out approval.json
 node src/cli/spool.js run --request migration.json --approval approval.json --source-root ./data --target-root ./data --state ./data/spool-state.db --out run-result.json
 node src/cli/spool.js status --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db
 node src/cli/spool.js verify --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db

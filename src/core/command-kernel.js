@@ -28,6 +28,21 @@ function freshWorkspace() {
 
 function clone(value) { return structuredClone(value); }
 
+const AUTOPILOT_DRY_RUN_SIZE = 100;
+const AUTOPILOT_MIN_ACCEPTANCE = 0.95;
+
+function representativeRows(rows, limit = AUTOPILOT_DRY_RUN_SIZE) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  if (rows.length <= limit) return rows;
+  if (limit <= 1) return [rows[0]];
+  const sampled = [];
+  for (let i = 0; i < limit; i += 1) {
+    const index = Math.floor((i * (rows.length - 1)) / (limit - 1));
+    sampled.push(rows[index]);
+  }
+  return sampled;
+}
+
 function mergeViolations(existing, incoming, sampleLimit = 10) {
   const map = new Map(existing.map(group => [group.code, clone(group)]));
   for (const group of incoming ?? []) {
@@ -224,22 +239,36 @@ export class CommandKernel {
     const compiled = compileMapping(plan.mapping);
     ensureTargetsMatch(plan.targetSchema, compiled.entries);
     const previewRevision = this.workspace.mappingRevision + 1;
+    const previewRows = representativeRows(this.workspace.source.rows);
     const preview = this.engine.run(
-      this.workspace.source.rows.slice(0, Math.min(100, this.workspace.source.rows.length)),
+      previewRows,
       plan.mapping,
       previewRevision,
       plan.targetSchema
     );
+    const acceptanceRate = preview.processedRows > 0 ? preview.validRows / preview.processedRows : 1;
+    const assessment = preview.validRows === 0 || acceptanceRate < AUTOPILOT_MIN_ACCEPTANCE
+      ? 'BLOCK'
+      : preview.invalidRows > 0
+        ? 'WARNING'
+        : 'PASS';
     this.workspace.mission.dryRun = {
       processedRows: preview.processedRows,
       validRows: preview.validRows,
       invalidRows: preview.invalidRows,
+      acceptanceRate: Number(acceptanceRate.toFixed(4)),
+      minimumAcceptance: AUTOPILOT_MIN_ACCEPTANCE,
+      assessment,
+      sampling: previewRows.length === this.workspace.source.rows.length ? 'full_source' : 'evenly_spaced_full_source',
       violationGroups: preview.violations.map(group => ({ code: group.code, count: group.count }))
     };
-    if (preview.processedRows > 0 && preview.validRows === 0) {
+    if (assessment === 'BLOCK') {
+      const zeroAcceptance = preview.validRows === 0;
       const decision = {
-        code: 'DRY_RUN_ZERO_ACCEPTANCE',
-        message: 'Autopilot dry run accepted zero rows. Execution was not started; revise the outcome or target interpretation.',
+        code: zeroAcceptance ? 'DRY_RUN_ZERO_ACCEPTANCE' : 'DRY_RUN_ACCEPTANCE_BELOW_THRESHOLD',
+        message: zeroAcceptance
+          ? 'Autopilot dry run accepted zero rows. Execution was not started; revise the outcome or target interpretation.'
+          : `Autopilot dry run accepted ${preview.validRows}/${preview.processedRows} representative rows, below the ${(AUTOPILOT_MIN_ACCEPTANCE * 100).toFixed(0)}% safety floor. Execution was not started.`,
         sourceFields: []
       };
       this.workspace.mission.status = 'NEEDS_ATTENTION';
