@@ -118,7 +118,7 @@ export class TemporalRegistry {
 
         const controller = new AbortController();
         try {
-          await this.modelContext.registerTool(makeTool(name, kernel), { signal: controller.signal });
+          await this.modelContext.registerTool(makeTool(name, this.kernel), { signal: controller.signal });
         } catch (error) {
           controller.abort();
           throw error;
