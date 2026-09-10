@@ -1,6 +1,8 @@
 import { fail } from './errors.js';
 import { isCanonicalDate, isCanonicalLocalDateTime, isDeterministicDate, isDeterministicLocalDateTime } from './deterministic-date.js';
 
+const UNSAFE_FIELD_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
+
 function classify(value) {
   const text = String(value ?? '').trim();
   if (text === '') return 'empty';
@@ -35,6 +37,7 @@ export function validateTargetSchema(schema) {
   const names = new Set();
   for (const field of schema) {
     if (!field || typeof field.name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(field.name)) fail('INVALID_FIELD_NAME', `Invalid field name ${field?.name}`);
+    if (UNSAFE_FIELD_NAMES.has(field.name)) fail('UNSAFE_FIELD_NAME', `Target field ${field.name} is not allowed`);
     if (names.has(field.name)) fail('DUPLICATE_TARGET_FIELD', `Duplicate field ${field.name}`);
     names.add(field.name);
     if (!allowedTypes.has(field.type)) fail('INVALID_FIELD_TYPE', `Unsupported type ${field.type}`);
@@ -64,14 +67,14 @@ export function validateOutputRow(row, schema) {
     let valid = false;
     switch (field.type) {
       case 'string': valid = typeof value === 'string'; break;
-      case 'integer': valid = typeof value === 'number' && Number.isInteger(value); break;
+      case 'integer': valid = typeof value === 'number' && Number.isSafeInteger(value); break;
       case 'number': valid = typeof value === 'number' && Number.isFinite(value); break;
       case 'boolean': valid = typeof value === 'boolean'; break;
       case 'date': valid = isCanonicalDate(value); break;
       case 'local_datetime': valid = isCanonicalLocalDateTime(value); break;
       default: valid = false;
     }
-    if (!valid) fail('TYPE_MISMATCH', `Target field ${field.name} expected ${field.type}`, { field: field.name, expected: field.type, actual: typeof value, value });
+    if (!valid) fail('TYPE_MISMATCH', `Target field ${field.name} expected ${field.type}`, { field: field.name, expected: field.type, actual: typeof value });
   }
   return row;
 }
