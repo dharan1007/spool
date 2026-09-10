@@ -22,7 +22,7 @@ async function generateCsv(path) {
   try {
     await writeChunk(stream, 'id,name\n');
     for (let i = 1; i <= ROWS; i += 1) {
-      const id = i % REJECT_EVERY === 0 ? `bad-${i}` : String(i);
+      const id = i % REJECT_EVERY === 0 ? '' : String(i);
       await writeChunk(stream, `${id},User ${i} ${LONG_NAME}\n`);
     }
   } finally {
