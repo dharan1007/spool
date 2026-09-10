@@ -51,7 +51,7 @@ function localRunnerPage() {
         <span class="eyebrow-chip">GATE B · PRODUCTION-VERIFIED</span>
         <h1>The real local runner: <em>CSV → SQLite with proof.</em></h1>
         <p class="lede">The Browser Studio prepares and validates data in-browser. The Local runner is the production mutation path: it executes approved UTF-8 filesystem CSV migrations into an existing ordinary SQLite table on the customer-controlled machine.</p>
-        <div class="hero-actions"><a class="button primary" href="${REPO}">Get the local runner →</a><a class="button secondary" href="/examples">Inspect the real CRM case</a></div>
+        <div class="hero-actions"><a class="button primary" href="${REPO}/releases/tag/v1.0.0">Install v1.0.0 →</a><a class="button secondary" href="/examples">Inspect the real CRM case</a></div>
       </div>
       <div class="runtime-diagram">
         <span>filesystem CSV</span><b>source snapshot</b><b>deterministic plan</b><b>target contract</b><b>target_write approval</b><b>lease + fencing</b><b>atomic rows + ledger</b><b>reconciliation</b><b>verification</b><strong>commit-bound receipt</strong>
@@ -61,7 +61,7 @@ function localRunnerPage() {
     <section class="section"><div class="section-heading"><span class="kicker">WHAT ACTUALLY RUNS</span><h2>One command service, multiple local transports.</h2><p>The CLI and <code>spoold</code> do not implement separate migration engines. Both dispatch into the same production command service that owns preflight, approval, fencing, execution, reconciliation, verification and receipts.</p></div>
       <div class="surface-grid">
         <article><span>BROWSER STUDIO</span><h3>Prepare and validate CSV</h3><p>Profile, infer, transform, dry-run, execute in a Worker, checkpoint, inspect violations and export. Browser input limit: 50 MiB.</p><a href="/studio/new">Open Studio →</a></article>
-        <article class="accent"><span>LOCAL RUNNER</span><h3>Mutate a real SQLite target</h3><p>Filesystem CSV → existing ordinary SQLite table, insert-only, with source/target identity binding and crash-safe evidence.</p><a href="${REPO}/blob/main/src/cli/spool.js">Inspect CLI source →</a></article>
+        <article class="accent"><span>LOCAL RUNNER</span><h3>Mutate a real SQLite target</h3><p>Filesystem CSV → existing ordinary SQLite table, insert-only, with source/target identity binding and crash-safe evidence.</p><a href="${REPO}/releases/tag/v1.0.0">Open v1.0.0 release →</a></article>
         <article><span>LOCAL BRIDGE</span><h3><code>spoold</code></h3><p>Loopback-only authenticated HTTP bridge with bearer auth, Host/Origin checks and bounded requests. It does not expose a public hosted mutation API.</p><a href="${REPO}/blob/main/src/daemon/spoold.js">Inspect daemon source →</a></article>
       </div>
     </section>
@@ -83,24 +83,26 @@ function localRunnerPage() {
       <div><span class="kicker">NOT CLAIMED</span><h2>Unsupported means unsupported.</h2><ul class="deny-list"><li>PostgreSQL</li><li>MySQL</li><li>Remote hosted database credentials</li><li>upsert / replace / delete / truncate</li><li>Triggered SQLite targets</li><li>Virtual SQLite tables</li><li>Hosted raw-row ingestion</li></ul></div>
     </section>
 
-    <section class="section"><div class="code-workflow"><div><span class="kicker">RUN IT ON YOUR DEVICE</span><h2>Clone, verify, configure, inspect, approve, run.</h2><p>Node.js 22+ is required. Browser Studio stays capped at 50 MiB; for production SQLite mutation or larger CSV files use this customer-local runner. The current local-runner source ceiling is 256 MiB and the source/target/state paths stay on your machine.</p></div><pre>git clone https://github.com/dharan1007/spool.git
-cd spool
-npm ci
-npm run check
+    <section class="section"><div class="code-workflow"><div><span class="kicker">INSTALL + RUN ON YOUR DEVICE</span><h2>Install the versioned CLI, then inspect, approve, run and verify.</h2><p>Node.js 22+ is required. Browser Studio stays capped at 50 MiB; for production SQLite mutation or larger CSV files use this customer-local runner. The current local-runner source ceiling is 256 MiB and the source/target/state paths stay on your customer-controlled machine. The release remains private on the npm registry; install directly from the versioned GitHub source or release artifact.</p></div><pre># Preferred v1.0.0 install — no npm-registry publication required.
+npm install -g github:dharan1007/spool#v1.0.0
+spool --help
 
-# Generate a local approval-signing key and bind the exact checkout.
+# Generate a local approval-signing key.
 export SPOOL_APPROVAL_KEY="$(openssl rand -hex 32)"
-export SPOOL_COMMIT_SHA="$(git rev-parse HEAD)"
 
 # Create migration.json from docs/LOCAL_RUNNER.md, then use the same roots/state file.
-node src/cli/spool.js inspect --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
-node src/cli/spool.js plan --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
-node src/cli/spool.js dry-run --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
-node src/cli/spool.js approve --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db --expires 2026-12-31T23:59:59.000Z --nonce first-run --out approval.json
-node src/cli/spool.js run --request migration.json --approval approval.json --source-root ./data --target-root ./data --state ./data/spool-state.db --out run-result.json
-node src/cli/spool.js status --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db
-node src/cli/spool.js verify --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db
-node src/cli/spool.js receipt --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db --out receipt.json</pre><div class="hero-actions"><a class="button primary" href="${REPO}/blob/main/docs/LOCAL_RUNNER.md">Open full migration.json guide →</a><a class="button secondary" href="${REPO}/tree/main/examples/crm-export">Use the verified example</a></div></div></section>
+spool inspect --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
+spool plan --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
+spool dry-run --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db
+spool approve --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db --expires 2026-12-31T23:59:59.000Z --nonce first-run --out approval.json
+spool run --request migration.json --approval approval.json --source-root ./data --target-root ./data --state ./data/spool-state.db --out run-result.json
+spool status --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db
+spool verify --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db
+spool receipt --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db --out receipt.json
+
+# Source-verification fallback:
+git clone --branch v1.0.0 https://github.com/dharan1007/spool.git
+cd spool && npm ci && npm run check && npm run pack:verify</pre><div class="hero-actions"><a class="button primary" href="${REPO}/releases/tag/v1.0.0">Download / verify v1.0.0 →</a><a class="button secondary" href="${REPO}/blob/main/docs/LOCAL_RUNNER.md">Open migration.json guide</a><a class="button secondary" href="${REPO}/tree/main/examples/crm-export">Use the verified example</a></div></div></section>
   `);
 }
 

@@ -126,7 +126,7 @@ def main():
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='SPOOL app bootstrap')
 
         product_checks = [
-            ('/local-runner', 'GATE B', 'target_write'),
+            ('/local-runner', 'npm install -g github:dharan1007/spool#v1.0.0', 'spool receipt'),
             ('/examples', '5 source records', '3 valid'),
             ('/security', "connect-src 'none'", 'STALE_FENCE'),
             ('/services', 'DEPLOYMENT + SUPPORT', 'Production target writes stay local')
