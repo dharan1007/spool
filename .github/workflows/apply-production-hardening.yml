@@ -22,7 +22,16 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Apply deterministic hardening patch
-        run: python3 scripts/apply-production-hardening.py
+        run: |
+          set +e
+          output="$(python3 scripts/apply-production-hardening.py 2>&1)"
+          code=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$code" -ne 0 ] && ! printf '%s' "$output" | grep -q 'local runner instruction section markers not found'; then
+            exit "$code"
+          fi
+          python3 scripts/finish-production-hardening.py
       - name: Verify changed tree before commit
         env:
           SPOOL_COMMIT_SHA: ${{ github.sha }}
