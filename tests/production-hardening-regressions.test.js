@@ -28,6 +28,17 @@ test('database-ready classifies timezone-less ISO timestamps as local_datetime i
   assert.equal(plan.mapping[0].expr.op, 'parse_local_datetime');
 });
 
+test('database-ready derives nullability from the full parsed source, not only the inference window', () => {
+  const rows = Array.from({ length: 1500 }, (_, i) => ({ created_at: i === 1200 ? '' : '2026-09-07T11:48:01.000' }));
+  const plan = planAutopilot({
+    sourceSchema: [{ name: 'created_at', type: 'string', nullable: false }],
+    rows,
+    outcome: 'database_ready'
+  });
+  assert.equal(plan.targetSchema[0].type, 'local_datetime');
+  assert.equal(plan.targetSchema[0].nullable, true);
+});
+
 test('preserve-contract keeps CSV values lossless as nullable strings regardless of sampled inference', () => {
   const plan = planAutopilot({
     sourceSchema: [
@@ -54,8 +65,6 @@ test('Autopilot dry-run hard-stops before runtime when the proposed contract acc
   const rows = Array.from({ length: 100 }, (_, i) => `${i + 1},not-a-date`);
   await kernel.loadSourceText(`id,created_at\n${rows.join('\n')}`, 'invalid-dates.csv');
 
-  // Simulate a declared/external typed source contract that is inconsistent with the actual rows.
-  // The safety requirement is independent of how that bad proposal was produced.
   kernel.workspace.source.schema = [
     { name: 'id', type: 'integer', nullable: false },
     { name: 'created_at', type: 'date', nullable: false }
