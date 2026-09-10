@@ -1,0 +1,45 @@
+name: ops-production-smoke-v1.0.0
+
+on:
+  push:
+    branches:
+      - ops/production-smoke-v1.0.0-f73e44e
+
+permissions:
+  contents: read
+
+jobs:
+  production-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact released commit
+        uses: actions/checkout@v4
+        with:
+          ref: f73e44e169f2fbff26a4cc2547626e366a5879dd
+      - name: Install browser smoke dependency
+        run: python3 -m pip install --disable-pip-version-check websocket-client
+      - name: Verify canonical release identity and security headers
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request
+          expected='f73e44e169f2fbff26a4cc2547626e366a5879dd'
+          url='https://spool-webmcp.vercel.app/release.json'
+          with urllib.request.urlopen(url, timeout=15) as r:
+              body=json.load(r)
+              headers={k.lower(): v for k,v in r.headers.items()}
+          assert body.get('version') == '1.0.0', body
+          assert body.get('commit') == expected, body
+          assert headers.get('x-content-type-options') == 'nosniff', headers
+          assert headers.get('referrer-policy') == 'no-referrer', headers
+          assert headers.get('cross-origin-opener-policy') == 'same-origin', headers
+          assert headers.get('cross-origin-resource-policy') == 'same-origin', headers
+          csp=headers.get('content-security-policy','')
+          assert "connect-src 'none'" in csp and "object-src 'none'" in csp, csp
+          print(json.dumps({'status':'PASS','version':body['version'],'commit':body['commit']}))
+          PY
+      - name: Run real Chrome smoke against canonical production
+        env:
+          SPOOL_BROWSER: google-chrome
+          SPOOL_URL: https://spool-webmcp.vercel.app
+        run: python3 scripts/browser-smoke.py
