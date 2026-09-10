@@ -1,0 +1,33 @@
+name: apply-commercial-v1-patch
+
+on:
+  push:
+    branches:
+      - release/commercial-ready-v1
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/commercial-ready-v1
+          fetch-depth: 0
+      - name: Apply exact website patch
+        run: python3 scripts/apply-commercial-v1-patch.py
+      - name: Run focused contracts
+        run: node --test tests/product-surface.test.js tests/cli-package.test.js tests/installed-cli.test.js tests/commercial-readiness.test.js
+      - name: Remove one-shot patch machinery
+        run: rm -f scripts/apply-commercial-v1-patch.py .github/workflows/apply-commercial-v1-patch.yml
+      - name: Commit product changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && { echo "No changes to commit"; exit 1; }
+          git commit -m "feat: expose versioned local runner install journey"
+          git push origin HEAD:release/commercial-ready-v1
