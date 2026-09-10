@@ -151,9 +151,7 @@ export class SpoolCommandService {
     });
   }
 
-  async plan(request) {
-    return (await this.#prepare(request)).plan;
-  }
+  async plan(request) { return (await this.#prepare(request)).plan; }
 
   async dryRun(request) {
     const prepared = await this.#prepare(request);
@@ -218,9 +216,7 @@ export class SpoolCommandService {
       const engine = new MigrationEngine();
       const batchSize = plan.writeStrategy.batchSize;
       const allRanges = [];
-      for (let start = 0; start < parsed.rows.length; start += batchSize) {
-        allRanges.push({ start, endExclusive: Math.min(parsed.rows.length, start + batchSize) });
-      }
+      for (let start = 0; start < parsed.rows.length; start += batchSize) allRanges.push({ start, endExclusive: Math.min(parsed.rows.length, start + batchSize) });
       const expectedBatchIdentities = allRanges.map(sourceRange => createBatchIdentity({
         migrationId: request.migrationId,
         planId: plan.planId,
@@ -277,12 +273,17 @@ export class SpoolCommandService {
         completedAt
       });
       this.runs.complete({ migrationId: request.migrationId, verification, receipt, completedAt });
-      this.runs.clearCheckpoint(request.migrationId);
+      try {
+        this.runs.clearCheckpoint(request.migrationId);
+      } catch {
+        // Completion and receipt are already durable. An obsolete checkpoint is ignored
+        // by the COMPLETE replay path and must never rewrite verified terminal truth.
+      }
       return Object.freeze({ status: 'COMPLETE', verification, receipt, replay: false });
     } catch (error) {
       if (ownsRunState) {
         const existing = this.runs.get(request.migrationId);
-        if (existing) this.runs.fail({ migrationId: request.migrationId, errorCode: error?.code ?? 'MIGRATION_FAILED' });
+        if (existing?.status !== 'COMPLETE') this.runs.fail({ migrationId: request.migrationId, errorCode: error?.code ?? 'MIGRATION_FAILED' });
       }
       throw error;
     } finally {
