@@ -8,7 +8,7 @@ import time
 import urllib.request
 import websocket
 
-CDP_PORT = 9337
+CDP_PORT = 9336
 BASE_URL = os.environ.get('SPOOL_URL', 'http://127.0.0.1:8876').rstrip('/')
 CSV_PATH = os.environ['SPOOL_NYC_BROWSER_CSV']
 HUGE_PATH = os.environ['SPOOL_NYC_HUGE_CSV']
@@ -177,26 +177,43 @@ def main():
         release = json.load(response)
     assert str(release.get('commit', '')).lower() == EXPECTED_SHA, (release, EXPECTED_SHA)
     assert os.path.getsize(CSV_PATH) < 50 * 1024 * 1024, os.path.getsize(CSV_PATH)
-    assert os.path.getsize(HUGE_PATH) > 50 * 1024 * 1024, os.path.getsize(HUGE_PATH)
+    assert os.path.getsize(HUGE_PATH) > 100 * 1024 * 1024, os.path.getsize(HUGE_PATH)
 
     browser = shutil.which(os.environ.get('SPOOL_BROWSER', 'google-chrome'))
     if not browser:
         raise SystemExit('google-chrome not found')
     profile = tempfile.mkdtemp(prefix='spool-nyc-chrome-')
+    browser_log = tempfile.NamedTemporaryFile(prefix='spool-nyc-browser-', suffix='.log', delete=False)
+    browser_log_path = browser_log.name
+    browser_log.close()
+    log_handle = open(browser_log_path, 'w+', encoding='utf8')
     chrome = subprocess.Popen([
         browser, '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
         '--disable-background-networking', '--remote-allow-origins=*',
-        f'--remote-debugging-port={CDP_PORT}', '--js-flags=--max-old-space-size=4096',
-        f'--user-data-dir={profile}', BASE_URL + '/studio/new'
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        f'--remote-debugging-port={CDP_PORT}', f'--user-data-dir={profile}', BASE_URL + '/studio/new'
+    ], stdout=log_handle, stderr=log_handle)
     cdp = None
-    report = {'candidateSha': EXPECTED_SHA, 'release': release, 'browserCsvBytes': os.path.getsize(CSV_PATH), 'hugeCsvBytes': os.path.getsize(HUGE_PATH)}
+    report = {
+        'candidateSha': EXPECTED_SHA,
+        'release': release,
+        'browser': browser,
+        'browserCsvBytes': os.path.getsize(CSV_PATH),
+        'hugeCsvBytes': os.path.getsize(HUGE_PATH)
+    }
     try:
-        wait_for(lambda: get_json(f'http://127.0.0.1:{CDP_PORT}/json'), timeout=20, label='Chrome CDP')
+        try:
+            wait_for(lambda: get_json(f'http://127.0.0.1:{CDP_PORT}/json'), timeout=15, label='Chrome CDP')
+        except Exception as exc:
+            status = chrome.poll()
+            log_handle.flush()
+            log_handle.seek(0)
+            details = log_handle.read()[-8000:]
+            raise AssertionError(f'Browser failed to expose CDP; executable={browser!r} exit={status!r}; stderr/stdout={details!r}') from exc
         page = next(p for p in get_json(f'http://127.0.0.1:{CDP_PORT}/json') if p.get('type') == 'page')
         cdp = CDP(page['webSocketDebuggerUrl'])
         for method in ('Runtime.enable','Page.enable','Network.enable','Log.enable','DOM.enable'):
             cdp.call(method)
+        wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=30, label='Studio page load')
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=30, label='SPOOL bootstrap')
 
         started = time.time()
@@ -245,11 +262,19 @@ def main():
         report['status'] = 'PASS'
         print(json.dumps(report, indent=2), flush=True)
     finally:
-        if cdp: cdp.close()
+        if cdp:
+            cdp.close()
         chrome.terminate()
-        try: chrome.wait(timeout=5)
-        except subprocess.TimeoutExpired: chrome.kill()
+        try:
+            chrome.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            chrome.kill()
+        log_handle.close()
         shutil.rmtree(profile, ignore_errors=True)
+        try:
+            os.unlink(browser_log_path)
+        except OSError:
+            pass
 
 
 if __name__ == '__main__':
