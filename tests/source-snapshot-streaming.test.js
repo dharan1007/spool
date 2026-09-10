@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, appendFile, stat, access, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import {
   createDurableFileSnapshot,
   verifyFileAgainstSnapshot,
@@ -18,7 +18,7 @@ async function fixture() {
   return { dir, sourcePath, snapshotDir };
 }
 
-test('durable snapshot preserves the existing semantic snapshot identity and is reusable', async () => {
+test('durable snapshot preserves semantic identity, is reusable, and uses a cross-platform-safe filename', async () => {
   const f = await fixture();
   try {
     const old = await readFileSnapshot(f.sourcePath);
@@ -29,7 +29,8 @@ test('durable snapshot preserves the existing semantic snapshot identity and is 
     assert.equal(first.snapshot.path, old.snapshot.path);
     assert.equal(first.snapshotPath, second.snapshotPath);
     assert.equal(second.reused, true);
-    assert.match(first.snapshotPath, new RegExp(`${first.snapshot.snapshotId}\\.csv$`));
+    assert.equal(basename(first.snapshotPath), `${first.snapshot.snapshotId.slice('sha256:'.length)}.csv`);
+    assert.equal(basename(first.snapshotPath).includes(':'), false);
     assert.equal(await verifyFileAgainstSnapshot(first.snapshot), true);
   } finally {
     await rm(f.dir, { recursive: true, force: true });
