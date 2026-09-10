@@ -52,11 +52,12 @@ test('complete website exposes the verified local-runner product instead of only
     'MySQL'
   ]) assert.match(frontend, new RegExp(phrase, 'i'), `missing local-runner product truth: ${phrase}`);
 
+  const lowerFrontend = frontend.toLowerCase();
   for (const phrase of ['DEPLOYMENT + SUPPORT', 'Production target writes stay local', 'Run SPOOL locally', 'Self-host', 'metadata-only']) {
-    assert.match(frontend, new RegExp(phrase, 'i'), `missing Hobby-safe deployment/support copy: ${phrase}`);
+    assert.ok(lowerFrontend.includes(phrase.toLowerCase()), `missing Hobby-safe deployment/support copy: ${phrase}`);
   }
   for (const prohibited of ['Pay for a migration outcome', 'Launch test range', 'Request a Migration Assessment']) {
-    assert.doesNotMatch(frontend, new RegExp(prohibited, 'i'), `commercial Hobby-hosted copy must be absent: ${prohibited}`);
+    assert.ok(!lowerFrontend.includes(prohibited.toLowerCase()), `commercial Hobby-hosted copy must be absent: ${prohibited}`);
   }
 
   for (const phrase of ['5 source', '3 valid', '2 rejected', 'ambiguous', 'CRM', 'ledger']) {
