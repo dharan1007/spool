@@ -161,7 +161,7 @@ Do not approve a migration merely because the command ran. Check valid/rejected 
 
 ## 7. Create bound approval evidence
 
-The approval is signed locally and bound to the exact plan, source snapshot, target contract, effects, principal, expiry, and nonce.
+The approval is signed locally and bound to the exact plan, source snapshot, target contract, effects, principal, expiry, and nonce. `--expires` must use canonical UTC ISO form including milliseconds, as shown below.
 
 ```bash
 node src/cli/spool.js approve \
@@ -169,7 +169,7 @@ node src/cli/spool.js approve \
   --source-root ./data \
   --target-root ./data \
   --state ./data/spool-state.db \
-  --expires 2026-12-31T23:59:59Z \
+  --expires 2026-12-31T23:59:59.000Z \
   --nonce first-run \
   --out approval.json
 ```
