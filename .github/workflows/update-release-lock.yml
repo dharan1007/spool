@@ -16,18 +16,23 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Regenerate package lock only
-        run: npm install --package-lock-only --ignore-scripts
+      - name: Regenerate package lock and release references
+        run: |
+          npm install --package-lock-only --ignore-scripts
+          sed -i 's/v1\.0\.0/v1.1.0/g' README.md src/product-surface.js
+          sed -i "s/default: '1\.0\.0'/default: '1.1.0'/" .github/workflows/ci.yml
       - name: Verify release version consistency
         run: |
           test "$(node -p "require('./package.json').version")" = "1.1.0"
           test "$(node -p "require('./package-lock.json').version")" = "1.1.0"
           test "$(node -p "require('./package-lock.json').packages[''].version")" = "1.1.0"
-      - name: Commit synchronized lock
+          ! grep -q 'v1.0.0' README.md src/product-surface.js
+          grep -q "default: '1.1.0'" .github/workflows/ci.yml
+      - name: Commit synchronized release metadata
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package-lock.json
+          git add package-lock.json README.md src/product-surface.js .github/workflows/ci.yml
           git diff --cached --quiet && exit 0
-          git commit -m "chore: sync v1.1.0 package lock"
+          git commit -m "chore: finalize v1.1.0 release metadata"
           git push origin HEAD:release/v1.1.0
