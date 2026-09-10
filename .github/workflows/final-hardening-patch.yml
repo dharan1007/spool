@@ -56,8 +56,8 @@ jobs:
               "['DRY RUN', 'Test the real engine', 'A bounded sample goes through the same transform and typed validation path as the full run.'],",
               "['DRY RUN', 'Test the real engine', 'A representative 100-row sample is spread across the full source and goes through the same transform and typed validation path as the full run. Below 95% acceptance stops execution.'],",
               'autopilot stage copy')
-          marker = "        <section class=\"mission-grid\">\n"
-          warning = """        ${mission?.dryRun?.assessment === 'WARNING' ? `<div class=\"attention-note\"><strong>Dry-run warning:</strong> ${number(mission.dryRun.validRows)} / ${number(mission.dryRun.processedRows)} representative rows passed (${Math.round((mission.dryRun.acceptanceRate ?? 0) * 100)}%). Execution continued because the result met the ${Math.round((mission.dryRun.minimumAcceptance ?? 0.95) * 100)}% safety floor; rejected rows remain explicit.</div>` : ''}\n\n"""
+          marker = "    <section class=\"mission-grid\">\n"
+          warning = """    ${mission?.dryRun?.assessment === 'WARNING' ? `<div class=\"attention-note\"><strong>Dry-run warning:</strong> ${number(mission.dryRun.validRows)} / ${number(mission.dryRun.processedRows)} representative rows passed (${Math.round((mission.dryRun.acceptanceRate ?? 0) * 100)}%). Execution continued because the result met the ${Math.round((mission.dryRun.minimumAcceptance ?? 0.95) * 100)}% safety floor; rejected rows remain explicit.</div>` : ''}\n\n"""
           s = replace_once(s, marker, warning + marker, 'visible dry-run warning')
           p.write_text(s)
           PY
