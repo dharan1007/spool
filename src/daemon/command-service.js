@@ -129,7 +129,15 @@ export class SpoolCommandService {
     }
     if (typeof input.targetRef.table !== 'string' || !input.targetRef.table) fail('INVALID_TARGET_REF', 'SQLite targetRef.table is required');
 
-    const sourcePath = await this.sourcePolicy.resolve(input.sourceRef.path ?? input.sourceRef.resource);
+    let sourcePath;
+    try {
+      sourcePath = await this.sourcePolicy.resolve(input.sourceRef.path ?? input.sourceRef.resource);
+    } catch (error) {
+      if (expectedSourceSnapshotId && error?.code === 'PATH_NOT_FOUND') {
+        fail('SOURCE_CHANGED', 'Source file is no longer available at the approved path');
+      }
+      throw error;
+    }
     const targetPath = await this.targetPolicy.resolve(input.targetRef.path, { mustExist: true });
     input.sourceRef.path = sourcePath;
     input.targetRef.path = targetPath;
