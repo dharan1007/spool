@@ -1,0 +1,41 @@
+name: apply-production-hardening
+
+on:
+  push:
+    branches:
+      - fix/production-hardening-nyc311-20260910
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message != 'fix: apply production hardening'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/production-hardening-nyc311-20260910
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Apply deterministic hardening patch
+        run: python3 scripts/apply-production-hardening.py
+      - name: Verify changed tree before commit
+        env:
+          SPOOL_COMMIT_SHA: ${{ github.sha }}
+          SPOOL_BROWSER: google-chrome
+        run: npm test
+      - name: Commit product fixes
+        run: |
+          git config user.name "spool-release-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src scripts/static-check.js
+          if git diff --cached --quiet; then
+            echo "No product changes to commit"
+            exit 0
+          fi
+          git commit -m "fix: apply production hardening"
+          git push origin HEAD:fix/production-hardening-nyc311-20260910
