@@ -6,6 +6,7 @@ import { sha256Canonical } from '../platform/canonical-json.js';
 
 export const SOURCE_SNAPSHOT_ALGORITHM = 'spool-source-snapshot-v1';
 const COPY_CHUNK_BYTES = 64 * 1024;
+const SNAPSHOT_ID = /^sha256:[a-f0-9]{64}$/;
 
 function freezeRecord(record) {
   return Object.freeze({ ...record });
@@ -17,6 +18,10 @@ function validateSourcePath(path) {
 
 function validateMaxBytes(maxBytes) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) fail('INVALID_SOURCE_LIMIT', 'maxBytes must be a positive safe integer');
+}
+
+function validateSnapshotId(snapshotId) {
+  if (typeof snapshotId !== 'string' || !SNAPSHOT_ID.test(snapshotId)) fail('INVALID_SOURCE_SNAPSHOT', 'snapshotId must be a canonical sha256 identity');
 }
 
 function sameFileState(before, after) {
@@ -31,6 +36,12 @@ function snapshotRecord(path, size, contentSha256) {
   const identity = { kind: 'file', path, size, contentSha256 };
   const snapshotId = sha256Canonical(SOURCE_SNAPSHOT_ALGORITHM, identity);
   return freezeRecord({ snapshotAlgorithm: SOURCE_SNAPSHOT_ALGORITHM, snapshotId, ...identity });
+}
+
+export function durableSnapshotPath(snapshotDir, snapshotId) {
+  if (typeof snapshotDir !== 'string' || !snapshotDir.trim()) fail('INVALID_SNAPSHOT_DIR', 'snapshotDir must be a non-empty string');
+  validateSnapshotId(snapshotId);
+  return join(snapshotDir, `${snapshotId.slice('sha256:'.length)}.csv`);
 }
 
 async function writeAll(handle, buffer, length) {
@@ -73,7 +84,7 @@ async function hashFile(path, { maxBytes = Number.MAX_SAFE_INTEGER } = {}) {
 
 async function snapshotFileMatches(path, snapshot) {
   try {
-    const result = await hashFile(path, { maxBytes: snapshot.size || 1 });
+    const result = await hashFile(path, { maxBytes: Math.max(1, snapshot.size) });
     return result.bytes === snapshot.size && result.contentSha256 === snapshot.contentSha256;
   } catch {
     return false;
@@ -132,7 +143,7 @@ export async function createDurableFileSnapshot(path, { snapshotDir, maxBytes } 
     }
 
     const snapshot = snapshotRecord(resolvedPath, digest.bytes, digest.contentSha256);
-    const snapshotPath = join(snapshotDir, `${snapshot.snapshotId}.csv`);
+    const snapshotPath = durableSnapshotPath(snapshotDir, snapshot.snapshotId);
     let reused = false;
     try {
       const existing = await stat(snapshotPath);
@@ -159,10 +170,26 @@ export async function createDurableFileSnapshot(path, { snapshotDir, maxBytes } 
   }
 }
 
+export async function loadDurableFileSnapshot(originalPath, { snapshotDir, snapshotId, maxBytes = Number.MAX_SAFE_INTEGER } = {}) {
+  validateSourcePath(originalPath);
+  validateSnapshotId(snapshotId);
+  validateMaxBytes(maxBytes);
+  const snapshotPath = durableSnapshotPath(snapshotDir, snapshotId);
+  let result;
+  try { result = await hashFile(snapshotPath, { maxBytes }); }
+  catch (error) {
+    if (error?.code === 'ENOENT') fail('SOURCE_SNAPSHOT_NOT_AVAILABLE', 'Approved durable source snapshot is not available for recovery');
+    throw error;
+  }
+  const snapshot = snapshotRecord(originalPath, result.bytes, result.contentSha256);
+  if (snapshot.snapshotId !== snapshotId) fail('SOURCE_SNAPSHOT_CORRUPT', 'Durable source snapshot no longer matches its approved semantic identity');
+  return Object.freeze({ snapshot, snapshotPath, reused: true });
+}
+
 export async function verifyFileAgainstSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== 'object' || snapshot.snapshotAlgorithm !== SOURCE_SNAPSHOT_ALGORITHM ||
       typeof snapshot.path !== 'string' || !Number.isSafeInteger(snapshot.size) || snapshot.size < 0 ||
-      !/^[a-f0-9]{64}$/.test(snapshot.contentSha256 ?? '') || !/^sha256:[a-f0-9]{64}$/.test(snapshot.snapshotId ?? '')) {
+      !/^[a-f0-9]{64}$/.test(snapshot.contentSha256 ?? '') || !SNAPSHOT_ID.test(snapshot.snapshotId ?? '')) {
     fail('INVALID_SOURCE_SNAPSHOT', 'A valid file source snapshot is required');
   }
   let resolvedPath;
