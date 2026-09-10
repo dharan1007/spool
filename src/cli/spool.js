@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import { toErrorEnvelope } from '../core/errors.js';
 
 const COMMANDS = ['inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt'];
 
@@ -57,12 +58,23 @@ function commitSha() {
 }
 
 function errorEnvelope(error) {
+  if (error?.code === 'CLI_USAGE') {
+    return {
+      ok: false,
+      error: {
+        code: 'CLI_USAGE',
+        message: String(error.message),
+        nextActions: Array.isArray(error.nextActions) ? error.nextActions : ['Run `spool --help`']
+      }
+    };
+  }
+  const safe = toErrorEnvelope(error);
   return {
     ok: false,
     error: {
-      code: error?.code ?? 'CLI_ERROR',
-      message: String(error?.message ?? error),
-      nextActions: Array.isArray(error?.nextActions) ? error.nextActions : ['Review the error code and migration inputs']
+      code: safe.code,
+      message: safe.message,
+      nextActions: safe.nextActions
     }
   };
 }
