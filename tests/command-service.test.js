@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { SpoolCommandService } from '../src/daemon/command-service.js';
+import { LeaseStore } from '../src/execution/lease-store.js';
 
 function manifest(sourcePath, targetPath) {
   return {
@@ -96,6 +97,24 @@ test('command service enforces approval and executes verified fenced CSV-to-SQLi
     const replay = await service.run(request, { approval });
     assert.equal(replay.receipt.receiptId, result.receipt.receiptId);
     assert.equal(targetRows(targetPath).length, 2);
+  });
+});
+
+test('a separately held execution lease blocks a second command-service run and preserves run state', async () => {
+  await fixture(async ({ service, sourcePath, targetPath }) => {
+    const request = manifest(sourcePath, targetPath);
+    const approval = await service.approve(request, { expiresAt: '2099-01-01T00:00:00.000Z', nonce: 'approval-lease-race' });
+    const leaseStore = new LeaseStore({ path: targetPath });
+    const resource = `sqlite:${targetPath}:customers`;
+    const held = leaseStore.acquire({ resource, owner: `migration:${request.migrationId}`, ttlMs: 60_000 });
+    try {
+      await assert.rejects(() => service.run(request, { approval }), /LEASE_HELD/);
+      assert.equal(service.status(request.migrationId), null);
+      assert.equal(targetRows(targetPath).length, 0);
+    } finally {
+      leaseStore.release({ resource, owner: held.owner, fencingToken: held.fencingToken });
+      leaseStore.close();
+    }
   });
 });
 

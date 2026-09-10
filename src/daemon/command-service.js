@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import { fail } from '../core/errors.js';
 import { parseCsv } from '../core/csv.js';
@@ -201,13 +202,16 @@ export class SpoolCommandService {
     );
 
     const startedAt = current?.startedAt ?? new Date().toISOString();
-    this.runs.start({ migrationId: request.migrationId, planId: plan.planId, sourceSnapshotId: snapshot.snapshotId, targetIdentity, startedAt });
     const leaseResource = `sqlite:${targetPath}:${plan.targetRef.table}`;
+    const leaseOwner = `migration:${request.migrationId}:${randomUUID()}`;
     const leaseStore = new LeaseStore({ path: targetPath });
     let target;
     let lease;
+    let ownsRunState = false;
     try {
-      lease = leaseStore.acquire({ resource: leaseResource, owner: `migration:${request.migrationId}`, ttlMs: 5 * 60 * 1000 });
+      lease = leaseStore.acquire({ resource: leaseResource, owner: leaseOwner, ttlMs: 5 * 60 * 1000 });
+      this.runs.start({ migrationId: request.migrationId, planId: plan.planId, sourceSnapshotId: snapshot.snapshotId, targetIdentity, startedAt });
+      ownsRunState = true;
       target = new SqliteTarget({ path: targetPath, table: plan.targetRef.table, requireFencing: true, fenceResource: leaseResource });
       const checkpointStore = this.runs.checkpointStore(request.migrationId);
       const runner = new MigrationRunner({ target, checkpointStore });
@@ -276,8 +280,10 @@ export class SpoolCommandService {
       this.runs.clearCheckpoint(request.migrationId);
       return Object.freeze({ status: 'COMPLETE', verification, receipt, replay: false });
     } catch (error) {
-      const existing = this.runs.get(request.migrationId);
-      if (existing) this.runs.fail({ migrationId: request.migrationId, errorCode: error?.code ?? 'MIGRATION_FAILED' });
+      if (ownsRunState) {
+        const existing = this.runs.get(request.migrationId);
+        if (existing) this.runs.fail({ migrationId: request.migrationId, errorCode: error?.code ?? 'MIGRATION_FAILED' });
+      }
       throw error;
     } finally {
       if (target) target.close();
