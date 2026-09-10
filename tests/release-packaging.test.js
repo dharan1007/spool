@@ -2,20 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-test('release workflow is exact-SHA bound and publishes installable evidence', async () => {
-  const workflow = await readFile('.github/workflows/release.yml', 'utf8');
+test('primary CI workflow can publish an immutable exact-SHA GitHub release', async () => {
+  const workflow = await readFile('.github/workflows/ci.yml', 'utf8');
   assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /release:/);
   assert.match(workflow, /commit_sha:/);
   assert.match(workflow, /version:/);
+  assert.match(workflow, /publish-release/);
   assert.match(workflow, /contents:\s*write/);
-  assert.match(workflow, /origin\/main|refs\/heads\/main|git rev-parse/);
+  assert.match(workflow, /refs\/heads\/main|origin\/main/);
   assert.match(workflow, /npm run check/);
   assert.match(workflow, /npm run pack:verify/);
   assert.match(workflow, /npm pack/);
   assert.match(workflow, /SHA256SUMS/);
   assert.match(workflow, /release-record\.json/);
   assert.match(workflow, /gh release create/);
-  assert.match(workflow, /gh release upload/);
+  assert.match(workflow, /gh release download/);
+  assert.doesNotMatch(workflow, /--clobber/);
 });
 
 test('release manifest generator binds artifact digest to version and commit', async () => {
