@@ -1,0 +1,39 @@
+name: production-audit-nyc311
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Install browser smoke dependency
+        run: python3 -m pip install --disable-pip-version-check websocket-client
+      - name: Run production audit against official NYC 311 open data
+        env:
+          SPOOL_AUDIT_URL: https://spool-webmcp.vercel.app
+          SPOOL_EXPECTED_SHA: feb1cfaab15c44522c594d008a8b0190f400ff52
+          SPOOL_BROWSER: google-chrome
+        run: python3 scripts/audit-production-nyc311.py
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-audit-nyc311
+          path: |
+            /tmp/spool-production-audit.json
+            /tmp/spool-audit-final.png
+          if-no-files-found: warn
+          retention-days: 2
