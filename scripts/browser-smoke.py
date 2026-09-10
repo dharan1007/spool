@@ -125,12 +125,11 @@ def main():
         wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=20, label='page load')
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='SPOOL app bootstrap')
 
-        # Prove the complete-product routes are real SPA deep links, not source-only copy.
         product_checks = [
             ('/local-runner', 'GATE B', 'target_write'),
             ('/examples', '5 source records', '3 valid'),
             ('/security', "connect-src 'none'", 'STALE_FENCE'),
-            ('/services', 'Migration Preflight', 'Dharan Tej Reddy Poduvu')
+            ('/services', 'DEPLOYMENT + SUPPORT', 'Production target writes stay local')
         ]
         for route, needle_a, needle_b in product_checks:
             cdp.call('Page.navigate', {'url': base_url + route})
@@ -139,9 +138,9 @@ def main():
             text = cdp.eval('document.body.innerText')
             assert needle_a in text, f'{route} missing {needle_a!r}'
             assert needle_b in text, f'{route} missing {needle_b!r}'
+            assert 'Migration Preflight' not in text, f'{route} still exposes paid Hobby-hosted migration copy'
             assert 'Local-first migration demo' not in cdp.eval('document.title')
 
-        # Return to the working Studio and prove the actual browser product still executes end-to-end.
         cdp.call('Page.navigate', {'url': base_url + '/studio/new'})
         wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=15, label='Studio deep-link load')
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='Studio bootstrap after product routes')
@@ -162,7 +161,7 @@ def main():
         assert state['job']['processedRows'] == 25000
         assert state['job']['validRows'] > 24900
         assert state['job']['invalidRows'] > 0
-        assert state['mission']['status'] == 'COMPLETE'
+        assert state['mission']['status'] == 'COMPLETE_WITH_REJECTIONS'
         tools = cdp.eval('window.__spoolTest.tools()')
         assert 'export_csv' in tools and 'start_migration' not in tools
 
@@ -174,8 +173,8 @@ def main():
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='reload bootstrap')
         wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'), timeout=10, label='IndexedDB restoration')
         assert cdp.eval('window.__spoolTest.state().output.length > 24900')
+        assert cdp.eval('window.__spoolTest.state().mission.status') == 'COMPLETE_WITH_REJECTIONS'
 
-        cdp.eval('document.title')
         exceptions = [e for e in cdp.events if e.get('method') == 'Runtime.exceptionThrown']
         failed = [e for e in cdp.events if e.get('method') == 'Network.loadingFailed' and not e.get('params', {}).get('canceled')]
         severe_logs = [e for e in cdp.events if e.get('method') == 'Log.entryAdded' and e.get('params', {}).get('entry', {}).get('level') in ('error', 'warning')]
