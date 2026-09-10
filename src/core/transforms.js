@@ -49,6 +49,7 @@ export function validateExpr(expr, options = {}, depth = 0) {
 }
 
 const asNumber = value => parseDeterministicNumber(value) ?? 0;
+const isEmptyValue = value => value === null || value === undefined || String(value).trim() === '';
 
 export function evaluateExpr(expr, row) {
   switch (expr.op) {
@@ -58,9 +59,14 @@ export function evaluateExpr(expr, row) {
     case 'lowercase': return String(evaluateExpr(expr.value, row) ?? '').toLowerCase();
     case 'uppercase': return String(evaluateExpr(expr.value, row) ?? '').toUpperCase();
     case 'cast_string': return String(evaluateExpr(expr.value, row) ?? '');
-    case 'cast_number': return asNumber(evaluateExpr(expr.value, row));
+    case 'cast_number': {
+      const value = evaluateExpr(expr.value, row);
+      return isEmptyValue(value) ? null : parseDeterministicNumber(value);
+    }
     case 'cast_boolean': {
-      const v = String(evaluateExpr(expr.value, row) ?? '').trim().toLowerCase();
+      const value = evaluateExpr(expr.value, row);
+      if (isEmptyValue(value)) return null;
+      const v = String(value).trim().toLowerCase();
       if (['true', '1', 'yes', 'y'].includes(v)) return true;
       if (['false', '0', 'no', 'n'].includes(v)) return false;
       fail('INVALID_BOOLEAN', `Cannot convert ${v} to boolean`);
