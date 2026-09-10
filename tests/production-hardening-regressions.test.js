@@ -6,9 +6,11 @@ import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { planAutopilot } from '../src/core/autopilot.js';
 import { CommandKernel } from '../src/core/command-kernel.js';
+import { evaluateExpr } from '../src/core/transforms.js';
 import { MemoryWorkspaceStore } from '../src/storage/memory.js';
 import { PHASES } from '../src/core/state-machine.js';
 import { SpoolCommandService } from '../src/daemon/command-service.js';
+import { toolDefinitionForName } from '../src/webmcp/registry.js';
 
 class ControlledRuntime {
   constructor() { this.startCalls = []; }
@@ -37,6 +39,17 @@ test('database-ready derives nullability from the full parsed source, not only t
   });
   assert.equal(plan.targetSchema[0].type, 'local_datetime');
   assert.equal(plan.targetSchema[0].nullable, true);
+});
+
+test('nullable typed casts preserve empty CSV cells as null instead of inventing zero or rejecting them', () => {
+  assert.equal(evaluateExpr({ op: 'cast_number', value: { op: 'literal', value: '' } }, {}), null);
+  assert.equal(evaluateExpr({ op: 'cast_boolean', value: { op: 'literal', value: '   ' } }, {}), null);
+});
+
+test('WebMCP target schema exposes local_datetime as the timezone-free temporal type', () => {
+  const definition = toolDefinitionForName('define_target_schema');
+  const types = definition.inputSchema.properties.fields.items.properties.type.enum;
+  assert.ok(types.includes('local_datetime'));
 });
 
 test('preserve-contract keeps CSV values lossless as nullable strings regardless of sampled inference', () => {
@@ -78,6 +91,27 @@ test('Autopilot dry-run hard-stops before runtime when the proposed contract acc
   assert.equal(kernel.snapshot().mission.status, 'NEEDS_ATTENTION');
   assert.equal(kernel.snapshot().mission.dryRun.validRows, 0);
   assert.equal(kernel.snapshot().mission.dryRun.invalidRows, 100);
+});
+
+test('Autopilot dry-run samples across the full source and blocks below the 95% acceptance floor', async () => {
+  const runtime = new ControlledRuntime();
+  const kernel = new CommandKernel({ store: new MemoryWorkspaceStore(), runtime });
+  await kernel.initialize();
+  const rows = Array.from({ length: 1000 }, (_, i) => `${i + 1},${i >= 500 && i < 560 ? 'not-a-date' : '2026-09-07'}`);
+  await kernel.loadSourceText(`id,created_at\n${rows.join('\n')}`, 'late-drift.csv');
+  kernel.workspace.source.schema = [
+    { name: 'id', type: 'integer', nullable: false },
+    { name: 'created_at', type: 'date', nullable: false }
+  ];
+
+  const result = await kernel.invoke('run_autopilot', { outcome: 'clean_standardize' });
+  assert.equal(result.ok, true);
+  assert.equal(result.result.status, 'NEEDS_ATTENTION');
+  assert.equal(result.result.reason, 'DRY_RUN_ACCEPTANCE_BELOW_THRESHOLD');
+  assert.equal(runtime.startCalls.length, 0);
+  assert.equal(kernel.snapshot().mission.dryRun.processedRows, 100);
+  assert.equal(kernel.snapshot().mission.dryRun.assessment, 'BLOCK');
+  assert.ok(kernel.snapshot().mission.dryRun.acceptanceRate < 0.95);
 });
 
 test('local command service honors its configured source ceiling above the 50 MiB browser parser default', { timeout: 30000 }, async () => {
