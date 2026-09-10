@@ -37,3 +37,42 @@ jobs:
             /tmp/spool-audit-final.png
           if-no-files-found: warn
           retention-days: 2
+
+  local-runner-size-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Download official NYC 311 source beyond browser limit
+        run: |
+          curl -fL --retry 4 --retry-delay 2 --compressed -G \
+            'https://data.cityofnewyork.us/resource/erm2-nwe9.csv' \
+            --data-urlencode '$limit=120000' \
+            --data-urlencode '$order=unique_key DESC' \
+            -H 'User-Agent: SPOOL-production-audit/1.0' \
+            -o /tmp/nyc311-huge.csv
+          python3 - <<'PY'
+          import os
+          size=os.path.getsize('/tmp/nyc311-huge.csv')
+          print('huge source bytes', size)
+          assert size > 50*1024*1024, size
+          assert size < 256*1024*1024, size
+          PY
+      - name: Probe local runner effective source ceiling
+        env:
+          SPOOL_EXPECTED_SHA: feb1cfaab15c44522c594d008a8b0190f400ff52
+        run: node scripts/audit-local-runner-nyc311.mjs /tmp/nyc311-huge.csv inspect | tee /tmp/spool-local-runner-size-probe.json
+      - name: Upload local-runner evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-runner-size-probe
+          path: /tmp/spool-local-runner-size-probe.json
+          if-no-files-found: warn
+          retention-days: 2
