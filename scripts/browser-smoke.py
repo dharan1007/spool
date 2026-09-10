@@ -80,9 +80,75 @@ def wait_for(fn, timeout=20, interval=.1, label='condition'):
     raise AssertionError(f'Timed out waiting for {label}; last={last!r}')
 
 
+def stop_process(process):
+    if not process:
+        return
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+
+
+def launch_browser_with_cdp(browser, port=CDP_PORT):
+    failures = []
+    for attempt in range(1, 4):
+        profile = tempfile.mkdtemp(prefix=f'spool-chrome-{attempt}-')
+        browser_log = tempfile.NamedTemporaryFile(prefix=f'spool-browser-{attempt}-', suffix='.log', delete=False)
+        browser_log_path = browser_log.name
+        browser_log.close()
+        log_handle = open(browser_log_path, 'w+', encoding='utf8')
+        chrome = subprocess.Popen([
+            browser,
+            '--headless=new',
+            '--no-sandbox',
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            '--disable-background-networking',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--remote-allow-origins=*',
+            '--remote-debugging-address=127.0.0.1',
+            f'--remote-debugging-port={port}',
+            f'--user-data-dir={profile}',
+            'about:blank'
+        ], stdout=log_handle, stderr=log_handle)
+        try:
+            wait_for(lambda: get_json(f'http://127.0.0.1:{port}/json/version'), timeout=12, label=f'Chromium CDP attempt {attempt}')
+            pages = get_json(f'http://127.0.0.1:{port}/json')
+            if not any(page.get('type') == 'page' for page in pages):
+                raise AssertionError('CDP opened without a page target')
+            print(json.dumps({'cdpBootstrap': 'PASS', 'attempt': attempt, 'profile': os.path.basename(profile)}), flush=True)
+            return chrome, profile, log_handle, browser_log_path
+        except Exception as exc:
+            status = chrome.poll()
+            log_handle.flush()
+            log_handle.seek(0)
+            details = log_handle.read()[-8000:]
+            failures.append({'attempt': attempt, 'exit': status, 'error': str(exc), 'log': details})
+            stop_process(chrome)
+            log_handle.close()
+            try:
+                os.unlink(browser_log_path)
+            except OSError:
+                pass
+            shutil.rmtree(profile, ignore_errors=True)
+            if attempt < 3:
+                time.sleep(.5)
+
+    raise AssertionError(f'Browser failed to expose CDP after 3 clean-profile attempts; executable={browser!r}; attempts={failures!r}')
+
+
 def main():
     remote = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('SPOOL_URL')
     server = None
+    chrome = None
+    profile = None
+    log_handle = None
+    browser_log_path = None
+    cdp = None
     if remote:
         base_url = remote.rstrip('/')
         target = base_url + '/studio/new'
@@ -92,28 +158,11 @@ def main():
         base_url = f'http://127.0.0.1:{HTTP_PORT}'
         target = base_url + '/'
 
-    profile = tempfile.mkdtemp(prefix='spool-chrome-')
-    browser = resolve_browser()
-    browser_log = tempfile.NamedTemporaryFile(prefix='spool-browser-', suffix='.log', delete=False)
-    browser_log_path = browser_log.name
-    browser_log.close()
-    print(json.dumps({'browser': browser, 'target': target, 'serveDir': None if remote else resolve_serve_dir()}), flush=True)
-    log_handle = open(browser_log_path, 'w+', encoding='utf8')
-    chrome = subprocess.Popen([
-        browser, '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-        '--disable-background-networking', '--remote-allow-origins=*', f'--remote-debugging-port={CDP_PORT}',
-        f'--user-data-dir={profile}', target
-    ], stdout=log_handle, stderr=log_handle)
-    cdp = None
     try:
-        try:
-            wait_for(lambda: get_json(f'http://127.0.0.1:{CDP_PORT}/json'), timeout=10, label='Chromium CDP')
-        except Exception as exc:
-            status = chrome.poll()
-            log_handle.flush()
-            log_handle.seek(0)
-            details = log_handle.read()[-8000:]
-            raise AssertionError(f'Browser failed to expose CDP; executable={browser!r} exit={status!r}; stderr/stdout={details!r}') from exc
+        browser = resolve_browser()
+        print(json.dumps({'browser': browser, 'target': target, 'serveDir': None if remote else resolve_serve_dir()}), flush=True)
+        chrome, profile, log_handle, browser_log_path = launch_browser_with_cdp(browser)
+
         pages = get_json(f'http://127.0.0.1:{CDP_PORT}/json')
         page = next(p for p in pages if p.get('type') == 'page')
         cdp = CDP(page['webSocketDebuggerUrl'])
@@ -122,7 +171,8 @@ def main():
         cdp.call('Network.enable')
         cdp.call('Log.enable')
 
-        wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=20, label='page load')
+        cdp.call('Page.navigate', {'url': target})
+        wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=20, label='initial page load')
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='SPOOL app bootstrap')
 
         product_checks = [
@@ -207,17 +257,18 @@ def main():
     finally:
         if cdp:
             cdp.close()
-        chrome.terminate()
-        try: chrome.wait(timeout=3)
-        except subprocess.TimeoutExpired: chrome.kill()
-        log_handle.close()
-        try: os.unlink(browser_log_path)
-        except OSError: pass
+        stop_process(chrome)
+        if log_handle:
+            log_handle.close()
+        if browser_log_path:
+            try:
+                os.unlink(browser_log_path)
+            except OSError:
+                pass
         if server:
-            server.terminate()
-            try: server.wait(timeout=3)
-            except subprocess.TimeoutExpired: server.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+            stop_process(server)
+        if profile:
+            shutil.rmtree(profile, ignore_errors=True)
 
 
 if __name__ == '__main__':
