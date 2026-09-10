@@ -1,0 +1,32 @@
+name: ops-publish-v1.0.0
+
+on:
+  push:
+    branches:
+      - ops/publish-v1.0.0-f73e44e
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact verified main commit
+        uses: actions/checkout@v4
+        with:
+          ref: f73e44e169f2fbff26a4cc2547626e366a5879dd
+          fetch-depth: 0
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exactly from committed lockfile
+        run: npm ci
+      - name: Publish immutable v1.0.0 from exact main SHA
+        env:
+          RELEASE_VERSION: '1.0.0'
+          RELEASE_COMMIT: f73e44e169f2fbff26a4cc2547626e366a5879dd
+        run: GITHUB_REF=refs/heads/main bash scripts/publish-release.sh
