@@ -75,8 +75,7 @@ async function snapshotFileMatches(path, snapshot) {
   try {
     const result = await hashFile(path, { maxBytes: snapshot.size || 1 });
     return result.bytes === snapshot.size && result.contentSha256 === snapshot.contentSha256;
-  } catch (error) {
-    if (error?.code === 'ENOENT') return false;
+  } catch {
     return false;
   }
 }
@@ -163,7 +162,7 @@ export async function createDurableFileSnapshot(path, { snapshotDir, maxBytes } 
 export async function verifyFileAgainstSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== 'object' || snapshot.snapshotAlgorithm !== SOURCE_SNAPSHOT_ALGORITHM ||
       typeof snapshot.path !== 'string' || !Number.isSafeInteger(snapshot.size) || snapshot.size < 0 ||
-      !/^[a-f0-9]{64}$/.test(snapshot.contentSha256 ?? '') || !/^[a-f0-9]{64}$/.test(snapshot.snapshotId ?? '')) {
+      !/^[a-f0-9]{64}$/.test(snapshot.contentSha256 ?? '') || !/^sha256:[a-f0-9]{64}$/.test(snapshot.snapshotId ?? '')) {
     fail('INVALID_SOURCE_SNAPSHOT', 'A valid file source snapshot is required');
   }
   let resolvedPath;
