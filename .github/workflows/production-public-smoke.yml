@@ -42,5 +42,36 @@ jobs:
           if actual != expected:
               raise SystemExit(f'production release mismatch: expected {expected}, got {actual}')
           PY
+      - name: Harden Chrome startup for external navigation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/browser-smoke.py')
+          s = p.read_text()
+          old = """        f'--user-data-dir={profile}', target
+"""
+          new = """        '--remote-debugging-address=127.0.0.1', '--no-first-run', '--no-default-browser-check',
+        f'--user-data-dir={profile}', 'about:blank'
+"""
+          if old not in s:
+              raise SystemExit('browser launch anchor not found')
+          s = s.replace(old, new, 1)
+          old = """        cdp.call('Log.enable')
+
+        wait_for(lambda: cdp.eval('document.readyState === \"complete\"'), timeout=20, label='page load')
+"""
+          new = """        cdp.call('Log.enable')
+        cdp.call('Page.navigate', {'url': target})
+
+        wait_for(lambda: cdp.eval('document.readyState === \"complete\"'), timeout=30, label='page load')
+"""
+          if old not in s:
+              raise SystemExit('navigation anchor not found')
+          s = s.replace(old, new, 1)
+          s = s.replace("timeout=10, label='Chromium CDP'", "timeout=30, label='Chromium CDP'", 1)
+          p.write_text(s)
+          PY
       - name: Run real Chrome against public production
+        env:
+          DBUS_SESSION_BUS_ADDRESS: ''
         run: python3 scripts/browser-smoke.py "$SPOOL_URL"
