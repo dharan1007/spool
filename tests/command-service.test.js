@@ -118,6 +118,26 @@ test('a separately held execution lease blocks a second command-service run and 
   });
 });
 
+test('long-running migration renews its execution lease before each target mutation', async () => {
+  await fixture(async ({ service, sourcePath, targetPath }) => {
+    const request = manifest(sourcePath, targetPath);
+    request.planInput.writeStrategy.batchSize = 1;
+    const approval = await service.approve(request, { expiresAt: '2099-01-01T00:00:00.000Z', nonce: 'approval-long-run' });
+    const originalNow = Date.now;
+    const base = 1_000_000_000;
+    let calls = 0;
+    Date.now = () => base + (calls++ * 4 * 60 * 1000);
+    try {
+      const result = await service.run(request, { approval });
+      assert.equal(result.status, 'COMPLETE');
+      assert.equal(result.verification.status, 'VERIFIED');
+      assert.deepEqual(targetRows(targetPath), [{ id: 1, name: 'Ada' }, { id: 2, name: 'Lin' }]);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+});
+
 test('checkpoint cleanup failure after verified completion cannot downgrade durable terminal truth', async () => {
   await fixture(async ({ service, sourcePath, targetPath }) => {
     const request = manifest(sourcePath, targetPath);
