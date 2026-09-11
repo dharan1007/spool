@@ -5,6 +5,8 @@ import websocket
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HTTP_PORT = 8876
 CDP_PORT = 9336
+with open(os.path.join(ROOT, 'package.json'), encoding='utf8') as package_file:
+    RELEASE_TAG = f"v{json.load(package_file)['version']}"
 
 
 def get_json(url, method='GET'):
@@ -176,7 +178,7 @@ def main():
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='SPOOL app bootstrap')
 
         product_checks = [
-            ('/local-runner', 'npm install -g github:dharan1007/spool#v1.0.0', 'spool receipt'),
+            ('/local-runner', f'npm install -g github:dharan1007/spool#{RELEASE_TAG}', 'spool receipt'),
             ('/examples', '5 source records', '3 valid'),
             ('/security', "connect-src 'none'", 'STALE_FENCE'),
             ('/services', 'DEPLOYMENT + SUPPORT', 'Production target writes stay local')

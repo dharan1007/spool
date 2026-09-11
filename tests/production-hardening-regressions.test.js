@@ -12,6 +12,9 @@ import { PHASES } from '../src/core/state-machine.js';
 import { SpoolCommandService } from '../src/daemon/command-service.js';
 import { toolDefinitionForName } from '../src/webmcp/registry.js';
 
+const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+const releaseTag = `v${packageJson.version}`;
+
 class ControlledRuntime {
   constructor() { this.startCalls = []; }
   async start(payload, handlers) { this.startCalls.push({ payload, handlers }); }
@@ -179,7 +182,7 @@ test('strict production CSP has no inline style attributes in the application re
 test('deployed Local Runner page contains a complete copyable CLI path for real device use', async () => {
   const surface = await readFile(new URL('../src/product-surface.js', import.meta.url), 'utf8');
   for (const required of [
-    'npm install -g github:dharan1007/spool#v1.0.0',
+    `npm install -g github:dharan1007/spool#${releaseTag}`,
     'spool --help',
     'SPOOL_APPROVAL_KEY',
     'spool inspect',
