@@ -1,0 +1,40 @@
+name: build-v1.1.0-deploy-once
+
+on:
+  push:
+    branches: [ops/build-v1.1.0-deploy-20260911]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact released commit
+        uses: actions/checkout@v4
+        with:
+          ref: 138ccd7db1495072b757879c1537d70c1ab4db66
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exact lockfile
+        run: npm ci
+      - name: Build exact release artifact
+        env:
+          SPOOL_COMMIT_SHA: '138ccd7db1495072b757879c1537d70c1ab4db66'
+          SPOOL_RELEASE_VERSION: '1.1.0'
+        run: npm run build
+      - name: Assert release manifest
+        run: |
+          node -e "const r=require('./dist/release.json');if(r.version!=='1.1.0'||r.commit!=='138ccd7db1495072b757879c1537d70c1ab4db66')process.exit(2);console.log(r)"
+      - name: Upload immutable dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: spool-v1.1.0-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
