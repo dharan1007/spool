@@ -1,0 +1,38 @@
+name: release-v1.1.1-lockfix
+
+on:
+  push:
+    branches: [release/v1.1.1]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/v1.1.1
+      - name: Restore exact dependency integrity metadata
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const path = 'package-lock.json';
+          let text = fs.readFileSync(path, 'utf8');
+          const wrong = 'sha512-brv7p5WgH0jmRz1ZDDfKDOSeWWg+OVypG99A/5vYGPqJ6pxiaHLy8nxtFjBA7oMa01ebA9gfh1uMCFqOuXxvA==';
+          const right = 'sha512-brv7p5WgH0jmQJr1ZDDfKDOSeWWg+OVypG99A/5vYGPqJ6pxiaHLy8nxtFjBA7oMa01ebA9gfh1uMCFqOuXxvA==';
+          if (!text.includes(wrong)) process.exit(2);
+          text = text.replace(wrong, right);
+          fs.writeFileSync(path, text);
+          NODE
+      - name: Remove one-time lock fix workflow
+        run: rm .github/workflows/release-v1.1.1-lockfix.yml
+      - name: Commit exact lockfile restoration
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package-lock.json .github/workflows/release-v1.1.1-lockfix.yml
+          git commit -m 'release: restore exact dependency lock integrity'
+          git push origin HEAD:release/v1.1.1
