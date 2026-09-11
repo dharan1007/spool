@@ -1,0 +1,93 @@
+name: nyc311-v1.1.0-production-audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - audit/nyc311-v1.1.0-20260911
+
+permissions:
+  contents: read
+
+env:
+  SPOOL_CANDIDATE_SHA: 138ccd7db1495072b757879c1537d70c1ab4db66
+  SPOOL_NYC_BROWSER_CSV: /tmp/nyc311-browser-43000.csv
+  SPOOL_NYC_HUGE_CSV: /tmp/nyc311-local-100mib.csv
+  SPOOL_URL: http://127.0.0.1:8876
+  SPOOL_BROWSER: google-chrome
+
+jobs:
+  real-nyc-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prove audit branch has not changed v1.1.0 product code
+        run: |
+          git diff --exit-code "$SPOOL_CANDIDATE_SHA" -- \
+            index.html boot-watchdog.js styles.css product.css vercel.json package.json package-lock.json src \
+            scripts/build-dist.js scripts/spa-server.py scripts/static-check.js scripts/browser-smoke.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exact production dependency graph
+        run: npm ci
+      - name: Install browser audit dependency
+        run: python3 -m pip install --disable-pip-version-check websocket-client
+      - name: Download exactly 43,000 current NYC 311 records
+        run: python3 scripts/download-nyc311.py --output "$SPOOL_NYC_BROWSER_CSV" --rows 43000
+      - name: Download a real NYC 311 source above 100 MiB
+        run: python3 scripts/download-nyc311.py --output "$SPOOL_NYC_HUGE_CSV" --min-bytes 104857600 --max-rows 180000
+      - name: Verify dataset boundaries
+        run: |
+          python3 - <<'PY'
+          import csv, os
+          for key, exact in [('SPOOL_NYC_BROWSER_CSV', 43000), ('SPOOL_NYC_HUGE_CSV', None)]:
+              path = os.environ[key]
+              with open(path, 'r', encoding='utf-8-sig', newline='') as f:
+                  reader = csv.reader(f)
+                  header = next(reader)
+                  rows = sum(1 for _ in reader)
+              size = os.path.getsize(path)
+              print({'path':path,'rows':rows,'fields':len(header),'bytes':size})
+              if len(header) < 40: raise SystemExit('NYC schema unexpectedly narrow')
+              if exact is not None and rows != exact: raise SystemExit(f'Expected {exact} rows, got {rows}')
+          if os.path.getsize(os.environ['SPOOL_NYC_BROWSER_CSV']) >= 50*1024*1024: raise SystemExit('43k browser fixture exceeds Browser Studio ceiling')
+          if os.path.getsize(os.environ['SPOOL_NYC_HUGE_CSV']) < 100*1024*1024: raise SystemExit('Local Runner fixture did not reach 100 MiB')
+          if os.path.getsize(os.environ['SPOOL_NYC_HUGE_CSV']) >= 256*1024*1024: raise SystemExit('Local Runner fixture exceeds the documented 256 MiB ceiling')
+          PY
+      - name: Build exact v1.1.0 release identity
+        env:
+          SPOOL_COMMIT_SHA: ${{ env.SPOOL_CANDIDATE_SHA }}
+          SPOOL_RELEASE_VERSION: 1.1.0
+          SPOOL_BUILD_TIME: 2026-09-11T06:02:04.000Z
+        run: npm run build
+      - name: Serve candidate with production-style rewrites
+        run: |
+          python3 scripts/spa-server.py --port 8876 --directory dist >/tmp/spool-spa.log 2>&1 &
+          echo $! > /tmp/spool-spa.pid
+          for i in {1..40}; do curl -fsS "$SPOOL_URL/release.json" && break; sleep .25; done
+      - name: Real 43k browser database-ready + preserve-contract + CSP audit
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 scripts/nyc311-browser-audit.py | tee /tmp/nyc311-browser-audit.json
+      - name: Real >100 MiB Local Runner Gate-B audit
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/nyc311-local-audit.mjs | tee /tmp/nyc311-local-audit.json
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nyc311-v1.1.0-production-audit-${{ env.SPOOL_CANDIDATE_SHA }}
+          path: |
+            /tmp/nyc311-browser-audit.json
+            /tmp/nyc311-local-audit.json
+            /tmp/spool-spa.log
+          if-no-files-found: warn
+          retention-days: 30
