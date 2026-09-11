@@ -27,6 +27,7 @@ import { RunStore } from './run-store.js';
 const MIGRATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const DEFAULT_MAX_SOURCE_BYTES = 256 * 1024 * 1024;
 const INFERENCE_SAMPLE_SIZE = 1000;
+const EXECUTION_LEASE_TTL_MS = 5 * 60 * 1000;
 
 function requireRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) fail('INVALID_MIGRATION_REQUEST', 'Migration request must be an object');
@@ -260,8 +261,12 @@ export class SpoolCommandService {
     let target;
     let lease;
     let ownsRunState = false;
+    const renewLease = () => {
+      lease = leaseStore.acquire({ resource: leaseResource, owner: leaseOwner, ttlMs: EXECUTION_LEASE_TTL_MS });
+      return lease;
+    };
     try {
-      lease = leaseStore.acquire({ resource: leaseResource, owner: leaseOwner, ttlMs: 5 * 60 * 1000 });
+      renewLease();
       this.runs.start({ migrationId: request.migrationId, planId: plan.planId, sourceSnapshotId: snapshot.snapshotId, targetIdentity, startedAt });
       ownsRunState = true;
       target = new SqliteTarget({ path: targetPath, table: plan.targetRef.table, requireFencing: true, fenceResource: leaseResource });
@@ -312,6 +317,7 @@ export class SpoolCommandService {
             continue;
           }
           if (sourceRangeStart < resumeOffset) fail('CHECKPOINT_OFFSET_MISMATCH', 'Checkpoint falls inside a batch boundary');
+          renewLease();
           runner.runBatch({
             migrationId: request.migrationId,
             planId: plan.planId,
