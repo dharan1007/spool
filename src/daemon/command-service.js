@@ -14,6 +14,10 @@ import {
   SQLITE_TARGET_DESCRIPTOR,
   createSqliteTargetRuntime
 } from '../connectors/sqlite/runtime.js';
+import {
+  POSTGRES_TARGET_DESCRIPTOR,
+  createPostgresTargetRuntime
+} from '../connectors/postgres/runtime.js';
 import { createPathPolicy } from '../platform/path-policy.js';
 import { connectorIdentity } from '../platform/contracts.js';
 import { createMigrationPlan } from '../platform/plan.js';
@@ -23,6 +27,7 @@ import { assertCheckpointBinding } from '../execution/checkpoint.js';
 import { MigrationRunner } from '../execution/migration-runner.js';
 import { verifyMigration } from '../execution/verify.js';
 import { createMigrationReceipt } from '../execution/receipt.js';
+import { CredentialBroker } from './credential-broker.js';
 import { RunStore } from './run-store.js';
 
 const MIGRATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -75,10 +80,17 @@ export class SpoolCommandService {
 
     const snapshotRoot = resolve(options.snapshotDir ?? `${options.statePath}.snapshots`);
     const sourcePolicy = await createPathPolicy(options.sourceRoot);
+    const credentialBroker = options.credentialBroker ?? new CredentialBroker();
+    if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_SERVICE_CONFIG', 'credentialBroker.withSecret() is required');
 
     const targetConnectors = new ConnectorRegistry();
     const sqliteTargetRuntime = await createSqliteTargetRuntime({ targetRoot: options.targetRoot });
+    const postgresTargetRuntime = createPostgresTargetRuntime({
+      credentialBroker,
+      leaseTtlMs: options.postgresLeaseTtlMs
+    });
     targetConnectors.register(SQLITE_TARGET_DESCRIPTOR, async () => sqliteTargetRuntime);
+    targetConnectors.register(POSTGRES_TARGET_DESCRIPTOR, async () => postgresTargetRuntime);
 
     return new SpoolCommandService({
       sourcePolicy,
