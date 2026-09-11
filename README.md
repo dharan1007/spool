@@ -23,14 +23,14 @@ Node.js 22+ is required. The release remains protected against accidental npm-re
 For the current published release:
 
 ```bash
-npm install -g github:dharan1007/spool#v1.1.0
+npm install -g github:dharan1007/spool#v1.1.1
 spool --help
 ```
 
 Source-verification path:
 
 ```bash
-git clone --branch v1.1.0 https://github.com/dharan1007/spool.git
+git clone --branch v1.1.1 https://github.com/dharan1007/spool.git
 cd spool
 npm ci
 npm run check
