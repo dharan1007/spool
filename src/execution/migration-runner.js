@@ -17,9 +17,9 @@ export class MigrationRunner {
     this.checkpointStore = checkpointStore;
   }
 
-  runBatch(input = {}, { faultAfterTargetCommit = false } = {}) {
+  async runBatch(input = {}, { faultAfterTargetCommit = false } = {}) {
     const batchIdentity = createBatchIdentity(input);
-    const described = this.target.describeBatch(input);
+    const described = await this.target.describeBatch(input);
     const evidence = {
       batchIdentity,
       migrationId: input.migrationId,
@@ -30,7 +30,7 @@ export class MigrationRunner {
       payloadHash: described.payloadHash
     };
 
-    const prior = this.checkpointStore.load();
+    const prior = await this.checkpointStore.load();
     if (prior) {
       assertCheckpointBinding(prior, input);
       if (prior.nextOffset > input.sourceRange.endExclusive) {
@@ -52,7 +52,7 @@ export class MigrationRunner {
       }
     }
 
-    const reconciliation = this.target.reconcileTargetCommit(evidence);
+    const reconciliation = await this.target.reconcileTargetCommit(evidence);
     if (reconciliation.status === 'CONFLICT') {
       fail('TARGET_RECONCILIATION_CONFLICT', 'Target contains conflicting evidence for the logical batch', { batchIdentity });
     }
@@ -66,7 +66,7 @@ export class MigrationRunner {
       result = reconciliation;
       recovered = true;
     } else if (reconciliation.status === 'NOT_COMMITTED') {
-      result = this.target.commitBatch({ ...input, batchIdentity });
+      result = await this.target.commitBatch({ ...input, batchIdentity });
       if (result.status !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'Target did not return exact commit evidence');
       if (faultAfterTargetCommit) {
         fail('FAULT_AFTER_TARGET_COMMIT', 'Injected crash after target commit and before checkpoint persistence', { batchIdentity });
@@ -84,7 +84,7 @@ export class MigrationRunner {
       nextOffset: input.sourceRange.endExclusive,
       lastBatchIdentity: batchIdentity
     });
-    this.checkpointStore.save(checkpoint);
+    await this.checkpointStore.save(checkpoint);
 
     return Object.freeze({
       status: 'COMMITTED_EXACT',
