@@ -41,6 +41,8 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
       - name: Verify stable SQLite driver loads
         run: node -e "const D=require('better-sqlite3'); const db=new D(':memory:'); db.exec('CREATE TABLE probe(id INTEGER PRIMARY KEY) STRICT'); db.close(); console.log('better-sqlite3 runtime OK')"
+      - name: Verify PostgreSQL driver loads
+        run: node -e "import('pg').then(({Client}) => { if (typeof Client !== 'function') process.exit(1); console.log('pg runtime OK'); })"
       - name: Run production release gate
         env:
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -86,10 +88,45 @@ jobs:
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: npm run pack:verify
 
+  postgres-conformance:
+    name: postgres-production-conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: spooltest
+          POSTGRES_USER: spooltest
+          POSTGRES_PASSWORD: spooltest-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U spooltest -d spooltest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exactly from committed lockfile
+        run: npm ci
+      - name: Run real PostgreSQL conformance and crash-fault suite
+        env:
+          SPOOL_TEST_POSTGRES_ENDPOINT: postgresql://127.0.0.1:5432/?sslmode=disable
+          SPOOL_TEST_POSTGRES_DATABASE: spooltest
+          SPOOL_TEST_POSTGRES_USER: spooltest
+          SPOOL_TEST_PG_PASSWORD: spooltest-password
+          SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node --test tests/conformance/postgres-conformance.test.js
+
   release:
     name: publish-release
     if: github.event_name == 'workflow_dispatch' && inputs.release == true
-    needs: [verify, sqlite-portability]
+    needs: [verify, sqlite-portability, postgres-conformance]
     permissions:
       contents: write
     runs-on: ubuntu-latest
