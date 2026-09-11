@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CredentialBroker } from '../src/daemon/credential-broker.js';
+import { fail } from '../src/core/errors.js';
 
 const ref = { provider: 'env', key: 'SPOOL_TEST_SECRET' };
 
@@ -26,4 +27,19 @@ test('credential broker redacts secret material from callback failures', () => {
     assert.doesNotMatch(error.message, /super-secret-token/);
     assert.match(error.message, /\[REDACTED\]/);
   }
+});
+
+test('credential broker preserves safe typed SPOOL errors without exposing secrets', async () => {
+  const broker = new CredentialBroker({ getEnv: () => 'super-secret-token' });
+  await assert.rejects(
+    () => broker.withSecret(ref, async () => fail('TARGET_SCHEMA_INCOMPATIBLE', 'target contract is incompatible', { table: 'customers' })),
+    error => error?.code === 'TARGET_SCHEMA_INCOMPATIBLE' && error?.details?.table === 'customers'
+  );
+
+  await assert.rejects(
+    () => broker.withSecret(ref, async secret => fail('TARGET_SCHEMA_INCOMPATIBLE', `target rejected ${secret}`, { diagnostic: secret })),
+    error => error?.code === 'CREDENTIAL_CALLBACK_FAILED'
+      && !String(error?.message).includes('super-secret-token')
+      && String(error?.message).includes('[REDACTED]')
+  );
 });
