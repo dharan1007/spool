@@ -15,3 +15,10 @@ test('command service routes target behavior through connector registry/runtime 
   assert.doesNotMatch(commandServiceSource, /new\s+SqliteTarget\s*\(/);
   assert.doesNotMatch(commandServiceSource, /new\s+LeaseStore\s*\(/);
 });
+
+test('production command service requires C4 transaction-bound target assurance before opening a connector runtime', () => {
+  assert.match(
+    commandServiceSource,
+    /targetConnectors\.open\(connector,\s*['"]target['"],\s*undefined,\s*undefined,\s*\{\s*minimumAssurance:\s*['"]C4['"]/s
+  );
+});
