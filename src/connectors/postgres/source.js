@@ -130,7 +130,7 @@ async function inspectRelation(client, ref) {
   return Object.freeze({ contract, contractId });
 }
 
-async function captureSourceState(client, ref, inspection) {
+async function captureSourceState(client, inspection) {
   let identity;
   try {
     identity = await client.query(`
@@ -177,8 +177,10 @@ function keysetPredicate(primaryKey, lastKey, startParameter) {
 }
 
 class PostgresSourceSnapshot {
+  #client;
+
   constructor({ client, ref, state, contract, contractId, batchSize }) {
-    this.client = client;
+    this.#client = client;
     this.sourceRef = ref;
     this.sourceState = state;
     this.contract = contract;
@@ -189,6 +191,13 @@ class PostgresSourceSnapshot {
 
   #assertOpen() {
     if (this.closed) fail('POSTGRES_SOURCE_SNAPSHOT_CLOSED', 'PostgreSQL source snapshot is closed');
+  }
+
+  async assertReadOnly() {
+    this.#assertOpen();
+    const result = await this.#client.query('SHOW transaction_read_only');
+    if (result.rows[0]?.transaction_read_only !== 'on') fail('POSTGRES_SOURCE_NOT_READ_ONLY', 'PostgreSQL source transaction is not read-only');
+    return true;
   }
 
   async *batches() {
@@ -206,7 +215,7 @@ class PostgresSourceSnapshot {
       const predicate = keysetPredicate(primaryKey, lastKey, 1);
       const values = [...predicate.values, this.batchSize];
       const limitParameter = values.length;
-      const result = await this.client.query({
+      const result = await this.#client.query({
         text: `SELECT ${selectColumns} FROM ${qualified} ${predicate.sql} ORDER BY ${order} LIMIT $${limitParameter}`,
         values
       });
@@ -241,7 +250,7 @@ export async function withPostgresSourceSnapshot({ sourceRef, credentialBroker, 
     let snapshot;
     try {
       const inspection = await inspectRelation(client, ref);
-      const sourceState = await captureSourceState(client, ref, inspection);
+      const sourceState = await captureSourceState(client, inspection);
       snapshot = new PostgresSourceSnapshot({
         client,
         ref,
@@ -250,6 +259,7 @@ export async function withPostgresSourceSnapshot({ sourceRef, credentialBroker, 
         contractId: inspection.contractId,
         batchSize: size
       });
+      await snapshot.assertReadOnly();
       const result = await callback(snapshot);
       snapshot.close();
       await client.query('COMMIT');
