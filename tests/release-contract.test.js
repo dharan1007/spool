@@ -15,3 +15,16 @@ test('release includes CI, security policy, evaluator demo script, and browser s
   assert.match(workflow, /browser-smoke\.py/);
   assert.match(workflow, /SPOOL_SERVE_DIR:\s*dist/);
 });
+
+test('production smoke cryptographically verifies deployed artifact bytes before browser smoke', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/production-smoke.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /scripts\/verify-deployed-release\.js/);
+  assert.match(workflow, /EXPECTED_SHA:/);
+  assert.match(workflow, /SPOOL_URL:/);
+  assert.match(workflow, /Run production browser smoke/);
+  assert.ok(
+    workflow.indexOf('verify-deployed-release.js') < workflow.indexOf('Run production browser smoke'),
+    'artifact verification must execute before browser smoke'
+  );
+  assert.doesNotMatch(workflow, /urllib\.request|json\.load\(response\)/, 'commit-only inline verifier must be removed');
+});
