@@ -89,8 +89,8 @@ export function createFilesystemSourceState(input) {
   });
 }
 
-function normalizePostgresRelation(relation, invalidCode, label) {
-  exactObject(relation, new Set(['schema', 'table', 'relid']), 'UNKNOWN_SOURCE_STATE_FIELD', invalidCode, label);
+function normalizePostgresRelation(relation, unknownCode, invalidCode, label) {
+  exactObject(relation, new Set(['schema', 'table', 'relid']), unknownCode, invalidCode, label);
   return {
     schema: requiredString(relation.schema, invalidCode, `${label}.schema`),
     table: requiredString(relation.table, invalidCode, `${label}.table`),
@@ -111,7 +111,7 @@ function normalizePgBase(input, { unknownCode, invalidCode, includeSnapshot }) {
   const databaseOid = requiredSafeInteger(input.databaseOid, invalidCode, 'databaseOid', { min: 1 });
   const databaseName = requiredString(input.databaseName, invalidCode, 'databaseName');
   const serverVersionNum = requiredSafeInteger(input.serverVersionNum, invalidCode, 'serverVersionNum', { min: 90000 });
-  const relation = normalizePostgresRelation(input.relation, invalidCode, 'relation');
+  const relation = normalizePostgresRelation(input.relation, unknownCode, invalidCode, 'relation');
   const contractId = hashId(input.contractId, invalidCode, 'contractId');
   return { systemIdentifier, databaseOid, databaseName, serverVersionNum, relation, contractId };
 }
