@@ -134,7 +134,9 @@ export class SpoolCommandService {
     }
 
     try {
-      return await this.targetConnectors.open(connector, 'target');
+      return await this.targetConnectors.open(connector, 'target', undefined, undefined, {
+        minimumAssurance: 'C4'
+      });
     } catch (error) {
       if (error?.code === 'CONNECTOR_NOT_REGISTERED') {
         fail('UNSUPPORTED_TARGET_CONNECTOR', `Unsupported target connector ${connector}`);
