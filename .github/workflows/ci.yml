@@ -121,7 +121,7 @@ jobs:
           SPOOL_TEST_POSTGRES_USER: spooltest
           SPOOL_TEST_PG_PASSWORD: spooltest-password
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: node --test tests/conformance/postgres-conformance.test.js
+        run: node --test tests/conformance/postgres-conformance.test.js tests/conformance/postgres-source-conformance.test.js
 
   release:
     name: publish-release
