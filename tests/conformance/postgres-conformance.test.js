@@ -192,7 +192,7 @@ test('PostgreSQL commit-before-checkpoint crash reconciles exactly without dupli
     assert.deepEqual(await rows(table), [{ id: 1, name: 'Ada' }, { id: 2, name: 'Lin' }]);
 
     const recovered = await runner.runBatchAsync(batch);
-    assert.equal(recovered.recoveredAfterCrash, true);
+    assert.equal(recovered.recovered, true);
     assert.equal(checkpoint.nextOffset, 2);
     assert.equal((await rows(table)).length, 2);
   } finally {
