@@ -42,6 +42,20 @@ test('built-in SQLite and PostgreSQL targets truthfully advertise C4 rather than
   assert.equal(POSTGRES_TARGET_DESCRIPTOR.capabilities.targetContractBinding, true);
 });
 
+test('validated connector descriptors are idempotently revalidatable and canonical semantics cannot be spoofed', () => {
+  const once = validateConnectorDescriptor(c4Target('canonical-target'));
+  const twice = validateConnectorDescriptor(once);
+  assert.deepEqual(twice, once);
+
+  assert.throws(
+    () => validateConnectorDescriptor({
+      ...c4Target('spoofed-semantics'),
+      assurance: { level: 'C4', semantics: 'marketing claim instead of protocol semantics' }
+    }),
+    error => error?.code === 'INVALID_CONNECTOR_ASSURANCE'
+  );
+});
+
 test('connector descriptors fail closed when an assurance level overclaims capabilities', () => {
   assert.throws(
     () => validateConnectorDescriptor({
