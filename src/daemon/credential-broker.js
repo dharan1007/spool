@@ -1,4 +1,4 @@
-import { fail } from '../core/errors.js';
+import { fail, SpoolError } from '../core/errors.js';
 import { validateSecretRef } from '../platform/secrets.js';
 
 function containsSecret(value, secret, seen = new Set()) {
@@ -24,6 +24,17 @@ function inspectResult(result, secret) {
   return result;
 }
 
+function safeTypedError(error, secret) {
+  return error instanceof SpoolError
+    && !containsSecret(error.message, secret)
+    && !containsSecret(error.details, secret);
+}
+
+function throwCallbackFailure(error, secret) {
+  if (safeTypedError(error, secret)) throw error;
+  fail('CREDENTIAL_CALLBACK_FAILED', redact(error?.message ?? error, secret));
+}
+
 export class CredentialBroker {
   constructor({ getEnv = key => process.env[key] } = {}) {
     if (typeof getEnv !== 'function') fail('INVALID_CREDENTIAL_BROKER', 'getEnv must be a function');
@@ -40,7 +51,7 @@ export class CredentialBroker {
     try {
       result = callback(secret);
     } catch (error) {
-      fail('CREDENTIAL_CALLBACK_FAILED', redact(error?.message ?? error, secret));
+      throwCallbackFailure(error, secret);
     }
 
     if (result && typeof result.then === 'function') {
@@ -48,7 +59,7 @@ export class CredentialBroker {
         .then(value => inspectResult(value, secret))
         .catch(error => {
           if (error?.code === 'SECRET_LEAK_DETECTED' || error?.code === 'UNSAFE_CREDENTIAL_RESULT') throw error;
-          fail('CREDENTIAL_CALLBACK_FAILED', redact(error?.message ?? error, secret));
+          throwCallbackFailure(error, secret);
         });
     }
     return inspectResult(result, secret);

@@ -29,7 +29,8 @@
     "build": "node scripts/build-dist.js"
   },
   "dependencies": {
-    "better-sqlite3": "12.10.1"
+    "better-sqlite3": "12.10.1",
+    "pg": "8.23.0"
   },
   "engines": {
     "node": ">=22"
