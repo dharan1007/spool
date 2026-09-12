@@ -124,6 +124,20 @@ test('target states bind connector-native database identity and target contract'
   assert.notEqual(sqlite.targetStateId, postgres.targetStateId);
 });
 
+test('PostgreSQL TargetState reports target-scoped validation failures for unsafe relation material', () => {
+  assert.throws(
+    () => createPostgresTargetState({
+      systemIdentifier: '7429931746381247331',
+      databaseOid: 16384,
+      databaseName: 'app',
+      serverVersionNum: 170004,
+      relation: { schema: 'public', table: 'customers', relid: 24591, secretRef: 'vault://prod/postgres' },
+      contractId: HASH('2')
+    }),
+    error => error?.code === 'UNKNOWN_TARGET_STATE_FIELD'
+  );
+});
+
 test('binding assertions fail closed on source or target drift', () => {
   const sourceA = createFilesystemSourceState({ path: '/srv/input/a.csv', size: 1, contentSha256: 'a'.repeat(64), snapshotId: HASH('a') });
   const sourceB = createFilesystemSourceState({ path: '/srv/input/a.csv', size: 1, contentSha256: 'b'.repeat(64), snapshotId: HASH('b') });
