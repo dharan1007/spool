@@ -71,9 +71,17 @@ function requireCapabilities(capabilities, required, level) {
 
 export function validateConnectorAssurance(input = { level: 'C0' }, role, capabilities) {
   plainObject(input, 'INVALID_CONNECTOR_ASSURANCE', 'Connector assurance');
-  const unknown = Object.keys(input).filter(key => !['level'].includes(key));
+  const unknown = Object.keys(input).filter(key => !['level', 'semantics'].includes(key));
   if (unknown.length) fail('INVALID_CONNECTOR_ASSURANCE', `Unsupported connector assurance field ${unknown[0]}`);
   const level = requireLevel(input.level ?? 'C0');
+  const semantics = CONNECTOR_ASSURANCE_SEMANTICS[level];
+  if (input.semantics !== undefined && input.semantics !== semantics) {
+    fail('INVALID_CONNECTOR_ASSURANCE', `Connector assurance semantics do not match ${level}`, {
+      level,
+      expected: semantics,
+      provided: input.semantics
+    });
+  }
 
   if (role === 'source') {
     if (level === 'C1') requireCapabilities(capabilities, ['snapshotBinding', 'readOnlySnapshot'], level);
@@ -88,7 +96,7 @@ export function validateConnectorAssurance(input = { level: 'C0' }, role, capabi
     if (level === 'C6') requireCapabilities(capabilities, ['continuousChangeCapture'], level);
   }
 
-  return Object.freeze({ level, semantics: CONNECTOR_ASSURANCE_SEMANTICS[level] });
+  return Object.freeze({ level, semantics });
 }
 
 export function validateConnectorDescriptor(input) {
