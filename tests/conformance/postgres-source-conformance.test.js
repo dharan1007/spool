@@ -77,6 +77,8 @@ test('PostgreSQL source holds one MVCC snapshot while streaming deterministic ke
     assert.match(snapshot.sourceState.state.contractId, /^sha256:[a-f0-9]{64}$/);
     assert.match(snapshot.sourceState.state.walLsn, /^[0-9A-F]+\/[0-9A-F]+$/);
     assert.deepEqual(snapshot.contract.primaryKey, ['tenant_id', 'id']);
+    assert.equal(await snapshot.assertReadOnly(), true);
+    assert.equal(Object.hasOwn(snapshot, 'client'), false, 'raw PostgreSQL client must not escape the source runtime');
 
     const iterator = snapshot.batches();
     const first = await iterator.next();
@@ -106,15 +108,21 @@ test('PostgreSQL source holds one MVCC snapshot while streaming deterministic ke
   assert.ok(result.batches.every(batch => batch.sourceStateId === result.state.sourceStateId));
 });
 
-test('PostgreSQL source snapshot is read-only and callback failure rolls the transaction back', { skip: !enabled }, async () => {
-  const table = 'spool_pg_source_readonly';
+test('PostgreSQL source callback failure closes the held snapshot without changing source data', { skip: !enabled }, async () => {
+  const table = 'spool_pg_source_failure';
   await reset(table, 1);
+  let escapedSnapshot;
   await assert.rejects(
     () => withPostgresSourceSnapshot({ sourceRef: sourceRef(table), credentialBroker: broker, batchSize: 1 }, async snapshot => {
-      await snapshot.client.query(`INSERT INTO public."${table}"(tenant_id,id,name) VALUES (0,2,'forbidden')`);
+      escapedSnapshot = snapshot;
+      assert.equal(await snapshot.assertReadOnly(), true);
+      throw new Error('intentional-callback-failure');
     }),
-    error => error?.code === '25006' || /read-only transaction/i.test(error?.message ?? '')
+    /intentional-callback-failure/
   );
+  await assert.rejects(async () => {
+    for await (const _batch of escapedSnapshot.batches()) break;
+  }, error => error?.code === 'POSTGRES_SOURCE_SNAPSHOT_CLOSED');
 
   const client = await adminClient();
   try {
