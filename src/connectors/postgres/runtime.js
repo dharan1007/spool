@@ -13,12 +13,15 @@ export const POSTGRES_TARGET_DESCRIPTOR = validateConnectorDescriptor({
   name: 'postgres',
   role: 'target',
   version: 1,
+  assurance: { level: 'C4' },
   capabilities: {
     transactions: true,
     atomicBatchLedger: true,
     reconcileAfterCrash: true,
     idempotentReplay: true,
-    fencing: true
+    fencing: true,
+    targetContractBinding: true,
+    exactCommitEvidence: true
   }
 });
 
@@ -85,13 +88,7 @@ class PostgresTargetExecution {
 
   async renewLease() {
     this.#assertOpen();
-    this.lease = await acquirePostgresLease({
-      targetRef: this.targetRef,
-      credentialBroker: this.credentialBroker,
-      resource: this.leaseResource,
-      owner: this.leaseOwner,
-      ttlMs: this.leaseTtlMs
-    });
+    this.lease = await acquirePostgresLease({ targetRef: this.targetRef, credentialBroker: this.credentialBroker, resource: this.leaseResource, owner: this.leaseOwner, ttlMs: this.leaseTtlMs });
     return this.lease;
   }
 
@@ -99,13 +96,7 @@ class PostgresTargetExecution {
     this.#assertOpen();
     if (!this.lease) fail('EXECUTION_LEASE_REQUIRED', 'PostgreSQL target execution requires a durable lease before opening the target');
     if (!this.target) {
-      this.target = new PostgresTarget({
-        targetRef: this.targetRef,
-        credentialBroker: this.credentialBroker,
-        requireFencing: true,
-        fenceResource: this.leaseResource,
-        fenceOwner: this.leaseOwner
-      });
+      this.target = new PostgresTarget({ targetRef: this.targetRef, credentialBroker: this.credentialBroker, requireFencing: true, fenceResource: this.leaseResource, fenceOwner: this.leaseOwner });
     }
     return this.target;
   }
@@ -123,13 +114,7 @@ class PostgresTargetExecution {
     } finally {
       if (this.lease) {
         try {
-          await releasePostgresLease({
-            targetRef: this.targetRef,
-            credentialBroker: this.credentialBroker,
-            resource: this.lease.resource,
-            owner: this.lease.owner,
-            fencingToken: this.lease.fencingToken
-          });
+          await releasePostgresLease({ targetRef: this.targetRef, credentialBroker: this.credentialBroker, resource: this.lease.resource, owner: this.lease.owner, fencingToken: this.lease.fencingToken });
         } catch {
           // Safe failure mode: the durable lease remains until its database-side expiry.
         }
@@ -180,12 +165,7 @@ class PostgresTargetRuntime {
   }
 
   createExecution({ migrationId, targetRef } = {}) {
-    return new PostgresTargetExecution({
-      migrationId,
-      targetRef,
-      credentialBroker: this.credentialBroker,
-      leaseTtlMs: this.leaseTtlMs
-    });
+    return new PostgresTargetExecution({ migrationId, targetRef, credentialBroker: this.credentialBroker, leaseTtlMs: this.leaseTtlMs });
   }
 }
 

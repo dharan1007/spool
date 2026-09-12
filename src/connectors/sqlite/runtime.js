@@ -13,19 +13,20 @@ export const SQLITE_TARGET_DESCRIPTOR = validateConnectorDescriptor({
   name: 'sqlite',
   role: 'target',
   version: 1,
+  assurance: { level: 'C4' },
   capabilities: {
     transactions: true,
     atomicBatchLedger: true,
     reconcileAfterCrash: true,
     idempotentReplay: true,
-    fencing: true
+    fencing: true,
+    targetContractBinding: true,
+    exactCommitEvidence: true
   }
 });
 
 function requireLeaseTtlMs(value) {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    fail('INVALID_SQLITE_RUNTIME_CONFIG', 'leaseTtlMs must be a positive safe integer');
-  }
+  if (!Number.isSafeInteger(value) || value <= 0) fail('INVALID_SQLITE_RUNTIME_CONFIG', 'leaseTtlMs must be a positive safe integer');
   return value;
 }
 
@@ -35,9 +36,7 @@ function requireMigrationId(value) {
 }
 
 function requireSqliteTargetRef(targetRef) {
-  if (!targetRef || typeof targetRef !== 'object' || Array.isArray(targetRef)) {
-    fail('INVALID_TARGET_REF', 'SQLite targetRef is required');
-  }
+  if (!targetRef || typeof targetRef !== 'object' || Array.isArray(targetRef)) fail('INVALID_TARGET_REF', 'SQLite targetRef is required');
   if (targetRef.connector !== 'sqlite') fail('UNSUPPORTED_TARGET_CONNECTOR', 'SQLite target runtime requires connector sqlite');
   if (targetRef.secretRef) fail('UNSUPPORTED_LOCAL_CONNECTOR_SECRET', 'SQLite Gate B target does not accept credentials');
   if (typeof targetRef.path !== 'string' || !targetRef.path) fail('INVALID_TARGET_REF', 'SQLite targetRef.path is required');
@@ -52,11 +51,7 @@ function requirePlanInput(input) {
 
 function approvalEffects(plan) {
   const approvals = Array.isArray(plan?.risk?.approvals) ? plan.risk.approvals : [];
-  return Object.freeze([
-    'sqlite:insert_rows',
-    'sqlite:write_batch_ledger',
-    ...approvals.map(value => `approval:${value}`)
-  ].sort());
+  return Object.freeze(['sqlite:insert_rows', 'sqlite:write_batch_ledger', ...approvals.map(value => `approval:${value}`)].sort());
 }
 
 class SqliteTargetExecution {
@@ -78,61 +73,31 @@ class SqliteTargetExecution {
 
   renewLease({ nowMs = Date.now() } = {}) {
     this.#assertOpen();
-    this.lease = this.leaseStore.acquire({
-      resource: this.leaseResource,
-      owner: this.leaseOwner,
-      ttlMs: this.leaseTtlMs,
-      nowMs
-    });
+    this.lease = this.leaseStore.acquire({ resource: this.leaseResource, owner: this.leaseOwner, ttlMs: this.leaseTtlMs, nowMs });
     return this.lease;
   }
 
   openTarget() {
     this.#assertOpen();
     if (!this.lease) fail('EXECUTION_LEASE_REQUIRED', 'SQLite target execution requires a durable lease before opening the target');
-    if (!this.target) {
-      this.target = new SqliteTarget({
-        path: this.targetRef.path,
-        table: this.targetRef.table,
-        requireFencing: true,
-        fenceResource: this.leaseResource
-      });
-    }
+    if (!this.target) this.target = new SqliteTarget({ path: this.targetRef.path, table: this.targetRef.table, requireFencing: true, fenceResource: this.leaseResource });
     return this.target;
   }
 
   ledgerEntries() {
     this.#assertOpen();
     if (!this.target) fail('SQLITE_TARGET_NOT_OPEN', 'SQLite target must be opened before reading ledger evidence');
-    return Object.freeze(this.target.ledgerEntries().filter(entry =>
-      entry.migrationId === this.migrationId && entry.targetTable === this.targetRef.table
-    ));
+    return Object.freeze(this.target.ledgerEntries().filter(entry => entry.migrationId === this.migrationId && entry.targetTable === this.targetRef.table));
   }
 
   close() {
     if (this.closed) return;
     let firstError = null;
+    try { if (this.target) this.target.close(); } catch (error) { firstError = error; }
     try {
-      if (this.target) this.target.close();
-    } catch (error) {
-      firstError = error;
-    }
-    try {
-      if (this.lease) {
-        this.leaseStore.release({
-          resource: this.lease.resource,
-          owner: this.lease.owner,
-          fencingToken: this.lease.fencingToken
-        });
-      }
-    } catch (error) {
-      firstError ??= error;
-    }
-    try {
-      this.leaseStore.close();
-    } catch (error) {
-      firstError ??= error;
-    }
+      if (this.lease) this.leaseStore.release({ resource: this.lease.resource, owner: this.lease.owner, fencingToken: this.lease.fencingToken });
+    } catch (error) { firstError ??= error; }
+    try { this.leaseStore.close(); } catch (error) { firstError ??= error; }
     this.closed = true;
     this.target = null;
     this.lease = null;
@@ -151,13 +116,9 @@ class SqliteTargetRuntime {
     requirePlanInput(input);
     const normalized = structuredClone(input);
     requireSqliteTargetRef(normalized.targetRef);
-    if (normalized.writeStrategy?.mode !== 'insert') {
-      fail('UNSUPPORTED_WRITE_STRATEGY', 'Gate B SQLite currently supports insert mode only');
-    }
+    if (normalized.writeStrategy?.mode !== 'insert') fail('UNSUPPORTED_WRITE_STRATEGY', 'Gate B SQLite currently supports insert mode only');
     const batchSize = normalized.writeStrategy?.batchSize;
-    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 10000) {
-      fail('INVALID_WRITE_STRATEGY', 'SQLite batchSize must be between 1 and 10000');
-    }
+    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 10000) fail('INVALID_WRITE_STRATEGY', 'SQLite batchSize must be between 1 and 10000');
     normalized.targetRef.path = await this.targetPolicy.resolve(normalized.targetRef.path, { mustExist: true });
     return normalized;
   }
@@ -165,11 +126,7 @@ class SqliteTargetRuntime {
   preflight(plan) {
     requirePlanInput(plan);
     requireSqliteTargetRef(plan.targetRef);
-    return inspectSqliteTarget({
-      path: plan.targetRef.path,
-      table: plan.targetRef.table,
-      targetSchema: plan.targetSchema
-    });
+    return inspectSqliteTarget({ path: plan.targetRef.path, table: plan.targetRef.table, targetSchema: plan.targetSchema });
   }
 
   approvalEffects(plan) {
@@ -178,11 +135,7 @@ class SqliteTargetRuntime {
   }
 
   createExecution({ migrationId, targetRef } = {}) {
-    return new SqliteTargetExecution({
-      migrationId,
-      targetRef,
-      leaseTtlMs: this.leaseTtlMs
-    });
+    return new SqliteTargetExecution({ migrationId, targetRef, leaseTtlMs: this.leaseTtlMs });
   }
 }
 
