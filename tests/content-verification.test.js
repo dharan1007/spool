@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { verifyContentProjection } from '../src/execution/content-verification.js';
 import { createRepairPlan } from '../src/execution/repair-plan.js';
+import { merkleProof, merkleRoot, verifyMerkleProof } from '../src/execution/merkle.js';
 
 const PLAN_ID = `sha256:${'1'.repeat(64)}`;
 const SNAPSHOT_ID = `sha256:${'2'.repeat(64)}`;
@@ -38,6 +39,21 @@ test('content verification is deterministic and independent of row order', () =>
   assert.equal(first.expected.rootHash, second.expected.rootHash);
   assert.equal(first.actual.rootHash, second.actual.rootHash);
   assert.equal(first.diff.total, 0);
+});
+
+test('content proof summaries carry verifiable merkle roots over the same row identities', () => {
+  const proof = verifyContentProjection({ expectedRows: expected, actualRows: expected, ...config });
+  assert.match(proof.expected.merkleRoot, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(proof.expected.merkleRoot, proof.actual.merkleRoot);
+  const missing = verifyContentProjection({ expectedRows: expected, actualRows: [], ...config });
+  assert.equal(missing.status, 'DIFF');
+  const leaves = missing.diff.entries.map(entry => ({ keyId: entry.keyId, rowHash: entry.expectedRowHash }));
+  assert.equal(leaves.length, 3);
+  const recomputed = merkleRoot(leaves, { primaryKey: config.primaryKey, columns: config.columns });
+  assert.equal(recomputed, proof.expected.merkleRoot);
+  const inclusion = merkleProof(leaves, leaves[1].keyId);
+  assert.equal(inclusion.root, proof.expected.merkleRoot);
+  assert.equal(verifyMerkleProof(inclusion), true);
 });
 
 test('content verification classifies missing, mismatch and unexpected rows exactly', () => {
