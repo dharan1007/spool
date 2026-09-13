@@ -147,18 +147,16 @@ class MysqlSourceSnapshot {
 
   async assertReadOnly() {
     this.#assertOpen();
-    // Session variables do not reliably report the current transaction mode
-    // across versions, so prove read-only with a session-private write probe:
-    // temporary tables are invisible to other sessions and vanish on
-    // disconnect, and a refused probe fails the snapshot closed.
-    await this.#connection.query('CREATE TEMPORARY TABLE IF NOT EXISTS `spool_read_only_probe` (id INT PRIMARY KEY)');
+    // Prove read-only with a session-private DDL probe: creating a temporary
+    // table is invisible to other sessions, causes no implicit commit and
+    // vanishes on disconnect, while a read-only transaction refuses it.
     try {
-      await this.#connection.query('INSERT INTO `spool_read_only_probe` (id) VALUES (1)');
+      await this.#connection.query('CREATE TEMPORARY TABLE `spool_read_only_probe` (id INT PRIMARY KEY)');
     } catch (error) {
-      if (error?.code === 'ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION' || /read.only/i.test(String(error?.message ?? ''))) return true;
+      if (error?.code === 'ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION' || /READ ONLY transaction/i.test(String(error?.message ?? ''))) return true;
       throw error;
     }
-    fail('MYSQL_SOURCE_NOT_READ_ONLY', 'MySQL source transaction accepted a write and is not read-only');
+    fail('MYSQL_SOURCE_NOT_READ_ONLY', 'MySQL source transaction accepted DDL and is not read-only');
   }
 
   async *batches() {
