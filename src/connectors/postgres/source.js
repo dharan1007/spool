@@ -1,8 +1,10 @@
 import { fail } from '../../core/errors.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
+import { connectorIdentity } from '../../platform/contracts.js';
 import { validateSecretRef } from '../../platform/secrets.js';
 import { createPostgresSourceState } from '../../protocol/state-descriptors.js';
 import { validateConnectorDescriptor } from '../contract.js';
+import { materializeSnapshotBatches } from '../materialized-snapshot.js';
 import { parsePostgresEndpoint, withPostgresClient } from './connection.js';
 
 const DEFAULT_BATCH_SIZE = 1000;
@@ -16,6 +18,7 @@ export const POSTGRES_SOURCE_DESCRIPTOR = validateConnectorDescriptor({
   capabilities: {
     streaming: true,
     snapshotBinding: true,
+    durableMaterialization: true,
     readOnlySnapshot: true
   }
 });
@@ -272,6 +275,19 @@ export async function withPostgresSourceSnapshot({ sourceRef, credentialBroker, 
   });
 }
 
+export async function materializePostgresSourceSnapshot({ sourceRef, credentialBroker, snapshotDir, batchSize = DEFAULT_BATCH_SIZE, chunkRows, maxChunkBytes } = {}) {
+  return withPostgresSourceSnapshot({ sourceRef, credentialBroker, batchSize }, async snapshot => materializeSnapshotBatches({
+    snapshotDir,
+    sourceState: snapshot.sourceState,
+    contract: snapshot.contract,
+    contractId: snapshot.contractId,
+    sourceIdentity: connectorIdentity(snapshot.sourceRef),
+    batches: snapshot.batches(),
+    chunkRows,
+    maxChunkBytes
+  }));
+}
+
 export function createPostgresSourceRuntime({ credentialBroker, batchSize = DEFAULT_BATCH_SIZE } = {}) {
   if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_POSTGRES_SOURCE_CONFIG', 'credentialBroker.withSecret() is required');
   const size = requireBatchSize(batchSize);
@@ -281,6 +297,14 @@ export function createPostgresSourceRuntime({ credentialBroker, batchSize = DEFA
       sourceRef,
       credentialBroker,
       batchSize: options.batchSize ?? size
-    }, callback)
+    }, callback),
+    materializeSnapshot: (sourceRef, options = {}) => materializePostgresSourceSnapshot({
+      sourceRef,
+      credentialBroker,
+      snapshotDir: options.snapshotDir,
+      batchSize: options.batchSize ?? size,
+      chunkRows: options.chunkRows,
+      maxChunkBytes: options.maxChunkBytes
+    })
   });
 }
