@@ -51,6 +51,7 @@ export function createMigrationReceipt(input = {}) {
     startedAt: timestamp('startedAt', input.startedAt),
     completedAt: timestamp('completedAt', input.completedAt)
   };
+  if (input.requestSemanticId != null) record.requestSemanticId = hash('requestSemanticId', input.requestSemanticId);
   if (Date.parse(record.completedAt) < Date.parse(record.startedAt)) fail('INVALID_RECEIPT_INPUT', 'completedAt cannot precede startedAt');
   const canonicalRecord = JSON.parse(canonicalJson(record));
   const receiptId = sha256Canonical(RECEIPT_DOMAIN, canonicalRecord);

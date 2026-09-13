@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Client } from 'pg';
 import { CredentialBroker } from '../../src/daemon/credential-broker.js';
+import { loadMaterializedSnapshot, streamMaterializedRows } from '../../src/connectors/materialized-snapshot.js';
 import {
   POSTGRES_SOURCE_DESCRIPTOR,
   createPostgresSourceRuntime,
@@ -64,6 +68,7 @@ test('PostgreSQL source connector truthfully advertises C1 snapshot semantics', 
   assert.equal(POSTGRES_SOURCE_DESCRIPTOR.capabilities.snapshotBinding, true);
   assert.equal(POSTGRES_SOURCE_DESCRIPTOR.capabilities.readOnlySnapshot, true);
   assert.equal(POSTGRES_SOURCE_DESCRIPTOR.capabilities.streaming, true);
+  assert.equal(POSTGRES_SOURCE_DESCRIPTOR.capabilities.durableMaterialization, true);
   assert.equal(POSTGRES_SOURCE_DESCRIPTOR.capabilities.continuousChangeCapture, false);
 });
 
@@ -106,6 +111,37 @@ test('PostgreSQL source holds one MVCC snapshot while streaming deterministic ke
   assert.equal(streamed.length, 5, 'late concurrent row must not enter the held MVCC snapshot');
   assert.deepEqual(streamed.map(row => [row.tenant_id, row.id]), [[0,2],[0,4],[1,1],[1,3],[1,5]]);
   assert.ok(result.batches.every(batch => batch.sourceStateId === result.state.sourceStateId));
+});
+
+test('PostgreSQL source materializes an immutable snapshot that survives later source changes', { skip: !enabled }, async t => {
+  const table = 'spool_pg_source_materialized';
+  await reset(table, 5);
+  const root = await mkdtemp(join(tmpdir(), 'spool-pg-materialized-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtime = createPostgresSourceRuntime({ credentialBroker: broker, batchSize: 2 });
+
+  const materialized = await runtime.materializeSnapshot(sourceRef(table), {
+    snapshotDir: root,
+    chunkRows: 2
+  });
+  assert.equal(materialized.snapshot.rowCount, 5);
+  assert.equal(materialized.snapshot.chunks.length, 3);
+  assert.equal(materialized.snapshot.sourceStateId, materialized.snapshot.sourceState.sourceStateId);
+  assert.equal(materialized.snapshot.contractId, materialized.snapshot.sourceState.state.contractId);
+  assert.equal(Object.hasOwn(materialized.snapshot.sourceIdentity ?? {}, 'secretRef'), false);
+
+  const concurrent = await adminClient();
+  try {
+    await concurrent.query(`INSERT INTO public."${table}"(tenant_id,id,name) VALUES (0,999,'after-materialization')`);
+  } finally {
+    await concurrent.end();
+  }
+
+  const reloaded = await loadMaterializedSnapshot({ snapshotDir: root, snapshotId: materialized.snapshot.snapshotId });
+  const replayed = [];
+  for await (const item of streamMaterializedRows(reloaded)) replayed.push(item.row);
+  assert.equal(replayed.length, 5, 'finalized materialization must replay exact approved bytes, not current database state');
+  assert.deepEqual(replayed.map(row => [row.tenant_id, row.id]), [[0,2],[0,4],[1,1],[1,3],[1,5]]);
 });
 
 test('PostgreSQL source callback failure closes the held snapshot without changing source data', { skip: !enabled }, async () => {
