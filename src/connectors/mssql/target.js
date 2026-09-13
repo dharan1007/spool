@@ -372,10 +372,10 @@ export class MssqlTarget {
     if (migrationId) { values.push(migrationId); migrationClause = ' AND migration_id = @p3'; }
     const rows = await withMssqlConnection({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async pool => {
       const found = await mssqlQuery(pool,
-        `SELECT batch_identity AS batchIdentity, migration_id AS migrationId, plan_id AS planId,
-                source_snapshot_id AS sourceSnapshotId, mapping_revision AS mappingRevision,
-                row_count AS rowCount, payload_hash AS payloadHash, target_table AS targetTable,
-                committed_at AS committedAt
+        `SELECT batch_identity AS [batchIdentity], migration_id AS [migrationId], plan_id AS [planId],
+                source_snapshot_id AS [sourceSnapshotId], mapping_revision AS [mappingRevision],
+                row_count AS [rowCount], payload_hash AS [payloadHash], target_table AS [targetTable],
+                committed_at AS [committedAt]
          FROM dbo.${quoteIdentifier(LEDGER_TABLE)} WHERE target_database = @p1 AND target_table = @p2${migrationClause}
          ORDER BY committed_at, batch_identity`,
         values

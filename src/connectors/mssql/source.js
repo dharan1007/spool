@@ -217,9 +217,10 @@ export async function withMssqlSourceSnapshot({ sourceRef, credentialBroker, bat
   const size = requireBatchSize(batchSize);
 
   return withMssqlConnection({ targetRef: ref, credentialBroker }, async pool => {
-    await mssqlQuery(pool, 'SET TRANSACTION ISOLATION LEVEL SNAPSHOT');
+    // Isolation must be set on the transaction itself: pool connections are
+    // multiplexed across sessions, so session-level SET state is unreliable.
     const transaction = new sql.Transaction(pool);
-    await transaction.begin();
+    await transaction.begin(sql.ISOLATION_LEVEL.SNAPSHOT);
     let snapshot;
     try {
       const inspection = await inspectRelation(transaction, ref);
