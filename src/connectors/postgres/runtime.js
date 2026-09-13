@@ -4,6 +4,7 @@ import { validateSecretRef } from '../../platform/secrets.js';
 import { validateConnectorDescriptor } from '../contract.js';
 import { parsePostgresEndpoint } from './connection.js';
 import { inspectPostgresTarget } from './preflight.js';
+import { verifyPostgresContent } from './content-verification.js';
 import { PostgresTarget, acquirePostgresLease, releasePostgresLease } from './target.js';
 
 const MIGRATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -21,7 +22,8 @@ export const POSTGRES_TARGET_DESCRIPTOR = validateConnectorDescriptor({
     idempotentReplay: true,
     fencing: true,
     targetContractBinding: true,
-    exactCommitEvidence: true
+    exactCommitEvidence: true,
+    readAfterWriteVerification: true
   }
 });
 
@@ -105,6 +107,18 @@ class PostgresTargetExecution {
     this.#assertOpen();
     if (!this.target) fail('POSTGRES_TARGET_NOT_OPEN', 'PostgreSQL target must be opened before reading ledger evidence');
     return Object.freeze(await this.target.ledgerEntries({ migrationId: this.migrationId }));
+  }
+
+  async verifyContent({ expectedRows, targetSchema, targetContractId } = {}) {
+    this.#assertOpen();
+    if (!this.target) fail('POSTGRES_TARGET_NOT_OPEN', 'PostgreSQL target must be opened before content verification');
+    return verifyPostgresContent({
+      targetRef: this.targetRef,
+      credentialBroker: this.credentialBroker,
+      expectedRows,
+      targetSchema,
+      targetContractId
+    });
   }
 
   async close() {
