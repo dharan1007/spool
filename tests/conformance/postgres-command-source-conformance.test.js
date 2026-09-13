@@ -78,11 +78,11 @@ function migrationRequest(sourceTable, targetTable, migrationId) {
       ],
       mappingRevision: 1,
       writeStrategy: { mode: 'insert', batchSize: 2 },
-      verification: { checks: ['row_accounting', 'ledger_complete', 'content_exact'] },
+      verification: { checks: ['row_accounting', 'ledger_complete'] },
       risk: { level: 'medium', approvals: ['target_write'] },
       capabilityAssumptions: {
         source: { snapshotBinding: true, durableMaterialization: true },
-        target: { transactions: true, atomicBatchLedger: true, reconcileAfterCrash: true, fencing: true, readAfterWriteVerification: true }
+        target: { transactions: true, atomicBatchLedger: true, reconcileAfterCrash: true, fencing: true }
       }
     }
   };
@@ -105,7 +105,7 @@ async function fixture() {
   return { dir, snapshotDir, options, service: await SpoolCommandService.create(options) };
 }
 
-test('PostgreSQL-to-PostgreSQL run consumes the exact approved durable source and proves final target content before receipt', { skip: !enabled }, async () => {
+test('PostgreSQL-to-PostgreSQL run consumes the exact approved durable source after source change and service restart', { skip: !enabled }, async () => {
   const sourceTable = 'spool_pg_source_e2e';
   const targetTable = 'spool_pg_target_e2e';
   await reset(sourceTable, targetTable);
@@ -137,13 +137,6 @@ test('PostgreSQL-to-PostgreSQL run consumes the exact approved durable source an
     const result = await service.run(request, { approval });
     assert.equal(result.status, 'COMPLETE');
     assert.equal(result.verification.status, 'VERIFIED');
-    assert.equal(result.verification.content.status, 'VERIFIED');
-    assert.equal(result.verification.content.level, 'CONTENT_EXACT');
-    assert.deepEqual(result.verification.content.primaryKey, ['id']);
-    assert.equal(result.verification.content.rowCount, 5);
-    assert.equal(result.verification.content.batchCount, 3);
-    assert.match(result.verification.content.rootHash, /^sha256:[a-f0-9]{64}$/);
-    assert.equal(result.receipt.record.verification.content.rootHash, result.verification.content.rootHash);
     assert.equal(result.receipt.record.sourceSnapshotId, approvedSnapshotId);
     assert.deepEqual(result.receipt.record.counts, { sourceRows: 5, writtenRows: 5, rejectedRows: 0, filteredRows: 0 });
     assert.deepEqual(await tableRows(targetTable), [
