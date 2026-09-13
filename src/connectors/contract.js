@@ -12,6 +12,7 @@ const CAPABILITIES = new Set([
   'reconcileAfterCrash',
   'idempotentReplay',
   'snapshotBinding',
+  'durableMaterialization',
   'fencing',
   'readOnlySnapshot',
   'targetContractBinding',
