@@ -32,13 +32,11 @@ function normalizeLocalDateTime(value) {
   return fraction ? `${match[1]}.${fraction}` : match[1];
 }
 
-function normalizeValue(value, field, pgType) {
+function normalizeValue(value, field) {
   if (value === null || value === undefined) return null;
   switch (field.type) {
-    case 'string': {
-      const text = String(value);
-      return pgType === 'bpchar' ? text.replace(/ +$/, '') : text;
-    }
+    case 'string':
+      return String(value);
     case 'integer': {
       const number = Number(value);
       if (!Number.isSafeInteger(number)) fail('POSTGRES_VERIFICATION_VALUE_INVALID', `PostgreSQL field ${field.name} is not a safe integer`);
@@ -106,23 +104,23 @@ async function discoverVerificationContract(client, targetRef, targetSchema) {
   return { primaryKey, pgTypes };
 }
 
-function normalizeExpectedRows(rows, targetSchema, pgTypes) {
+function normalizeExpectedRows(rows, targetSchema) {
   if (!Array.isArray(rows)) fail('INVALID_POSTGRES_VERIFICATION', 'expectedRows must be an array');
   return rows.map((row, index) => {
     if (!row || typeof row !== 'object' || Array.isArray(row)) fail('INVALID_POSTGRES_VERIFICATION', `expectedRows[${index}] must be an object`);
     const normalized = {};
     for (const field of targetSchema) {
       if (!Object.hasOwn(row, field.name)) fail('CONTENT_PROJECTION_FIELD_MISSING', `Expected row ${index} is missing field ${field.name}`);
-      normalized[field.name] = normalizeValue(row[field.name], field, pgTypes.get(field.name));
+      normalized[field.name] = normalizeValue(row[field.name], field);
     }
     return normalized;
   });
 }
 
-function normalizeActualRows(rows, targetSchema, pgTypes) {
+function normalizeActualRows(rows, targetSchema) {
   return rows.map(row => {
     const normalized = {};
-    for (const field of targetSchema) normalized[field.name] = normalizeValue(row[field.name], field, pgTypes.get(field.name));
+    for (const field of targetSchema) normalized[field.name] = normalizeValue(row[field.name], field);
     return normalized;
   });
 }
@@ -159,22 +157,32 @@ export async function verifyPostgresContent({ targetRef, credentialBroker, expec
   }
 
   return withPostgresClient({ targetRef, credentialBroker }, async client => {
-    const actualTargetContractId = await postgresTargetContractId(client, targetRef);
-    if (actualTargetContractId !== targetContractId) {
-      fail('TARGET_CONTRACT_CHANGED', 'Live PostgreSQL target contract changed before content verification', {
-        expectedTargetContractId: targetContractId,
-        actualTargetContractId
+    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    try {
+      const quotedTable = `${quoteIdentifier(targetRef.schema)}.${quoteIdentifier(targetRef.table)}`;
+      await client.query(`LOCK TABLE ${quotedTable} IN ACCESS SHARE MODE`);
+      const actualTargetContractId = await postgresTargetContractId(client, targetRef);
+      if (actualTargetContractId !== targetContractId) {
+        fail('TARGET_CONTRACT_CHANGED', 'Live PostgreSQL target contract changed before content verification', {
+          expectedTargetContractId: targetContractId,
+          actualTargetContractId
+        });
+      }
+      const contract = await discoverVerificationContract(client, targetRef, schema);
+      const normalizedExpectedRows = normalizeExpectedRows(expectedRows, schema);
+      const rawActualRows = await readRows(client, targetRef, normalizedExpectedRows, contract.primaryKey, schema);
+      const normalizedActualRows = normalizeActualRows(rawActualRows, schema);
+      const verification = verifyContentProjection({
+        expectedRows: normalizedExpectedRows,
+        actualRows: normalizedActualRows,
+        primaryKey: contract.primaryKey,
+        columns: schema.map(field => field.name)
       });
+      await client.query('COMMIT');
+      return verification;
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch {}
+      throw error;
     }
-    const contract = await discoverVerificationContract(client, targetRef, schema);
-    const normalizedExpectedRows = normalizeExpectedRows(expectedRows, schema, contract.pgTypes);
-    const rawActualRows = await readRows(client, targetRef, normalizedExpectedRows, contract.primaryKey, schema);
-    const normalizedActualRows = normalizeActualRows(rawActualRows, schema, contract.pgTypes);
-    return verifyContentProjection({
-      expectedRows: normalizedExpectedRows,
-      actualRows: normalizedActualRows,
-      primaryKey: contract.primaryKey,
-      columns: schema.map(field => field.name)
-    });
   });
 }
