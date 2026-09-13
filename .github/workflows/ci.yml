@@ -157,7 +157,7 @@ jobs:
         run: npm ci
       - name: Run real MySQL source and target conformance
         env:
-          SPOOL_TEST_MYSQL_ENDPOINT: mysql://127.0.0.1:3306/
+          SPOOL_TEST_MYSQL_ENDPOINT: mysql://127.0.0.1:3306/?sslmode=disable
           SPOOL_TEST_MYSQL_DATABASE: spooltest
           SPOOL_TEST_MYSQL_USER: spooltest
           SPOOL_TEST_MYSQL_PASSWORD: spooltest-password
