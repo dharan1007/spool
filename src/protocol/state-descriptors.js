@@ -12,12 +12,14 @@ const TARGET_DOMAIN = 'spool-target-state-v1';
 export const SOURCE_STATE_KINDS = Object.freeze({
   FILESYSTEM: 'filesystem-content-v1',
   POSTGRES: 'postgres-mvcc-v1',
-  POSTGRES_DATABASE: 'postgres-database-mvcc-v1'
+  POSTGRES_DATABASE: 'postgres-database-mvcc-v1',
+  MYSQL: 'mysql-mvcc-v1'
 });
 
 export const TARGET_STATE_KINDS = Object.freeze({
   SQLITE: 'sqlite-target-v1',
-  POSTGRES: 'postgres-target-v1'
+  POSTGRES: 'postgres-target-v1',
+  MYSQL: 'mysql-target-v1'
 });
 
 function exactObject(value, allowed, unknownCode, invalidCode, label) {
@@ -215,6 +217,62 @@ export function createPostgresTargetState(input) {
   return buildDescriptor({
     type: 'target',
     kind: TARGET_STATE_KINDS.POSTGRES,
+    domain: TARGET_DOMAIN,
+    state: base
+  });
+}
+
+const MYSQL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function normalizeMysqlRelation(relation, unknownCode, invalidCode, label) {
+  exactObject(relation, new Set(['table']), unknownCode, invalidCode, label);
+  return { table: requiredString(relation.table, invalidCode, `${label}.table`) };
+}
+
+function normalizeMysqlBase(input, { unknownCode, invalidCode, includeSnapshot }) {
+  const allowed = new Set(['serverUuid', 'databaseName', 'serverVersion', 'relation', 'contractId']);
+  if (includeSnapshot) allowed.add('snapshot');
+  exactObject(input, allowed, unknownCode, invalidCode, includeSnapshot ? 'MySQL SourceState' : 'MySQL TargetState');
+  const serverUuid = requiredString(input.serverUuid, invalidCode, 'serverUuid');
+  if (!MYSQL_UUID.test(serverUuid)) fail(invalidCode, 'serverUuid must be a MySQL server UUID');
+  return {
+    serverUuid,
+    databaseName: requiredString(input.databaseName, invalidCode, 'databaseName'),
+    serverVersion: requiredString(input.serverVersion, invalidCode, 'serverVersion'),
+    relation: normalizeMysqlRelation(input.relation, unknownCode, invalidCode, 'relation'),
+    contractId: hashId(input.contractId, invalidCode, 'contractId')
+  };
+}
+
+export function createMysqlSourceState(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) fail('INVALID_SOURCE_STATE', 'MySQL SourceState input must be an object');
+  exactObject(
+    input.snapshot ?? null,
+    new Set(['engine', 'connectionId', 'isolationLevel']),
+    'UNKNOWN_SOURCE_STATE_FIELD',
+    'INVALID_SOURCE_STATE',
+    'snapshot'
+  );
+  if (input.snapshot.engine !== 'innodb-consistent-read') fail('INVALID_SOURCE_STATE', 'snapshot.engine must be innodb-consistent-read');
+  if (typeof input.snapshot.connectionId !== 'string' || !TXID.test(input.snapshot.connectionId)) fail('INVALID_SOURCE_STATE', 'snapshot.connectionId must be a decimal connection ID');
+  if (input.snapshot.isolationLevel !== 'REPEATABLE READ') fail('INVALID_SOURCE_STATE', 'snapshot.isolationLevel must be REPEATABLE READ');
+  const base = normalizeMysqlBase(input, { unknownCode: 'UNKNOWN_SOURCE_STATE_FIELD', invalidCode: 'INVALID_SOURCE_STATE', includeSnapshot: true });
+  return buildDescriptor({
+    type: 'source',
+    kind: SOURCE_STATE_KINDS.MYSQL,
+    domain: SOURCE_DOMAIN,
+    state: {
+      ...base,
+      snapshot: { engine: 'innodb-consistent-read', connectionId: input.snapshot.connectionId, isolationLevel: 'REPEATABLE READ' }
+    }
+  });
+}
+
+export function createMysqlTargetState(input) {
+  const base = normalizeMysqlBase(input, { unknownCode: 'UNKNOWN_TARGET_STATE_FIELD', invalidCode: 'INVALID_TARGET_STATE', includeSnapshot: false });
+  return buildDescriptor({
+    type: 'target',
+    kind: TARGET_STATE_KINDS.MYSQL,
     domain: TARGET_DOMAIN,
     state: base
   });
