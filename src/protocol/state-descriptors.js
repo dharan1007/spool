@@ -13,13 +13,15 @@ export const SOURCE_STATE_KINDS = Object.freeze({
   FILESYSTEM: 'filesystem-content-v1',
   POSTGRES: 'postgres-mvcc-v1',
   POSTGRES_DATABASE: 'postgres-database-mvcc-v1',
-  MYSQL: 'mysql-mvcc-v1'
+  MYSQL: 'mysql-mvcc-v1',
+  MSSQL: 'mssql-mvcc-v1'
 });
 
 export const TARGET_STATE_KINDS = Object.freeze({
   SQLITE: 'sqlite-target-v1',
   POSTGRES: 'postgres-target-v1',
-  MYSQL: 'mysql-target-v1'
+  MYSQL: 'mysql-target-v1',
+  MSSQL: 'mssql-target-v1'
 });
 
 function exactObject(value, allowed, unknownCode, invalidCode, label) {
@@ -273,6 +275,58 @@ export function createMysqlTargetState(input) {
   return buildDescriptor({
     type: 'target',
     kind: TARGET_STATE_KINDS.MYSQL,
+    domain: TARGET_DOMAIN,
+    state: base
+  });
+}
+
+function normalizeMssqlRelation(relation, unknownCode, invalidCode, label) {
+  exactObject(relation, new Set(['table']), unknownCode, invalidCode, label);
+  return { table: requiredString(relation.table, invalidCode, `${label}.table`) };
+}
+
+function normalizeMssqlBase(input, { unknownCode, invalidCode, includeSnapshot }) {
+  const allowed = new Set(['serverName', 'databaseName', 'serverVersion', 'relation', 'contractId']);
+  if (includeSnapshot) allowed.add('snapshot');
+  exactObject(input, allowed, unknownCode, invalidCode, includeSnapshot ? 'SQL Server SourceState' : 'SQL Server TargetState');
+  return {
+    serverName: requiredString(input.serverName, invalidCode, 'serverName'),
+    databaseName: requiredString(input.databaseName, invalidCode, 'databaseName'),
+    serverVersion: requiredString(input.serverVersion, invalidCode, 'serverVersion'),
+    relation: normalizeMssqlRelation(input.relation, unknownCode, invalidCode, 'relation'),
+    contractId: hashId(input.contractId, invalidCode, 'contractId')
+  };
+}
+
+export function createMssqlSourceState(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) fail('INVALID_SOURCE_STATE', 'SQL Server SourceState input must be an object');
+  exactObject(
+    input.snapshot ?? null,
+    new Set(['engine', 'sessionId', 'isolationLevel']),
+    'UNKNOWN_SOURCE_STATE_FIELD',
+    'INVALID_SOURCE_STATE',
+    'snapshot'
+  );
+  if (input.snapshot.engine !== 'snapshot-isolation') fail('INVALID_SOURCE_STATE', 'snapshot.engine must be snapshot-isolation');
+  if (typeof input.snapshot.sessionId !== 'string' || !TXID.test(input.snapshot.sessionId)) fail('INVALID_SOURCE_STATE', 'snapshot.sessionId must be a decimal session ID');
+  if (input.snapshot.isolationLevel !== 'SNAPSHOT') fail('INVALID_SOURCE_STATE', 'snapshot.isolationLevel must be SNAPSHOT');
+  const base = normalizeMssqlBase(input, { unknownCode: 'UNKNOWN_SOURCE_STATE_FIELD', invalidCode: 'INVALID_SOURCE_STATE', includeSnapshot: true });
+  return buildDescriptor({
+    type: 'source',
+    kind: SOURCE_STATE_KINDS.MSSQL,
+    domain: SOURCE_DOMAIN,
+    state: {
+      ...base,
+      snapshot: { engine: 'snapshot-isolation', sessionId: input.snapshot.sessionId, isolationLevel: 'SNAPSHOT' }
+    }
+  });
+}
+
+export function createMssqlTargetState(input) {
+  const base = normalizeMssqlBase(input, { unknownCode: 'UNKNOWN_TARGET_STATE_FIELD', invalidCode: 'INVALID_TARGET_STATE', includeSnapshot: false });
+  return buildDescriptor({
+    type: 'target',
+    kind: TARGET_STATE_KINDS.MSSQL,
     domain: TARGET_DOMAIN,
     state: base
   });
