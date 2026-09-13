@@ -33,6 +33,9 @@ export function validateMigrationPlanInput(input) {
   compileMapping(input.mapping);
   if (!Number.isInteger(input.mappingRevision) || input.mappingRevision < 1) fail('INVALID_MAPPING_REVISION', 'mappingRevision must be >= 1');
   requirePlainObject(input.writeStrategy, 'INVALID_WRITE_STRATEGY', 'writeStrategy must be a plain object');
+  if (input.writeStrategy.bulk !== undefined && typeof input.writeStrategy.bulk !== 'boolean') {
+    fail('INVALID_WRITE_STRATEGY', 'writeStrategy.bulk must be a boolean when supplied');
+  }
   requirePlainObject(input.verification, 'INVALID_VERIFICATION_POLICY', 'verification must be a plain object');
   if (!Array.isArray(input.verification.checks) || input.verification.checks.length === 0 || input.verification.checks.some(check => typeof check !== 'string' || !check)) {
     fail('INVALID_VERIFICATION_POLICY', 'verification.checks must contain at least one named check');

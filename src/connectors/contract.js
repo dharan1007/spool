@@ -20,6 +20,7 @@ const CAPABILITIES = new Set([
     'readAfterWriteVerification',
     'repairExecution',
     'databaseSnapshot',
+    'bulkWrite',
     'continuousChangeCapture'
 ]);
 

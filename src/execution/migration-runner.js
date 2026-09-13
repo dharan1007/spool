@@ -6,6 +6,14 @@ function requireMethod(value, name) {
   if (!value || typeof value[name] !== 'function') fail('INVALID_RUNNER_DEPENDENCY', `${name}() is required`);
 }
 
+function commitBatchFor(target, input) {
+  if (input.bulk === true) {
+    if (typeof target.commitBulkBatch !== 'function') fail('BULK_COMMIT_UNSUPPORTED', 'Target does not implement bulk COPY commit');
+    return target.commitBulkBatch.bind(target);
+  }
+  return target.commitBatch.bind(target);
+}
+
 function batchEvidence(input, described, batchIdentity) {
   return {
     batchIdentity,
@@ -107,7 +115,7 @@ export class MigrationRunner {
       result = reconciliation;
       recovered = true;
     } else if (reconciliation.status === 'NOT_COMMITTED') {
-      result = this.target.commitBatch({ ...input, batchIdentity });
+      result = commitBatchFor(this.target, input)({ ...input, batchIdentity });
       if (result.status !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'Target did not return exact commit evidence');
       if (faultAfterTargetCommit) {
         fail('FAULT_AFTER_TARGET_COMMIT', 'Injected crash after target commit and before checkpoint persistence', { batchIdentity });
@@ -139,7 +147,7 @@ export class MigrationRunner {
       result = reconciliation;
       recovered = true;
     } else if (reconciliation.status === 'NOT_COMMITTED') {
-      result = await this.target.commitBatch({ ...input, batchIdentity });
+      result = await commitBatchFor(this.target, input)({ ...input, batchIdentity });
       if (result.status !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'Target did not return exact commit evidence');
       if (faultAfterTargetCommit) {
         fail('FAULT_AFTER_TARGET_COMMIT', 'Injected crash after target commit and before checkpoint persistence', { batchIdentity });

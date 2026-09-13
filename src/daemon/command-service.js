@@ -88,6 +88,17 @@ function sameExecutionSummary(left, right) {
   return left.processedRows === right.processedRows && left.validRows === right.validRows && left.invalidRows === right.invalidRows;
 }
 
+function requiresBulkWrite(plan) {
+  return plan?.writeStrategy?.bulk === true;
+}
+
+function assertBulkWriteCapability(plan, targetRuntime) {
+  if (!requiresBulkWrite(plan)) return;
+  if (targetRuntime?.descriptor?.capabilities?.bulkWrite !== true) {
+    fail('BULK_WRITE_CAPABILITY_REQUIRED', 'Target connector cannot execute bulk COPY writes');
+  }
+}
+
 function repairApprovalEffects(connector) {
   if (typeof connector !== 'string' || !connector) fail('INVALID_TARGET_REF', 'targetRef.connector is required');
   return Object.freeze([`${connector}:apply_repair`, `${connector}:read_after_write_verify`].sort());
@@ -208,6 +219,7 @@ export class SpoolCommandService {
     const plan = await createMigrationPlan(input);
     if (!plan.risk.approvals.includes('target_write')) fail('TARGET_WRITE_APPROVAL_REQUIRED', 'Production target mutations require target_write in plan.risk.approvals');
     assertContentVerificationCapability(plan, targetRuntime);
+    assertBulkWriteCapability(plan, targetRuntime);
     const targetPreflight = await targetRuntime.preflight(plan);
     return {
       request, plan, snapshot: source.snapshot, source, sourceRows: source.sourceRows,
@@ -345,7 +357,7 @@ export class SpoolCommandService {
             migrationId: request.migrationId, planId: plan.planId, sourceSnapshotId: snapshot.snapshotId,
             mappingRevision: plan.mappingRevision, sourceRange: { start: sourceRangeStart, endExclusive: sourceRangeEnd },
             targetIdentity: plan.targetRef, targetContractId: targetPreflight.targetContractId, rows: batchRows,
-            fencingToken: lease.fencingToken
+            fencingToken: lease.fencingToken, bulk: plan.writeStrategy.bulk === true
           });
           batchRows = [];
         }

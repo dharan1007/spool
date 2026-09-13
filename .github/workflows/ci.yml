@@ -30,8 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -72,8 +72,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -107,8 +107,8 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -121,7 +121,7 @@ jobs:
           SPOOL_TEST_POSTGRES_USER: spooltest
           SPOOL_TEST_PG_PASSWORD: spooltest-password
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: node --test --test-concurrency=1 tests/conformance/postgres-conformance.test.js tests/conformance/postgres-source-conformance.test.js tests/conformance/postgres-command-source-conformance.test.js tests/conformance/postgres-command-recovery-conformance.test.js tests/conformance/postgres-metadata-concurrency.test.js tests/conformance/postgres-content-verification.test.js tests/conformance/postgres-repair-conformance.test.js tests/conformance/postgres-database-source-conformance.test.js
+        run: node --test --test-concurrency=1 tests/conformance/postgres-conformance.test.js tests/conformance/postgres-source-conformance.test.js tests/conformance/postgres-command-source-conformance.test.js tests/conformance/postgres-command-recovery-conformance.test.js tests/conformance/postgres-metadata-concurrency.test.js tests/conformance/postgres-content-verification.test.js tests/conformance/postgres-repair-conformance.test.js tests/conformance/postgres-database-source-conformance.test.js tests/conformance/postgres-bulk-conformance.test.js
       - name: Qualify durable PostgreSQL materialization beyond the former 256 MiB ceiling
         env:
           SPOOL_TEST_POSTGRES_ENDPOINT: postgresql://127.0.0.1:5432/?sslmode=disable
@@ -143,12 +143,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout exact requested commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 0
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
