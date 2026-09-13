@@ -1,5 +1,6 @@
 import { fail } from '../../core/errors.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
+import { from as copyFrom } from 'pg-copy-streams';
 import { normalizePostgresRow, normalizePostgresSchema, normalizePostgresValue, postgresContentKeyId, postgresContentRowHash } from './row-codec.js';
 import { withPostgresClient } from './connection.js';
 import { POSTGRES_METADATA_SCHEMA, postgresTargetContractId } from './preflight.js';
@@ -268,8 +269,8 @@ function requireRepairOperation(operation, primaryKey, schema) {
   return { effect, keyId, key, columns, normalized, precondition };
 }
 
-async function checkRepairFence(client, target, fencingToken) {
-  if (target.requireFencing && (!Number.isSafeInteger(fencingToken) || fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL repair requires a fencing token');
+async function checkRepairFence(client, target, fencingToken, operation = 'repair') {
+  if (target.requireFencing && (!Number.isSafeInteger(fencingToken) || fencingToken < 1)) fail('FENCE_REQUIRED', `Production PostgreSQL ${operation} requires a fencing token`);
   if (!target.requireFencing) return;
   const fenceResult = await client.query(`
     SELECT owner, fencing_token::text AS fencing_token,
@@ -281,23 +282,85 @@ async function checkRepairFence(client, target, fencingToken) {
   const fence = fenceResult.rows[0] ?? null;
   if (!fence || Number(fence.fencing_token) !== fencingToken || fence.owner !== target.fenceOwner) {
     await client.query('ROLLBACK');
-    fail('STALE_FENCE', 'PostgreSQL repair fencing token is stale', { resource: target.fenceResource, expected: fence?.fencing_token ?? null, actual: fencingToken });
+    fail('STALE_FENCE', `PostgreSQL ${operation} fencing token is stale`, { resource: target.fenceResource, expected: fence?.fencing_token ?? null, actual: fencingToken });
   }
   if (fence.active !== true) {
     await client.query('ROLLBACK');
-    fail('LEASE_EXPIRED', 'PostgreSQL repair lease has expired', { resource: target.fenceResource, fencingToken });
+    fail('LEASE_EXPIRED', `PostgreSQL ${operation} lease has expired`, { resource: target.fenceResource, fencingToken });
   }
 }
 
-async function checkRepairContract(client, target, targetContractId) {
+async function checkRepairContract(client, target, targetContractId, operation = 'repair') {
   if (targetContractId == null) return;
   requiredHash('targetContractId', targetContractId);
   const actualTargetContractId = await postgresTargetContractId(client, target.targetRef);
   if (actualTargetContractId !== targetContractId) {
     await client.query('ROLLBACK');
-    fail('TARGET_CONTRACT_CHANGED', 'Live PostgreSQL target contract changed before repair', { expectedTargetContractId: targetContractId, actualTargetContractId });
+    fail('TARGET_CONTRACT_CHANGED', `Live PostgreSQL target contract changed before ${operation}`, { expectedTargetContractId: targetContractId, actualTargetContractId });
   }
 }
+
+async function findLedgerEntry(client, targetRef, batchIdentity) {
+  const result = await client.query(`
+    SELECT batch_identity, migration_id, plan_id, source_snapshot_id, mapping_revision,
+           row_count, payload_hash, target_database, target_schema, target_table, committed_at
+    FROM ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
+    WHERE batch_identity = $1
+    FOR UPDATE
+  `, [batchIdentity]);
+  return result.rows[0] ?? null;
+}
+
+async function insertLedgerEntry(client, targetRef, evidence) {
+  await client.query(`
+    INSERT INTO ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
+      (batch_identity, migration_id, plan_id, source_snapshot_id, mapping_revision,
+       row_count, payload_hash, target_database, target_schema, target_table)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+  `, [
+    evidence.batchIdentity, evidence.migrationId, evidence.planId, evidence.sourceSnapshotId,
+    evidence.mappingRevision, evidence.rowCount, evidence.payloadHash,
+    targetRef.database, targetRef.schema, targetRef.table
+  ]);
+}
+function encodeCopyField(value) {
+  if (value === null || value === undefined) return '';
+  let text;
+  if (typeof value === 'bigint') text = value.toString();
+  else if (typeof value === 'number') {
+    if (!Number.isFinite(value)) fail('UNSUPPORTED_POSTGRES_VALUE', 'Non-finite PostgreSQL number cannot be bulk-loaded');
+    text = String(value);
+  }
+  else if (typeof value === 'boolean') text = value ? 'true' : 'false';
+  else if (typeof value === 'string') text = value;
+  else if (value instanceof Uint8Array) text = `\\x${Buffer.from(value).toString('hex')}`;
+  else fail('UNSUPPORTED_POSTGRES_VALUE', 'Unsupported PostgreSQL value for bulk load');
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+async function copyRows(client, targetRef, columns, rows) {
+  if (!rows.length) return;
+  const quotedTable = `${quoteIdentifier(targetRef.schema)}.${quoteIdentifier(targetRef.table)}`;
+  const quotedColumns = columns.map(quoteIdentifier).join(', ');
+  const stream = client.query(copyFrom(`COPY ${quotedTable} (${quotedColumns}) FROM STDIN WITH (FORMAT CSV)`));
+  const CHUNK_ROWS = 1000;
+  let offset = 0;
+  await new Promise((resolve, reject) => {
+    stream.on('finish', resolve);
+    stream.on('error', reject);
+    (function pump() {
+      let ok = true;
+      while (offset < rows.length && ok) {
+        const chunk = rows.slice(offset, offset + CHUNK_ROWS);
+        offset += chunk.length;
+        ok = stream.write(`${chunk.map(row => columns.map(column => encodeCopyField(row[column])).join(',')).join('\n')}\n`);
+      }
+      if (offset >= rows.length) stream.end();
+      else stream.once('drain', pump);
+    })();
+  });
+}
+
 async function insertRows(client, targetRef, columns, rows) {
   if (!rows.length) return;
   const quotedTable = `${quoteIdentifier(targetRef.schema)}.${quoteIdentifier(targetRef.table)}`;
@@ -376,41 +439,12 @@ export class PostgresTarget {
       await client.query('BEGIN');
       try {
         if (this.requireFencing) {
-          const fenceResult = await client.query(`
-            SELECT owner, fencing_token::text AS fencing_token,
-                   expires_at > clock_timestamp() AS active
-            FROM ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEASE_TABLE)}
-            WHERE resource = $1
-            FOR UPDATE
-          `, [this.fenceResource]);
-          const fence = fenceResult.rows[0] ?? null;
-          if (!fence || Number(fence.fencing_token) !== input.fencingToken || fence.owner !== this.fenceOwner) {
-            await client.query('ROLLBACK');
-            return { kind: 'STALE_FENCE', actual: fence?.fencing_token ?? null };
-          }
-          if (fence.active !== true) {
-            await client.query('ROLLBACK');
-            return { kind: 'LEASE_EXPIRED' };
-          }
+          await checkRepairFence(client, this, input.fencingToken, 'mutation');
         }
 
-        if (input.targetContractId != null) {
-          requiredHash('targetContractId', input.targetContractId);
-          const actualTargetContractId = await postgresTargetContractId(client, this.targetRef);
-          if (actualTargetContractId !== input.targetContractId) {
-            await client.query('ROLLBACK');
-            return { kind: 'TARGET_CONTRACT_CHANGED', actualTargetContractId };
-          }
-        }
+        await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
 
-        const existingResult = await client.query(`
-          SELECT batch_identity, migration_id, plan_id, source_snapshot_id, mapping_revision,
-                 row_count, payload_hash, target_database, target_schema, target_table, committed_at
-          FROM ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
-          WHERE batch_identity = $1
-          FOR UPDATE
-        `, [evidence.batchIdentity]);
-        const existing = existingResult.rows[0] ?? null;
+        const existing = await findLedgerEntry(client, this.targetRef, evidence.batchIdentity);
         if (existing) {
           if (!ledgerMatches(existing, evidence, this.targetRef)) {
             await client.query('ROLLBACK');
@@ -421,16 +455,7 @@ export class PostgresTarget {
         }
 
         await insertRows(client, this.targetRef, columns, rows);
-        await client.query(`
-          INSERT INTO ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
-            (batch_identity, migration_id, plan_id, source_snapshot_id, mapping_revision,
-             row_count, payload_hash, target_database, target_schema, target_table)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-        `, [
-          evidence.batchIdentity, evidence.migrationId, evidence.planId, evidence.sourceSnapshotId,
-          evidence.mappingRevision, evidence.rowCount, evidence.payloadHash,
-          this.targetRef.database, this.targetRef.schema, this.targetRef.table
-        ]);
+        await insertLedgerEntry(client, this.targetRef, evidence);
         await client.query('COMMIT');
         return { kind: 'COMMITTED_EXACT', alreadyCommitted: false };
       } catch (error) {
@@ -439,11 +464,52 @@ export class PostgresTarget {
       }
     });
 
-    if (result.kind === 'STALE_FENCE') fail('STALE_FENCE', 'PostgreSQL mutation fencing token is stale', { resource: this.fenceResource, expected: result.actual, actual: input.fencingToken });
-    if (result.kind === 'LEASE_EXPIRED') fail('LEASE_EXPIRED', 'PostgreSQL mutation lease has expired', { resource: this.fenceResource, fencingToken: input.fencingToken });
-    if (result.kind === 'TARGET_CONTRACT_CHANGED') fail('TARGET_CONTRACT_CHANGED', 'Live PostgreSQL target contract changed after planning/approval', { expectedTargetContractId: input.targetContractId, actualTargetContractId: result.actualTargetContractId });
     if (result.kind === 'BATCH_IDENTITY_CONFLICT') fail('BATCH_IDENTITY_CONFLICT', 'Batch identity is already committed with different evidence', { batchIdentity: evidence.batchIdentity });
     if (result.kind !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL target did not return exact commit evidence');
+    return Object.freeze({
+      status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
+      batchIdentity: evidence.batchIdentity, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash
+    });
+  }
+
+  async commitBulkBatch(input = {}) {
+    this.#assertOpen();
+    const rows = input.rows;
+    const columns = validateRows(rows);
+    const described = postgresPayloadEvidence(rows);
+    const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
+
+    const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
+      await client.query('BEGIN');
+      try {
+        if (this.requireFencing) {
+          await checkRepairFence(client, this, input.fencingToken, 'bulk copy');
+        }
+
+        await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
+
+        const existing = await findLedgerEntry(client, this.targetRef, evidence.batchIdentity);
+        if (existing) {
+          if (!ledgerMatches(existing, evidence, this.targetRef)) {
+            await client.query('ROLLBACK');
+            return { kind: 'BATCH_IDENTITY_CONFLICT' };
+          }
+          await client.query('COMMIT');
+          return { kind: 'COMMITTED_EXACT', alreadyCommitted: true };
+        }
+
+        await copyRows(client, this.targetRef, columns, rows);
+        await insertLedgerEntry(client, this.targetRef, evidence);
+        await client.query('COMMIT');
+        return { kind: 'COMMITTED_EXACT', alreadyCommitted: false };
+      } catch (error) {
+        try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
+        throw error;
+      }
+    });
+
+    if (result.kind === 'BATCH_IDENTITY_CONFLICT') fail('BATCH_IDENTITY_CONFLICT', 'Batch identity is already committed with different evidence', { batchIdentity: evidence.batchIdentity });
+    if (result.kind !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL target did not return exact bulk commit evidence');
     return Object.freeze({
       status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
       batchIdentity: evidence.batchIdentity, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash

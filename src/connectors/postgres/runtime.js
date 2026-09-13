@@ -24,7 +24,8 @@ export const POSTGRES_TARGET_DESCRIPTOR = validateConnectorDescriptor({
     targetContractBinding: true,
     exactCommitEvidence: true,
     readAfterWriteVerification: true,
-    repairExecution: true
+    repairExecution: true,
+    bulkWrite: true
   }
 });
 
@@ -66,6 +67,10 @@ function requiresContentVerification(plan) {
   return Array.isArray(plan?.verification?.checks) && plan.verification.checks.includes('content_exact');
 }
 
+function requiresBulkWrite(plan) {
+  return plan?.writeStrategy?.bulk === true;
+}
+
 function approvalEffects(plan) {
   const approvals = Array.isArray(plan?.risk?.approvals) ? plan.risk.approvals : [];
   return Object.freeze([
@@ -73,6 +78,7 @@ function approvalEffects(plan) {
     'postgres:write_batch_ledger',
     'postgres:manage_internal_metadata',
     ...(requiresContentVerification(plan) ? ['postgres:read_after_write_verify'] : []),
+    ...(requiresBulkWrite(plan) ? ['postgres:bulk_copy_write'] : []),
     ...approvals.map(value => `approval:${value}`)
   ].sort());
 }
