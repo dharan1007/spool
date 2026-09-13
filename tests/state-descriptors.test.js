@@ -6,8 +6,10 @@ import {
   createFilesystemSourceState,
   createPostgresSourceState,
   createPostgresDatabaseSourceState,
+  createMysqlSourceState,
   createSqliteTargetState,
   createPostgresTargetState,
+  createMysqlTargetState,
   assertSourceStateBinding,
   assertTargetStateBinding
 } from '../src/protocol/state-descriptors.js';
@@ -197,5 +199,53 @@ test('PostgreSQL database SourceState rejects per-table material and unsafe iden
   assert.throws(
     () => createPostgresDatabaseSourceState({ ...dbBase(), snapshot: { exportedSnapshotId: 'bogus', xmin: '912', xmax: '940', xip: [] } }),
     error => error?.code === 'INVALID_SOURCE_STATE'
+  );
+});
+
+const mysqlBase = () => ({
+  serverUuid: '8ded5546-9c9a-11ef-9a9a-0242ac120002',
+  databaseName: 'spooltest',
+  serverVersion: '8.0.36',
+  relation: { table: 'orders' },
+  contractId: HASH('e')
+});
+
+test('MySQL source and target states bind server, database and snapshot identity', () => {
+  const source = createMysqlSourceState({
+    ...mysqlBase(),
+    snapshot: { engine: 'innodb-consistent-read', trxId: '4213', isolationLevel: 'REPEATABLE READ' }
+  });
+  const target = createMysqlTargetState(mysqlBase());
+  assert.equal(source.kind, SOURCE_STATE_KINDS.MYSQL);
+  assert.equal(target.kind, TARGET_STATE_KINDS.MYSQL);
+  assert.match(source.sourceStateId, /^sha256:[a-f0-9]{64}$/);
+  assert.match(target.targetStateId, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(source.sourceStateId, createMysqlSourceState({
+    ...mysqlBase(),
+    snapshot: { engine: 'innodb-consistent-read', trxId: '4213', isolationLevel: 'REPEATABLE READ' }
+  }).sourceStateId);
+  assert.notEqual(source.sourceStateId, createMysqlSourceState({
+    ...mysqlBase(),
+    snapshot: { engine: 'innodb-consistent-read', trxId: '4214', isolationLevel: 'REPEATABLE READ' }
+  }).sourceStateId);
+  assert.equal(assertSourceStateBinding(source, source), true);
+});
+
+test('MySQL states reject foreign dialects and unsafe identity material', () => {
+  assert.throws(
+    () => createMysqlSourceState({ ...mysqlBase(), serverUuid: '7429931746381247331', snapshot: { engine: 'innodb-consistent-read', trxId: '1', isolationLevel: 'REPEATABLE READ' } }),
+    error => error?.code === 'INVALID_SOURCE_STATE'
+  );
+  assert.throws(
+    () => createMysqlSourceState({ ...mysqlBase(), snapshot: { engine: 'pg-snapshot', trxId: '1', isolationLevel: 'REPEATABLE READ' } }),
+    error => error?.code === 'INVALID_SOURCE_STATE'
+  );
+  assert.throws(
+    () => createMysqlSourceState({ ...mysqlBase(), relation: { schema: 'public', table: 'orders' }, snapshot: { engine: 'innodb-consistent-read', trxId: '1', isolationLevel: 'REPEATABLE READ' } }),
+    error => error?.code === 'UNKNOWN_SOURCE_STATE_FIELD'
+  );
+  assert.throws(
+    () => createMysqlTargetState({ ...mysqlBase(), relation: { schema: 'public', table: 'orders', relid: 1 } }),
+    error => error?.code === 'UNKNOWN_TARGET_STATE_FIELD'
   );
 });

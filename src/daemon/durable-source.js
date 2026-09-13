@@ -7,6 +7,7 @@ import {
 import { inspectCsvStream, streamCsvRows } from '../connectors/filesystem/stream-csv.js';
 import { loadMaterializedSnapshot, streamMaterializedRows } from '../connectors/materialized-snapshot.js';
 import { createPostgresSourceRuntime } from '../connectors/postgres/source.js';
+import { createMysqlSourceRuntime } from '../connectors/mysql/source.js';
 
 const DEFAULT_SAMPLE_SIZE = 1000;
 
@@ -29,13 +30,15 @@ export function createDurableSourceCoordinator({
   credentialBroker,
   maxSourceBytes,
   sampleSize = DEFAULT_SAMPLE_SIZE,
-  postgresRuntime = null
+  postgresRuntime = null,
+  mysqlRuntime = null
 } = {}) {
   if (!sourcePolicy || typeof sourcePolicy.resolve !== 'function') fail('INVALID_SERVICE_CONFIG', 'sourcePolicy.resolve() is required');
   if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_SERVICE_CONFIG', 'credentialBroker.withSecret() is required');
   if (!Number.isSafeInteger(maxSourceBytes) || maxSourceBytes <= 0) fail('INVALID_SERVICE_CONFIG', 'maxSourceBytes must be a positive safe integer');
   if (!Number.isSafeInteger(sampleSize) || sampleSize < 1) fail('INVALID_SERVICE_CONFIG', 'sampleSize must be a positive safe integer');
   const pg = postgresRuntime ?? createPostgresSourceRuntime({ credentialBroker });
+  const my = mysqlRuntime ?? createMysqlSourceRuntime({ credentialBroker });
 
   async function prepareFilesystem(sourceRef, { snapshotDir, expectedSourceSnapshotId }) {
     if (sourceRef.secretRef) fail('UNSUPPORTED_LOCAL_CONNECTOR_SECRET', 'Filesystem source does not accept credentials');
@@ -103,12 +106,48 @@ export function createDurableSourceCoordinator({
     });
   }
 
+  async function prepareMysql(sourceRef, { snapshotDir, expectedSourceSnapshotId }) {
+    let materialized;
+    if (expectedSourceSnapshotId) {
+      materialized = await loadMaterializedSnapshot({ snapshotDir, snapshotId: expectedSourceSnapshotId });
+      if (materialized.snapshot.sourceIdentity?.connector !== 'mysql') {
+        fail('SOURCE_SNAPSHOT_CORRUPT', 'Approved materialized snapshot is not a MySQL source');
+      }
+    } else {
+      materialized = await my.materializeSnapshot(sourceRef, { snapshotDir });
+    }
+    const manifest = materialized.snapshot;
+    if (manifest.rowCount === 0) fail('EMPTY_SOURCE', 'MySQL source must contain at least one row');
+    const headers = manifest.contract?.columns?.map(column => column.name);
+    if (!Array.isArray(headers) || !headers.length || headers.some(name => typeof name !== 'string' || !name)) {
+      fail('SOURCE_SNAPSHOT_CORRUPT', 'Materialized MySQL snapshot has an invalid source contract');
+    }
+    const sampleRows = await collectMaterializedSample(materialized, sampleSize);
+    return Object.freeze({
+      connector: 'mysql',
+      sourceRef: Object.freeze(structuredClone(sourceRef)),
+      snapshot: manifest,
+      sourceRows: manifest.rowCount,
+      sourceBytes: manifest.byteCount,
+      sourceHeaders: Object.freeze([...headers]),
+      sampleRows,
+      sourcePath: null,
+      verify: async () => {
+        const verified = await loadMaterializedSnapshot({ snapshotDir, snapshotId: manifest.snapshotId });
+        if (verified.snapshot.snapshotId !== manifest.snapshotId) fail('SOURCE_DRIFT', 'Materialized MySQL snapshot identity changed');
+        return true;
+      },
+      streamRows: () => streamMaterializedRows(materialized)
+    });
+  }
+
   return Object.freeze({
     async prepare(sourceRefInput, { snapshotDir, expectedSourceSnapshotId = null } = {}) {
       const sourceRef = requireObject(sourceRefInput, 'INVALID_SOURCE_REF', 'sourceRef is required');
       if (typeof snapshotDir !== 'string' || !snapshotDir.trim()) fail('INVALID_SNAPSHOT_DIR', 'snapshotDir is required');
       if (sourceRef.connector === 'filesystem') return prepareFilesystem(sourceRef, { snapshotDir, expectedSourceSnapshotId });
       if (sourceRef.connector === 'postgres') return preparePostgres(sourceRef, { snapshotDir, expectedSourceSnapshotId });
+      if (sourceRef.connector === 'mysql') return prepareMysql(sourceRef, { snapshotDir, expectedSourceSnapshotId });
       fail('UNSUPPORTED_SOURCE_CONNECTOR', `Unsupported source connector ${String(sourceRef.connector)}`);
     }
   });

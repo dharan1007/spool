@@ -12,6 +12,10 @@ import {
   POSTGRES_TARGET_DESCRIPTOR,
   createPostgresTargetRuntime
 } from '../connectors/postgres/runtime.js';
+import {
+  MYSQL_TARGET_DESCRIPTOR,
+  createMysqlTargetRuntime
+} from '../connectors/mysql/runtime.js';
 import { createPathPolicy } from '../platform/path-policy.js';
 import { canonicalJson } from '../platform/canonical-json.js';
 import { connectorIdentity } from '../platform/contracts.js';
@@ -156,8 +160,13 @@ export class SpoolCommandService {
       credentialBroker,
       leaseTtlMs: options.postgresLeaseTtlMs
     });
+    const mysqlTargetRuntime = createMysqlTargetRuntime({
+      credentialBroker,
+      leaseTtlMs: options.mysqlLeaseTtlMs
+    });
     targetConnectors.register(SQLITE_TARGET_DESCRIPTOR, async () => sqliteTargetRuntime);
     targetConnectors.register(POSTGRES_TARGET_DESCRIPTOR, async () => postgresTargetRuntime);
+    targetConnectors.register(MYSQL_TARGET_DESCRIPTOR, async () => mysqlTargetRuntime);
 
     return new SpoolCommandService({
       sourcePolicy,

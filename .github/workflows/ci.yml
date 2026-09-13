@@ -133,10 +133,41 @@ jobs:
           SPOOL_QUALIFICATION_MAX_RSS_BYTES: '536870912'
         run: node scripts/qualify-postgres-materialization.js
 
+  mysql-conformance:
+    name: mysql-production-conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: mysql-root-password
+          MYSQL_DATABASE: spooltest
+          MYSQL_USER: spooltest
+          MYSQL_PASSWORD: spooltest-password
+        ports:
+          - 3306:3306
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exactly from committed lockfile
+        run: npm ci
+      - name: Run real MySQL source and target conformance
+        env:
+          SPOOL_TEST_MYSQL_ENDPOINT: mysql://127.0.0.1:3306/
+          SPOOL_TEST_MYSQL_DATABASE: spooltest
+          SPOOL_TEST_MYSQL_USER: spooltest
+          SPOOL_TEST_MYSQL_PASSWORD: spooltest-password
+          SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node --test --test-concurrency=1 tests/conformance/mysql-source-conformance.test.js tests/conformance/mysql-target-conformance.test.js
+
   release:
     name: publish-release
     if: github.event_name == 'workflow_dispatch' && inputs.release == true
-    needs: [verify, sqlite-portability, postgres-conformance]
+    needs: [verify, sqlite-portability, postgres-conformance, mysql-conformance]
     permissions:
       contents: write
     runs-on: ubuntu-latest
