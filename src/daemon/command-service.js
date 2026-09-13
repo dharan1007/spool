@@ -3,12 +3,6 @@ import { join, resolve } from 'node:path';
 import { fail } from '../core/errors.js';
 import { inferSchema } from '../core/schema.js';
 import { MigrationEngine } from '../core/migration.js';
-import {
-  createDurableFileSnapshot,
-  loadDurableFileSnapshot,
-  verifyFileAgainstSnapshot
-} from '../connectors/source-snapshot.js';
-import { inspectCsvStream, streamCsvRows } from '../connectors/filesystem/stream-csv.js';
 import { ConnectorRegistry } from '../connectors/registry.js';
 import {
   SQLITE_TARGET_DESCRIPTOR,
@@ -28,6 +22,7 @@ import { MigrationRunner } from '../execution/migration-runner.js';
 import { verifyMigration } from '../execution/verify.js';
 import { createMigrationReceipt } from '../execution/receipt.js';
 import { CredentialBroker } from './credential-broker.js';
+import { createDurableSourceCoordinator } from './durable-source.js';
 import { RunStore } from './run-store.js';
 
 const MIGRATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -82,6 +77,12 @@ export class SpoolCommandService {
     const sourcePolicy = await createPathPolicy(options.sourceRoot);
     const credentialBroker = options.credentialBroker ?? new CredentialBroker();
     if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_SERVICE_CONFIG', 'credentialBroker.withSecret() is required');
+    const sourceCoordinator = createDurableSourceCoordinator({
+      sourcePolicy,
+      credentialBroker,
+      maxSourceBytes,
+      sampleSize: INFERENCE_SAMPLE_SIZE
+    });
 
     const targetConnectors = new ConnectorRegistry();
     const sqliteTargetRuntime = await createSqliteTargetRuntime({ targetRoot: options.targetRoot });
@@ -94,6 +95,7 @@ export class SpoolCommandService {
 
     return new SpoolCommandService({
       sourcePolicy,
+      sourceCoordinator,
       targetConnectors,
       statePath: options.statePath,
       snapshotRoot,
@@ -106,8 +108,9 @@ export class SpoolCommandService {
     });
   }
 
-  constructor({ sourcePolicy, targetConnectors, statePath, snapshotRoot, approvalSigningKey, maxSourceBytes, release }) {
+  constructor({ sourcePolicy, sourceCoordinator, targetConnectors, statePath, snapshotRoot, approvalSigningKey, maxSourceBytes, release }) {
     this.sourcePolicy = sourcePolicy;
+    this.sourceCoordinator = sourceCoordinator;
     this.targetConnectors = targetConnectors;
     this.snapshotRoot = snapshotRoot;
     this.approvalSigningKey = approvalSigningKey;
@@ -148,33 +151,13 @@ export class SpoolCommandService {
   async #prepare(request, { expectedSourceSnapshotId = null } = {}) {
     this.#open(); requireRequest(request);
     let input = structuredClone(request.planInput);
-    if (input.sourceRef?.connector !== 'filesystem') fail('UNSUPPORTED_SOURCE_CONNECTOR', 'Gate B supports filesystem CSV sources only');
-    if (input.sourceRef.secretRef) fail('UNSUPPORTED_LOCAL_CONNECTOR_SECRET', 'Filesystem Gate B source does not accept credentials');
-
     const targetRuntime = await this.#openTargetRuntime(input.targetRef);
-
-    let sourcePath;
-    try {
-      sourcePath = await this.sourcePolicy.resolve(input.sourceRef.path ?? input.sourceRef.resource);
-    } catch (error) {
-      if (expectedSourceSnapshotId && error?.code === 'PATH_NOT_FOUND') {
-        fail('SOURCE_CHANGED', 'Source file is no longer available at the approved path');
-      }
-      throw error;
-    }
-
-    input.sourceRef.path = sourcePath;
-    input = await targetRuntime.normalizePlanInput(input);
-
-    const snapshotDir = this.#migrationSnapshotDir(request.migrationId);
-    const durable = expectedSourceSnapshotId
-      ? await loadDurableFileSnapshot(sourcePath, { snapshotDir, snapshotId: expectedSourceSnapshotId, maxBytes: this.maxSourceBytes })
-      : await createDurableFileSnapshot(sourcePath, { snapshotDir, maxBytes: this.maxSourceBytes });
-    const streamed = await inspectCsvStream(durable.snapshotPath, {
-      sampleSize: INFERENCE_SAMPLE_SIZE,
-      maxInputBytes: this.maxSourceBytes
+    const source = await this.sourceCoordinator.prepare(input.sourceRef, {
+      snapshotDir: this.#migrationSnapshotDir(request.migrationId),
+      expectedSourceSnapshotId
     });
-    if (streamed.rowCount === 0) fail('EMPTY_SOURCE', 'CSV source must contain at least one data row');
+    input.sourceRef = structuredClone(source.sourceRef);
+    input = await targetRuntime.normalizePlanInput(input);
 
     const plan = await createMigrationPlan(input);
     if (!plan.risk.approvals.includes('target_write')) {
@@ -184,12 +167,12 @@ export class SpoolCommandService {
     return {
       request,
       plan,
-      snapshot: durable.snapshot,
-      snapshotPath: durable.snapshotPath,
-      sourceRows: streamed.rowCount,
-      sourceHeaders: streamed.headers,
-      sampleRows: streamed.sampleRows,
-      sourcePath,
+      snapshot: source.snapshot,
+      source,
+      sourceRows: source.sourceRows,
+      sourceHeaders: source.sourceHeaders,
+      sampleRows: source.sampleRows,
+      sourcePath: source.sourcePath,
       targetRuntime,
       targetPreflight
     };
@@ -200,7 +183,7 @@ export class SpoolCommandService {
     return Object.freeze({
       migrationId: request.migrationId,
       sourceRows: prepared.sourceRows,
-      sourceBytes: prepared.snapshot.size,
+      sourceBytes: prepared.source.sourceBytes,
       sourceSnapshotId: prepared.snapshot.snapshotId,
       sourceSchema: Object.freeze(inferSchema(prepared.sampleRows).map(field => Object.freeze({ ...field }))),
       target: Object.freeze(connectorIdentity(prepared.plan.targetRef)),
@@ -211,7 +194,7 @@ export class SpoolCommandService {
         indexes: prepared.targetPreflight.indexes,
         foreignKeys: prepared.targetPreflight.foreignKeys
       }),
-      maxSourceBytes: this.maxSourceBytes
+      maxSourceBytes: prepared.source.connector === 'filesystem' ? this.maxSourceBytes : null
     });
   }
 
@@ -222,7 +205,7 @@ export class SpoolCommandService {
   async dryRun(request) {
     const prepared = await this.#prepare(request);
     const accumulator = new MigrationEngine().createAccumulator(prepared.plan.mapping, prepared.plan.mappingRevision, prepared.plan.targetSchema);
-    for await (const { rowIndex, row } of streamCsvRows(prepared.snapshotPath, { maxInputBytes: this.maxSourceBytes })) {
+    for await (const { rowIndex, row } of prepared.source.streamRows()) {
       accumulator.process(row, rowIndex);
     }
     const result = accumulator.summary();
@@ -263,7 +246,7 @@ export class SpoolCommandService {
     const current = this.runs.get(request.migrationId);
     const expectedSourceSnapshotId = current?.status === 'COMPLETE' ? null : (approval?.record?.sourceSnapshotId ?? null);
     const prepared = await this.#prepare(request, { expectedSourceSnapshotId });
-    const { plan, snapshot, snapshotPath, sourceRows, targetRuntime, targetPreflight } = prepared;
+    const { plan, snapshot, source, sourceRows, targetRuntime, targetPreflight } = prepared;
     const targetIdentity = connectorIdentity(plan.targetRef);
 
     if (current?.status === 'COMPLETE') {
@@ -291,9 +274,8 @@ export class SpoolCommandService {
       { signingKey: this.approvalSigningKey }
     );
 
-    // Execute only the bytes represented by the bound approval. If the user's original
-    // file changed since approval, fail before acquiring a target write lease.
-    await verifyFileAgainstSnapshot(snapshot);
+    // Revalidate the exact approved durable source before acquiring a target write lease.
+    await source.verify();
 
     const startedAt = current?.startedAt ?? new Date().toISOString();
     const targetExecution = await targetRuntime.createExecution({
@@ -347,7 +329,7 @@ export class SpoolCommandService {
 
       let batchRows = [];
       let lastSeenRow = -1;
-      for await (const { rowIndex, row } of streamCsvRows(snapshotPath, { maxInputBytes: this.maxSourceBytes })) {
+      for await (const { rowIndex, row } of source.streamRows()) {
         lastSeenRow = rowIndex;
         const transformed = accumulator.process(row, rowIndex);
         const sourceRangeStart = Math.floor(rowIndex / batchSize) * batchSize;
