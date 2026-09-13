@@ -1,5 +1,6 @@
 import { fail } from '../core/errors.js';
 import { canonicalJson, sha256Canonical } from '../platform/canonical-json.js';
+import { merkleRoot } from './merkle.js';
 
 const KEY_DOMAIN = 'spool-content-key-v1';
 const ROW_DOMAIN = 'spool-content-row-v1';
@@ -76,7 +77,8 @@ function projectionSummary(index, primaryKey, columns) {
     .map(item => ({ keyId: item.keyId, rowHash: item.rowHash }));
   return Object.freeze({
     rowCount: entries.length,
-    rootHash: sha256Canonical(ROOT_DOMAIN, { primaryKey, columns, entries })
+    rootHash: sha256Canonical(ROOT_DOMAIN, { primaryKey, columns, entries }),
+    merkleRoot: merkleRoot(entries, { primaryKey, columns })
   });
 }
 
