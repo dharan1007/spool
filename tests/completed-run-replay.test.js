@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SpoolCommandService, migrationRequestFingerprint } from '../src/daemon/command-service.js';
+import { SpoolCommandService, migrationRequestSemanticId } from '../src/daemon/command-service.js';
 
 const PLAN_ID = `sha256:${'1'.repeat(64)}`;
 const SNAPSHOT_ID = `sha256:${'2'.repeat(64)}`;
@@ -63,13 +63,12 @@ function seedCompleted(service, migrationRequest) {
     planId: PLAN_ID,
     sourceSnapshotId: SNAPSHOT_ID,
     targetIdentity: { connector: 'postgres', database: 'warehouse', schema: 'public', table: 'orders_copy' },
-    requestFingerprint: migrationRequestFingerprint(migrationRequest),
     startedAt: '2026-09-13T00:00:00.000Z'
   });
   service.runs.complete({
     migrationId: migrationRequest.migrationId,
     verification: { ok: true },
-    receipt: { record: { targetContractId: `sha256:${'4'.repeat(64)}` } },
+    receipt: { record: { requestSemanticId: migrationRequestSemanticId(migrationRequest), targetContractId: `sha256:${'4'.repeat(64)}` } },
     completedAt: '2026-09-13T00:01:00.000Z'
   });
 }
@@ -102,5 +101,5 @@ test('credential reference rotation does not change completed-run semantic ident
   const rotated = structuredClone(base);
   rotated.planInput.sourceRef.secretRef = { provider: 'env', key: 'SOURCE_SECRET_ROTATED' };
   rotated.planInput.targetRef.secretRef = { provider: 'env', key: 'TARGET_SECRET_ROTATED' };
-  assert.equal(migrationRequestFingerprint(base), migrationRequestFingerprint(rotated));
+  assert.equal(migrationRequestSemanticId(base), migrationRequestSemanticId(rotated));
 });
