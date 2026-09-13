@@ -12,7 +12,10 @@ const user = process.env.SPOOL_TEST_POSTGRES_USER ?? 'spooltest';
 const password = process.env.SPOOL_TEST_PG_PASSWORD ?? '';
 const enabled = Boolean(endpoint && password);
 const secretRef = { provider: 'env', key: 'SPOOL_TEST_PG_PASSWORD' };
-const ROWS = 60;
+// A wide replay window (60 batches with the tampered rows in the last one)
+// keeps the concurrent-tamper fault deterministic: verification cannot reach
+// the tampered last batch before the tamper lands.
+const ROWS = 120;
 const BATCH = 2;
 
 async function adminClient() {

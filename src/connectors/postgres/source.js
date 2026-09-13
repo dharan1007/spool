@@ -6,6 +6,7 @@ import { createPostgresSourceState } from '../../protocol/state-descriptors.js';
 import { validateConnectorDescriptor } from '../contract.js';
 import { materializeSnapshotBatches } from '../materialized-snapshot.js';
 import { parsePostgresEndpoint, withPostgresClient } from './connection.js';
+import { joinPostgresSnapshot } from './database-source.js';
 
 const DEFAULT_BATCH_SIZE = 1000;
 const MAX_BATCH_SIZE = 10_000;
@@ -19,7 +20,8 @@ export const POSTGRES_SOURCE_DESCRIPTOR = validateConnectorDescriptor({
     streaming: true,
     snapshotBinding: true,
     durableMaterialization: true,
-    readOnlySnapshot: true
+    readOnlySnapshot: true,
+    databaseSnapshot: true
   }
 });
 
@@ -171,6 +173,43 @@ async function captureSourceState(client, inspection) {
   });
 }
 
+async function captureJoinedSourceState(client, inspection, snapshotToken) {
+  let identity;
+  try {
+    identity = await client.query(`
+      SELECT (pg_catalog.pg_control_system()).system_identifier::text AS system_identifier,
+             (SELECT oid::int FROM pg_catalog.pg_database WHERE datname = current_database()) AS database_oid,
+             current_database() AS database_name,
+             current_setting('server_version_num')::int AS server_version_num,
+             pg_catalog.pg_current_snapshot()::text AS snapshot_text,
+             pg_catalog.pg_current_wal_lsn()::text AS wal_lsn
+    `);
+  } catch (error) {
+    fail('POSTGRES_SOURCE_IDENTITY_UNAVAILABLE', 'Unable to capture PostgreSQL source identity inside the joined snapshot', { cause: error?.message });
+  }
+  const row = identity.rows[0];
+  const snapshot = parseSnapshotText(row.snapshot_text);
+  return createPostgresSourceState({
+    systemIdentifier: row.system_identifier,
+    databaseOid: Number(row.database_oid),
+    databaseName: row.database_name,
+    serverVersionNum: Number(row.server_version_num),
+    relation: {
+      schema: inspection.contract.relation.schema,
+      table: inspection.contract.relation.table,
+      relid: inspection.contract.relation.relid
+    },
+    snapshot: {
+      exportedSnapshotId: snapshotToken,
+      xmin: snapshot.xmin,
+      xmax: snapshot.xmax,
+      xip: snapshot.xip
+    },
+    walLsn: row.wal_lsn,
+    contractId: inspection.contractId
+  });
+}
+
 function keysetPredicate(primaryKey, lastKey, startParameter) {
   if (lastKey === null) return { sql: '', values: [] };
   if (!Array.isArray(lastKey) || lastKey.length !== primaryKey.length) fail('INVALID_POSTGRES_SOURCE_CURSOR', 'PostgreSQL source cursor does not match primary-key arity');
@@ -242,18 +281,21 @@ class PostgresSourceSnapshot {
   }
 }
 
-export async function withPostgresSourceSnapshot({ sourceRef, credentialBroker, batchSize = DEFAULT_BATCH_SIZE } = {}, callback) {
+export async function withPostgresSourceSnapshot({ sourceRef, credentialBroker, batchSize = DEFAULT_BATCH_SIZE, snapshotToken = null } = {}, callback) {
   if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_POSTGRES_SOURCE_CONFIG', 'credentialBroker.withSecret() is required');
   if (typeof callback !== 'function') fail('INVALID_POSTGRES_SOURCE_CONFIG', 'snapshot callback is required');
   const ref = sourceRefConfig(sourceRef);
   const size = requireBatchSize(batchSize);
 
   return withPostgresClient({ targetRef: ref, credentialBroker }, async client => {
-    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    if (snapshotToken == null) await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    else await joinPostgresSnapshot(client, snapshotToken);
     let snapshot;
     try {
       const inspection = await inspectRelation(client, ref);
-      const sourceState = await captureSourceState(client, inspection);
+      const sourceState = snapshotToken == null
+        ? await captureSourceState(client, inspection)
+        : await captureJoinedSourceState(client, inspection, snapshotToken);
       snapshot = new PostgresSourceSnapshot({
         client,
         ref,
@@ -275,8 +317,8 @@ export async function withPostgresSourceSnapshot({ sourceRef, credentialBroker, 
   });
 }
 
-export async function materializePostgresSourceSnapshot({ sourceRef, credentialBroker, snapshotDir, batchSize = DEFAULT_BATCH_SIZE, chunkRows, maxChunkBytes } = {}) {
-  return withPostgresSourceSnapshot({ sourceRef, credentialBroker, batchSize }, async snapshot => materializeSnapshotBatches({
+export async function materializePostgresSourceSnapshot({ sourceRef, credentialBroker, snapshotDir, batchSize = DEFAULT_BATCH_SIZE, chunkRows, maxChunkBytes, snapshotToken = null } = {}) {
+  return withPostgresSourceSnapshot({ sourceRef, credentialBroker, batchSize, snapshotToken }, async snapshot => materializeSnapshotBatches({
     snapshotDir,
     sourceState: snapshot.sourceState,
     contract: snapshot.contract,
@@ -296,7 +338,8 @@ export function createPostgresSourceRuntime({ credentialBroker, batchSize = DEFA
     withSnapshot: (sourceRef, callback, options = {}) => withPostgresSourceSnapshot({
       sourceRef,
       credentialBroker,
-      batchSize: options.batchSize ?? size
+      batchSize: options.batchSize ?? size,
+      snapshotToken: options.snapshotToken ?? null
     }, callback),
     materializeSnapshot: (sourceRef, options = {}) => materializePostgresSourceSnapshot({
       sourceRef,
@@ -304,7 +347,8 @@ export function createPostgresSourceRuntime({ credentialBroker, batchSize = DEFA
       snapshotDir: options.snapshotDir,
       batchSize: options.batchSize ?? size,
       chunkRows: options.chunkRows,
-      maxChunkBytes: options.maxChunkBytes
+      maxChunkBytes: options.maxChunkBytes,
+      snapshotToken: options.snapshotToken ?? null
     })
   });
 }

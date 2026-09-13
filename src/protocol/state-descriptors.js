@@ -11,7 +11,8 @@ const TARGET_DOMAIN = 'spool-target-state-v1';
 
 export const SOURCE_STATE_KINDS = Object.freeze({
   FILESYSTEM: 'filesystem-content-v1',
-  POSTGRES: 'postgres-mvcc-v1'
+  POSTGRES: 'postgres-mvcc-v1',
+  POSTGRES_DATABASE: 'postgres-database-mvcc-v1'
 });
 
 export const TARGET_STATE_KINDS = Object.freeze({
@@ -146,6 +147,38 @@ export function createPostgresSourceState(input) {
   return buildDescriptor({
     type: 'source',
     kind: SOURCE_STATE_KINDS.POSTGRES,
+    domain: SOURCE_DOMAIN,
+    state: { ...base, snapshot, walLsn }
+  });
+}
+
+function normalizePgDatabaseBase(input) {
+  exactObject(
+    input,
+    new Set(['systemIdentifier', 'databaseOid', 'databaseName', 'serverVersionNum', 'catalogId', 'tableCount', 'snapshot', 'walLsn']),
+    'UNKNOWN_SOURCE_STATE_FIELD',
+    'INVALID_SOURCE_STATE',
+    'PostgreSQL database SourceState'
+  );
+  const systemIdentifier = requiredString(input.systemIdentifier, 'INVALID_SOURCE_STATE', 'systemIdentifier');
+  if (!/^\d+$/.test(systemIdentifier)) fail('INVALID_SOURCE_STATE', 'systemIdentifier must be the PostgreSQL numeric system identifier');
+  const databaseOid = requiredSafeInteger(input.databaseOid, 'INVALID_SOURCE_STATE', 'databaseOid', { min: 1 });
+  const databaseName = requiredString(input.databaseName, 'INVALID_SOURCE_STATE', 'databaseName');
+  const serverVersionNum = requiredSafeInteger(input.serverVersionNum, 'INVALID_SOURCE_STATE', 'serverVersionNum', { min: 90000 });
+  const catalogId = hashId(input.catalogId, 'INVALID_SOURCE_STATE', 'catalogId');
+  const tableCount = requiredSafeInteger(input.tableCount, 'INVALID_SOURCE_STATE', 'tableCount');
+  return { systemIdentifier, databaseOid, databaseName, serverVersionNum, catalogId, tableCount };
+}
+
+export function createPostgresDatabaseSourceState(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) fail('INVALID_SOURCE_STATE', 'PostgreSQL database SourceState input must be an object');
+  const base = normalizePgDatabaseBase(input);
+  const snapshot = normalizePgSnapshot(input.snapshot);
+  const walLsn = requiredString(input.walLsn, 'INVALID_SOURCE_STATE', 'walLsn').toUpperCase();
+  if (!WAL_LSN.test(walLsn)) fail('INVALID_SOURCE_STATE', 'walLsn must be a PostgreSQL WAL LSN');
+  return buildDescriptor({
+    type: 'source',
+    kind: SOURCE_STATE_KINDS.POSTGRES_DATABASE,
     domain: SOURCE_DOMAIN,
     state: { ...base, snapshot, walLsn }
   });

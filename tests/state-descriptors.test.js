@@ -5,6 +5,7 @@ import {
   TARGET_STATE_KINDS,
   createFilesystemSourceState,
   createPostgresSourceState,
+  createPostgresDatabaseSourceState,
   createSqliteTargetState,
   createPostgresTargetState,
   assertSourceStateBinding,
@@ -148,4 +149,53 @@ test('binding assertions fail closed on source or target drift', () => {
   const targetB = createSqliteTargetState({ realPath: '/srv/targets/a.db', device: 1, inode: 2, table: 'customers', contractId: HASH('2') });
   assert.equal(assertTargetStateBinding(targetA, targetA), true);
   assert.throws(() => assertTargetStateBinding(targetA, targetB), error => error?.code === 'TARGET_DRIFT');
+});
+
+const dbBase = () => ({
+  systemIdentifier: '7429931746381247331',
+  databaseOid: 16384,
+  databaseName: 'app',
+  serverVersionNum: 170004,
+  catalogId: HASH('c'),
+  tableCount: 650,
+  snapshot: { exportedSnapshotId: '00000003-0000001A-1', xmin: '912', xmax: '940', xip: [] },
+  walLsn: '0/16B6C50'
+});
+
+test('PostgreSQL database SourceState binds catalog, snapshot and WAL identity for the whole database', () => {
+  const first = createPostgresDatabaseSourceState(dbBase());
+  const second = createPostgresDatabaseSourceState(dbBase());
+  const changedCatalog = createPostgresDatabaseSourceState({ ...dbBase(), catalogId: HASH('d'), tableCount: 651 });
+  const changedSnapshot = createPostgresDatabaseSourceState({
+    ...dbBase(),
+    snapshot: { exportedSnapshotId: '00000003-0000001B-1', xmin: '941', xmax: '955', xip: [] },
+    walLsn: '0/16B6D00'
+  });
+
+  assert.equal(first.kind, SOURCE_STATE_KINDS.POSTGRES_DATABASE);
+  assert.match(first.sourceStateId, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(first.sourceStateId, second.sourceStateId);
+  assert.notEqual(first.sourceStateId, changedCatalog.sourceStateId);
+  assert.notEqual(first.sourceStateId, changedSnapshot.sourceStateId);
+  assert.equal(assertSourceStateBinding(first, second), true);
+  assert.throws(() => assertSourceStateBinding(first, changedCatalog), error => error?.code === 'SOURCE_DRIFT');
+});
+
+test('PostgreSQL database SourceState rejects per-table material and unsafe identity', () => {
+  assert.throws(
+    () => createPostgresDatabaseSourceState({ ...dbBase(), relation: { schema: 'public', table: 'customers', relid: 1 } }),
+    error => error?.code === 'UNKNOWN_SOURCE_STATE_FIELD'
+  );
+  assert.throws(
+    () => createPostgresDatabaseSourceState({ ...dbBase(), catalogId: 'not-a-hash' }),
+    error => error?.code === 'INVALID_SOURCE_STATE'
+  );
+  assert.throws(
+    () => createPostgresDatabaseSourceState({ ...dbBase(), tableCount: -1 }),
+    error => error?.code === 'INVALID_SOURCE_STATE'
+  );
+  assert.throws(
+    () => createPostgresDatabaseSourceState({ ...dbBase(), snapshot: { exportedSnapshotId: 'bogus', xmin: '912', xmax: '940', xip: [] } }),
+    error => error?.code === 'INVALID_SOURCE_STATE'
+  );
 });
