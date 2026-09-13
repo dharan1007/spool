@@ -1,0 +1,3 @@
+# Durable PostgreSQL Snapshots
+
+Materialize each live repeatable-read PostgreSQL source snapshot into immutable hashed NDJSON chunks, then atomically publish a canonical manifest. The manifest root becomes the durable source identity used by approval, checkpoint, verification, and receipt flows. Partial materializations are discarded and restarted from a new live snapshot; finalized manifests are independently revalidated and replayed without reconnecting to the source database.
