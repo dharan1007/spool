@@ -62,6 +62,19 @@ test('release build emits ordinary same-origin static modules with no compressed
   assert.doesNotMatch(`${app}\n${product}`, /\bfetch\s*\(|XMLHttpRequest|WebSocket\s*\(|sendBeacon\s*\(/);
 });
 
+test('host-consumed deployment config ships in dist but stays out of the served-artifact manifest', async t => {
+  const commit = 'abcdef0123456789abcdef0123456789abcdef01';
+  const { distDir, built } = await buildFixture(t, { SPOOL_COMMIT_SHA: commit, SPOOL_REQUIRE_RELEASE_IDENTITY: '1' });
+  assert.equal(built.status, 0, built.stderr || built.stdout);
+
+  const config = await stat(join(distDir, 'vercel.json'));
+  assert.ok(config.isFile() && config.size > 0, 'vercel.json must still ship in dist/ for the host');
+
+  const manifest = JSON.parse(await readFile(join(distDir, 'release-manifest.json'), 'utf8'));
+  assert.ok(!manifest.artifacts.some(entry => entry.path === 'vercel.json'), 'host-consumed config must not enter the served-artifact manifest');
+  assert.equal(artifactRoot(manifest.artifacts), manifest.artifactRootSha256);
+});
+
 test('Vercel configuration deep-links every product route to index.html without cleanUrls interference', async t => {
   const { distDir, built } = await buildFixture(t);
   assert.equal(built.status, 0, built.stderr || built.stdout);
