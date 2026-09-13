@@ -21,6 +21,8 @@ import { assertCheckpointBinding } from '../execution/checkpoint.js';
 import { MigrationRunner } from '../execution/migration-runner.js';
 import { verifyMigration } from '../execution/verify.js';
 import { createMigrationReceipt } from '../execution/receipt.js';
+import { createRepairPlan } from '../execution/repair-plan.js';
+import { createContentVerificationAccumulator } from '../execution/content-verification-manifest.js';
 import { CredentialBroker } from './credential-broker.js';
 import { createDurableSourceCoordinator } from './durable-source.js';
 import { migrationRequestSemanticId } from './request-semantics.js';
@@ -64,6 +66,24 @@ function releaseIdentity(release) {
     fail('RELEASE_IDENTITY_REQUIRED', 'Production command service requires {version, commitSha} with an exact git SHA');
   }
   return Object.freeze({ version: release.version, commitSha: release.commitSha });
+}
+
+function requiresContentExact(plan) {
+  return Array.isArray(plan?.verification?.checks) && plan.verification.checks.includes('content_exact');
+}
+
+function assertContentVerificationCapability(plan, targetRuntime) {
+  if (!requiresContentExact(plan)) return;
+  if (plan.capabilityAssumptions?.target?.readAfterWriteVerification !== true) {
+    fail('CONTENT_VERIFICATION_CAPABILITY_UNDECLARED', 'content_exact requires capabilityAssumptions.target.readAfterWriteVerification=true');
+  }
+  if (targetRuntime?.descriptor?.capabilities?.readAfterWriteVerification !== true) {
+    fail('CONTENT_VERIFICATION_CAPABILITY_REQUIRED', 'Target connector cannot prove exact read-after-write content');
+  }
+}
+
+function sameExecutionSummary(left, right) {
+  return left.processedRows === right.processedRows && left.validRows === right.validRows && left.invalidRows === right.invalidRows;
 }
 
 export class SpoolCommandService {
@@ -156,6 +176,7 @@ export class SpoolCommandService {
     input = await targetRuntime.normalizePlanInput(input);
     const plan = await createMigrationPlan(input);
     if (!plan.risk.approvals.includes('target_write')) fail('TARGET_WRITE_APPROVAL_REQUIRED', 'Production target mutations require target_write in plan.risk.approvals');
+    assertContentVerificationCapability(plan, targetRuntime);
     const targetPreflight = await targetRuntime.preflight(plan);
     return {
       request, plan, snapshot: source.snapshot, source, sourceRows: source.sourceRows,
@@ -303,10 +324,82 @@ export class SpoolCommandService {
 
       const summary = accumulator.summary();
       const ledgerEntries = await targetExecution.ledgerEntries();
-      const verification = verifyMigration({
+      const basicVerification = verifyMigration({
         sourceRows, writtenRows: summary.validRows, rejectedRows: summary.invalidRows, filteredRows: 0,
         expectedBatchIdentities, ledgerEntries
       });
+
+      let verification = basicVerification;
+      if (requiresContentExact(plan)) {
+        if (typeof targetExecution.withContentVerifier !== 'function') {
+          fail('CONTENT_VERIFICATION_CAPABILITY_REQUIRED', 'Target execution does not implement content verification sessions');
+        }
+        this.runs.clearVerificationBatches(request.migrationId);
+        const replayAccumulator = new MigrationEngine().createAccumulator(plan.mapping, plan.mappingRevision, plan.targetSchema);
+        const content = await targetExecution.withContentVerifier({
+          targetSchema: plan.targetSchema,
+          targetContractId: targetPreflight.targetContractId
+        }, async verifier => {
+          const evidence = createContentVerificationAccumulator({ targetReadState: verifier.targetReadState });
+          let expectedRows = [];
+          let replayLastSeen = -1;
+          let ordinal = 0;
+          for await (const { rowIndex, row } of source.streamRows()) {
+            replayLastSeen = rowIndex;
+            const transformed = replayAccumulator.process(row, rowIndex);
+            if (transformed.ok) expectedRows.push(transformed.row);
+            const sourceRangeStart = Math.floor(rowIndex / batchSize) * batchSize;
+            const sourceRangeEnd = Math.min(sourceRows, sourceRangeStart + batchSize);
+            if (rowIndex + 1 === sourceRangeEnd) {
+              await renewLease();
+              const contentProof = await verifier.verifyBatch(expectedRows);
+              const repair = contentProof.status === 'DIFF' ? createRepairPlan({
+                migrationId: request.migrationId,
+                planId: plan.planId,
+                sourceSnapshotId: snapshot.snapshotId,
+                targetIdentity: plan.targetRef,
+                targetContractId: targetPreflight.targetContractId,
+                verification: contentProof
+              }) : null;
+              const sourceRange = { start: sourceRangeStart, endExclusive: sourceRangeEnd };
+              this.runs.saveVerificationBatch({
+                migrationId: request.migrationId,
+                ordinal,
+                sourceRange,
+                verification: contentProof,
+                repair
+              });
+              evidence.add({ sourceRange, verification: contentProof });
+              expectedRows = [];
+              ordinal += 1;
+            }
+          }
+          if (replayLastSeen + 1 !== sourceRows) fail('SOURCE_ROW_COUNT_CHANGED', 'Durable snapshot row count changed during verification replay');
+          if (expectedRows.length !== 0) fail('INTERNAL_BATCH_STATE', 'Content verification replay ended with an incomplete batch');
+          return evidence.summary();
+        });
+        const replaySummary = replayAccumulator.summary();
+        if (!sameExecutionSummary(summary, replaySummary)) {
+          fail('TRANSFORM_REPLAY_DIVERGED', 'Deterministic transform replay produced different row accounting', {
+            execution: { processedRows: summary.processedRows, validRows: summary.validRows, invalidRows: summary.invalidRows },
+            verification: { processedRows: replaySummary.processedRows, validRows: replaySummary.validRows, invalidRows: replaySummary.invalidRows }
+          });
+        }
+        if (content.sourceRowsCovered !== sourceRows || content.rowCount !== summary.validRows) {
+          fail('CONTENT_VERIFICATION_ACCOUNTING_MISMATCH', 'Content verification evidence does not cover the executed output exactly', {
+            sourceRows, sourceRowsCovered: content.sourceRowsCovered, writtenRows: summary.validRows, verifiedRows: content.rowCount
+          });
+        }
+        verification = Object.freeze({ ...basicVerification, content });
+        if (content.status !== 'VERIFIED') {
+          this.runs.verificationFailed({ migrationId: request.migrationId, verification });
+          fail('VERIFICATION_FAILED', 'Exact target-content verification found deterministic differences', {
+            rootHash: content.rootHash,
+            diffCounts: content.diffCounts
+          });
+        }
+      }
+
       const completedAt = new Date().toISOString();
       const receipt = createMigrationReceipt({
         release: this.release,
@@ -330,7 +423,9 @@ export class SpoolCommandService {
     } catch (error) {
       if (ownsRunState) {
         const existing = this.runs.get(request.migrationId);
-        if (existing?.status !== 'COMPLETE') this.runs.fail({ migrationId: request.migrationId, errorCode: error?.code ?? 'MIGRATION_FAILED' });
+        if (existing?.status !== 'COMPLETE' && existing?.status !== 'VERIFICATION_FAILED') {
+          this.runs.fail({ migrationId: request.migrationId, errorCode: error?.code ?? 'MIGRATION_FAILED' });
+        }
       }
       throw error;
     } finally {
@@ -341,5 +436,11 @@ export class SpoolCommandService {
   status(migrationId) { this.#open(); return this.runs.get(migrationId); }
   verification(migrationId) { const run = this.status(migrationId); if (!run?.verification) fail('VERIFICATION_NOT_AVAILABLE', 'Verification is not available'); return run.verification; }
   receipt(migrationId) { const run = this.status(migrationId); if (!run?.receipt) fail('RECEIPT_NOT_AVAILABLE', 'Receipt is not available'); return run.receipt; }
+  repairEvidence(migrationId) {
+    this.#open();
+    return Object.freeze(this.runs.verificationBatches(migrationId)
+      .filter(item => item.repair != null)
+      .map(item => Object.freeze({ ordinal: item.ordinal, sourceRange: item.sourceRange, repair: item.repair })));
+  }
   close() { if (!this.closed) { this.runs.close(); this.closed = true; } }
 }

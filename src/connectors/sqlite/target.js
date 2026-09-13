@@ -102,21 +102,26 @@ export class SqliteTarget {
     this.fenceResource = fenceResource;
     this.db = new Database(this.path);
     this.closed = false;
-    this.db.pragma('foreign_keys = ON');
-    this.db.pragma(`busy_timeout = ${busyTimeoutMs}`);
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS ${quoteIdentifier(LEDGER_TABLE)} (
-        batch_identity TEXT PRIMARY KEY NOT NULL,
-        migration_id TEXT NOT NULL,
-        plan_id TEXT NOT NULL,
-        source_snapshot_id TEXT NOT NULL,
-        mapping_revision INTEGER NOT NULL,
-        row_count INTEGER NOT NULL CHECK (row_count >= 0),
-        payload_hash TEXT NOT NULL,
-        target_table TEXT NOT NULL,
-        committed_at TEXT NOT NULL
-      ) STRICT;
-    `);
+    try {
+      this.db.pragma('foreign_keys = ON');
+      this.db.pragma(`busy_timeout = ${busyTimeoutMs}`);
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS ${quoteIdentifier(LEDGER_TABLE)} (
+          batch_identity TEXT PRIMARY KEY NOT NULL,
+          migration_id TEXT NOT NULL,
+          plan_id TEXT NOT NULL,
+          source_snapshot_id TEXT NOT NULL,
+          mapping_revision INTEGER NOT NULL,
+          row_count INTEGER NOT NULL CHECK (row_count >= 0),
+          payload_hash TEXT NOT NULL,
+          target_table TEXT NOT NULL,
+          committed_at TEXT NOT NULL
+        ) STRICT;
+      `);
+    } catch (error) {
+      try { this.db.close(); } catch { /* preserve the original error */ }
+      throw error;
+    }
   }
 
   #assertOpen() {

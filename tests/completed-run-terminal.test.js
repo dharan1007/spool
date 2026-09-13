@@ -10,7 +10,6 @@ const SNAPSHOT_ID = `sha256:${'2'.repeat(64)}`;
 
 async function makeService(t, counters) {
   const root = await mkdtemp(join(tmpdir(), 'spool-complete-terminal-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
   const service = new SpoolCommandService({
     sourcePolicy: Object.freeze({}),
     sourceCoordinator: Object.freeze({ async prepare() { counters.source += 1; throw Object.assign(new Error('unexpected source access'), { code: 'SOURCE_SHOULD_NOT_BE_TOUCHED' }); } }),
@@ -22,6 +21,7 @@ async function makeService(t, counters) {
     release: Object.freeze({ version: '1.1.1', commitSha: '3'.repeat(40) })
   });
   t.after(() => service.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
   return service;
 }
 

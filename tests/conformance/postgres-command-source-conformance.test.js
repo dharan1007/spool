@@ -22,15 +22,8 @@ async function adminClient() {
 
 function pgRef(table, connectionId) {
   return {
-    connector: 'postgres',
-    connectionId,
-    resource: `public.${table}`,
-    endpoint,
-    database,
-    schema: 'public',
-    table,
-    identity: { user },
-    secretRef
+    connector: 'postgres', connectionId, resource: `public.${table}`, endpoint, database,
+    schema: 'public', table, identity: { user }, secretRef
   };
 }
 
@@ -42,12 +35,8 @@ async function reset(sourceTable, targetTable) {
     await client.query(`DROP TABLE IF EXISTS public."${targetTable}" CASCADE`);
     await client.query(`CREATE TABLE public."${sourceTable}" (id integer PRIMARY KEY, name text NOT NULL)`);
     await client.query(`CREATE TABLE public."${targetTable}" (id integer PRIMARY KEY, name text NOT NULL)`);
-    for (let id = 1; id <= 5; id += 1) {
-      await client.query(`INSERT INTO public."${sourceTable}"(id,name) VALUES ($1,$2)`, [id, `source-${id}`]);
-    }
-  } finally {
-    await client.end();
-  }
+    for (let id = 1; id <= 5; id += 1) await client.query(`INSERT INTO public."${sourceTable}"(id,name) VALUES ($1,$2)`, [id, `source-${id}`]);
+  } finally { await client.end(); }
 }
 
 async function tableRows(table) {
@@ -55,9 +44,7 @@ async function tableRows(table) {
   try {
     const result = await client.query(`SELECT id,name FROM public."${table}" ORDER BY id`);
     return result.rows.map(row => ({ id: Number(row.id), name: row.name }));
-  } finally {
-    await client.end();
-  }
+  } finally { await client.end(); }
 }
 
 function migrationRequest(sourceTable, targetTable, migrationId) {
@@ -78,11 +65,11 @@ function migrationRequest(sourceTable, targetTable, migrationId) {
       ],
       mappingRevision: 1,
       writeStrategy: { mode: 'insert', batchSize: 2 },
-      verification: { checks: ['row_accounting', 'ledger_complete'] },
+      verification: { checks: ['row_accounting', 'ledger_complete', 'content_exact'] },
       risk: { level: 'medium', approvals: ['target_write'] },
       capabilityAssumptions: {
         source: { snapshotBinding: true, durableMaterialization: true },
-        target: { transactions: true, atomicBatchLedger: true, reconcileAfterCrash: true, fencing: true }
+        target: { transactions: true, atomicBatchLedger: true, reconcileAfterCrash: true, fencing: true, readAfterWriteVerification: true }
       }
     }
   };
@@ -95,17 +82,14 @@ async function fixture() {
   const snapshotDir = join(dir, 'snapshots');
   await mkdir(sourceRoot); await mkdir(targetRoot);
   const options = {
-    sourceRoot,
-    targetRoot,
-    snapshotDir,
-    statePath: join(targetRoot, 'spool-state.db'),
+    sourceRoot, targetRoot, snapshotDir, statePath: join(targetRoot, 'spool-state.db'),
     approvalSigningKey: '0123456789abcdef0123456789abcdef',
     release: { version: '1.2.0-test', commitSha: '1123456789abcdef0123456789abcdef01234567' }
   };
-  return { dir, snapshotDir, options, service: await SpoolCommandService.create(options) };
+  return { dir, options, service: await SpoolCommandService.create(options) };
 }
 
-test('PostgreSQL-to-PostgreSQL run consumes the exact approved durable source after source change and service restart', { skip: !enabled }, async () => {
+test('PostgreSQL-to-PostgreSQL receipt requires exact target-content proof from the approved durable source', { skip: !enabled }, async () => {
   const sourceTable = 'spool_pg_source_e2e';
   const targetTable = 'spool_pg_target_e2e';
   await reset(sourceTable, targetTable);
@@ -118,33 +102,38 @@ test('PostgreSQL-to-PostgreSQL run consumes the exact approved durable source af
     assert.match(inspected.sourceSnapshotId, /^sha256:[a-f0-9]{64}$/);
     assert.equal(inspected.targetPreflight.status, 'READY');
 
-    const approval = await service.approve(request, {
-      expiresAt: '2099-01-01T00:00:00.000Z',
-      nonce: 'pg-to-pg-e2e'
-    });
+    const approval = await service.approve(request, { expiresAt: '2099-01-01T00:00:00.000Z', nonce: 'pg-to-pg-e2e' });
+    assert.ok(approval.record.effects.includes('postgres:read_after_write_verify'));
     const approvedSnapshotId = approval.record.sourceSnapshotId;
 
     const client = await adminClient();
     try {
       await client.query(`UPDATE public."${sourceTable}" SET name='changed-after-approval' WHERE id=1`);
       await client.query(`INSERT INTO public."${sourceTable}"(id,name) VALUES (999,'late-row')`);
-    } finally {
-      await client.end();
-    }
+    } finally { await client.end(); }
 
     service.close();
     service = await SpoolCommandService.create(f.options);
     const result = await service.run(request, { approval });
     assert.equal(result.status, 'COMPLETE');
     assert.equal(result.verification.status, 'VERIFIED');
+    assert.equal(result.verification.content.status, 'VERIFIED');
+    assert.equal(result.verification.content.level, 'CONTENT_EXACT');
+    assert.equal(result.verification.content.rowCount, 5);
+    assert.equal(result.verification.content.sourceRowsCovered, 5);
+    assert.equal(result.verification.content.batchCount, 3);
+    assert.deepEqual(result.verification.content.primaryKey, ['id']);
+    assert.match(result.verification.content.rootHash, /^sha256:[a-f0-9]{64}$/);
+    assert.match(result.verification.content.targetReadState.mvccSnapshot, /.+/);
+    assert.match(result.verification.content.targetReadState.walLsn, /.+/);
+    assert.equal(result.receipt.record.verification.content.rootHash, result.verification.content.rootHash);
     assert.equal(result.receipt.record.sourceSnapshotId, approvedSnapshotId);
     assert.deepEqual(result.receipt.record.counts, { sourceRows: 5, writtenRows: 5, rejectedRows: 0, filteredRows: 0 });
+    assert.equal(service.status(request.migrationId).status, 'COMPLETE');
+    assert.equal(service.repairEvidence(request.migrationId).length, 0);
     assert.deepEqual(await tableRows(targetTable), [
-      { id: 1, name: 'source-1' },
-      { id: 2, name: 'source-2' },
-      { id: 3, name: 'source-3' },
-      { id: 4, name: 'source-4' },
-      { id: 5, name: 'source-5' }
+      { id: 1, name: 'source-1' }, { id: 2, name: 'source-2' }, { id: 3, name: 'source-3' },
+      { id: 4, name: 'source-4' }, { id: 5, name: 'source-5' }
     ]);
   } finally {
     service.close();

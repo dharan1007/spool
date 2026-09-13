@@ -8,6 +8,11 @@ function text(value, label = 'value') {
   return value;
 }
 
+function nonNegativeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) fail('INVALID_RUN_STORE_INPUT', `${label} must be a non-negative safe integer`);
+  return value;
+}
+
 function parse(json) { return json == null ? null : JSON.parse(json); }
 
 export class RunStore {
@@ -16,9 +21,10 @@ export class RunStore {
     this.path = resolve(path);
     this.db = new Database(this.path);
     this.closed = false;
-    this.db.pragma('busy_timeout = 5000');
-    this.db.pragma('journal_mode = WAL');
-    this.db.exec(`
+    try {
+      this.db.pragma('busy_timeout = 5000');
+      this.db.pragma('journal_mode = WAL');
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS spool_runs (
         migration_id TEXT PRIMARY KEY NOT NULL,
         status TEXT NOT NULL,
@@ -35,7 +41,22 @@ export class RunStore {
         migration_id TEXT PRIMARY KEY NOT NULL,
         checkpoint_json TEXT NOT NULL
       ) STRICT;
-    `);
+      CREATE TABLE IF NOT EXISTS spool_verification_batches (
+        migration_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        source_start INTEGER NOT NULL,
+        source_end_exclusive INTEGER NOT NULL,
+        verification_json TEXT NOT NULL,
+        repair_json TEXT,
+        PRIMARY KEY (migration_id, ordinal)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS spool_verification_batches_migration_range
+        ON spool_verification_batches(migration_id, source_start, source_end_exclusive);
+      `);
+    } catch (error) {
+      try { this.db.close(); } catch { /* preserve the original error */ }
+      throw error;
+    }
   }
   #open() { if (this.closed) fail('RUN_STORE_CLOSED', 'Run store is closed'); }
   get(migrationId) {
@@ -63,7 +84,7 @@ export class RunStore {
       ON CONFLICT(migration_id) DO UPDATE SET
         status='RUNNING', plan_id=excluded.plan_id, source_snapshot_id=excluded.source_snapshot_id,
         target_identity_json=excluded.target_identity_json, started_at=COALESCE(spool_runs.started_at, excluded.started_at),
-        last_error_code=NULL
+        receipt_json=NULL, completed_at=NULL, last_error_code=NULL
     `).run(text(migrationId, 'migrationId'), text(planId, 'planId'), text(sourceSnapshotId, 'sourceSnapshotId'), canonicalJson(targetIdentity), text(startedAt, 'startedAt'));
   }
   complete({ migrationId, verification, receipt, completedAt }) {
@@ -71,10 +92,51 @@ export class RunStore {
     this.db.prepare(`UPDATE spool_runs SET status='COMPLETE', verification_json=?, receipt_json=?, completed_at=?, last_error_code=NULL WHERE migration_id=?`)
       .run(canonicalJson(verification), canonicalJson(receipt), text(completedAt, 'completedAt'), text(migrationId, 'migrationId'));
   }
+  verificationFailed({ migrationId, verification }) {
+    this.#open();
+    this.db.prepare(`UPDATE spool_runs SET status='VERIFICATION_FAILED', verification_json=?, receipt_json=NULL, completed_at=NULL, last_error_code='VERIFICATION_FAILED' WHERE migration_id=?`)
+      .run(canonicalJson(verification), text(migrationId, 'migrationId'));
+  }
   fail({ migrationId, errorCode }) {
     this.#open();
     this.db.prepare(`UPDATE spool_runs SET status='FAILED', last_error_code=? WHERE migration_id=?`)
       .run(text(errorCode, 'errorCode'), text(migrationId, 'migrationId'));
+  }
+  saveVerificationBatch({ migrationId, ordinal, sourceRange, verification, repair = null }) {
+    this.#open();
+    text(migrationId, 'migrationId');
+    nonNegativeInteger(ordinal, 'ordinal');
+    if (!sourceRange || typeof sourceRange !== 'object' || Array.isArray(sourceRange)) fail('INVALID_RUN_STORE_INPUT', 'sourceRange is required');
+    const start = nonNegativeInteger(sourceRange.start, 'sourceRange.start');
+    const endExclusive = nonNegativeInteger(sourceRange.endExclusive, 'sourceRange.endExclusive');
+    if (endExclusive < start) fail('INVALID_RUN_STORE_INPUT', 'sourceRange.endExclusive must be >= sourceRange.start');
+    if (!verification || typeof verification !== 'object' || Array.isArray(verification)) fail('INVALID_RUN_STORE_INPUT', 'verification is required');
+    this.db.prepare(`
+      INSERT INTO spool_verification_batches (
+        migration_id, ordinal, source_start, source_end_exclusive, verification_json, repair_json
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(migration_id, ordinal) DO UPDATE SET
+        source_start=excluded.source_start,
+        source_end_exclusive=excluded.source_end_exclusive,
+        verification_json=excluded.verification_json,
+        repair_json=excluded.repair_json
+    `).run(migrationId, ordinal, start, endExclusive, canonicalJson(verification), repair == null ? null : canonicalJson(repair));
+  }
+  verificationBatches(migrationId) {
+    this.#open(); text(migrationId, 'migrationId');
+    return this.db.prepare(`
+      SELECT ordinal, source_start, source_end_exclusive, verification_json, repair_json
+      FROM spool_verification_batches WHERE migration_id=? ORDER BY ordinal
+    `).all(migrationId).map(row => Object.freeze({
+      ordinal: Number(row.ordinal),
+      sourceRange: Object.freeze({ start: Number(row.source_start), endExclusive: Number(row.source_end_exclusive) }),
+      verification: parse(row.verification_json),
+      repair: parse(row.repair_json)
+    }));
+  }
+  clearVerificationBatches(migrationId) {
+    this.#open();
+    this.db.prepare('DELETE FROM spool_verification_batches WHERE migration_id=?').run(text(migrationId, 'migrationId'));
   }
   checkpointStore(migrationId) {
     this.#open(); text(migrationId, 'migrationId');

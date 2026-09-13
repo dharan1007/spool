@@ -4,7 +4,7 @@ import { validateSecretRef } from '../../platform/secrets.js';
 import { validateConnectorDescriptor } from '../contract.js';
 import { parsePostgresEndpoint } from './connection.js';
 import { inspectPostgresTarget } from './preflight.js';
-import { verifyPostgresContent } from './content-verification.js';
+import { verifyPostgresContent, withPostgresContentVerificationSession } from './content-verification.js';
 import { PostgresTarget, acquirePostgresLease, releasePostgresLease } from './target.js';
 
 const MIGRATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -61,12 +61,17 @@ function requirePlanInput(input) {
   return input;
 }
 
+function requiresContentVerification(plan) {
+  return Array.isArray(plan?.verification?.checks) && plan.verification.checks.includes('content_exact');
+}
+
 function approvalEffects(plan) {
   const approvals = Array.isArray(plan?.risk?.approvals) ? plan.risk.approvals : [];
   return Object.freeze([
     'postgres:insert_rows',
     'postgres:write_batch_ledger',
     'postgres:manage_internal_metadata',
+    ...(requiresContentVerification(plan) ? ['postgres:read_after_write_verify'] : []),
     ...approvals.map(value => `approval:${value}`)
   ].sort());
 }
@@ -119,6 +124,18 @@ class PostgresTargetExecution {
       targetSchema,
       targetContractId
     });
+  }
+
+  async withContentVerifier({ targetSchema, targetContractId } = {}, callback) {
+    this.#assertOpen();
+    if (!this.target) fail('POSTGRES_TARGET_NOT_OPEN', 'PostgreSQL target must be opened before content verification');
+    if (typeof callback !== 'function') fail('INVALID_POSTGRES_VERIFICATION', 'Content verifier callback is required');
+    return withPostgresContentVerificationSession({
+      targetRef: this.targetRef,
+      credentialBroker: this.credentialBroker,
+      targetSchema,
+      targetContractId
+    }, callback);
   }
 
   async close() {

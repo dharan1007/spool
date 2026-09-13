@@ -56,13 +56,14 @@ function artifactRootSha256(artifacts) {
   return createHash('sha256').update(canonical).digest('hex');
 }
 
-await rm('dist', { recursive: true, force: true });
-await mkdir('dist', { recursive: true });
-await cp('src', 'dist/src', { recursive: true });
-for (const file of ['index.html', 'styles.css', 'product.css', 'boot-watchdog.js', 'vercel.json']) await cp(file, `dist/${file}`);
+const distDir = process.env.SPOOL_DIST_DIR?.trim() || 'dist';
+await rm(distDir, { recursive: true, force: true });
+await mkdir(distDir, { recursive: true });
+await cp('src', `${distDir}/src`, { recursive: true });
+for (const file of ['index.html', 'styles.css', 'product.css', 'boot-watchdog.js', 'vercel.json']) await cp(file, `${distDir}/${file}`);
 
-const html = await readFile('dist/index.html', 'utf8');
-const config = JSON.parse(await readFile('dist/vercel.json', 'utf8'));
+const html = await readFile(`${distDir}/index.html`, 'utf8');
+const config = JSON.parse(await readFile(`${distDir}/vercel.json`, 'utf8'));
 if (!html.includes('src="/boot-watchdog.js"')) throw new Error('dist/index.html must load the independent startup watchdog');
 if (!html.includes('src="/src/app.js"')) throw new Error('dist/index.html must load /src/app.js as a same-origin module');
 if (!html.includes('src="/src/product-surface.js"')) throw new Error('dist/index.html must load the complete product surface as a same-origin module');
@@ -86,7 +87,7 @@ if (suppliedBuildTime && Number.isNaN(Date.parse(suppliedBuildTime))) {
 }
 const builtAt = suppliedBuildTime || new Date().toISOString();
 
-const artifacts = Object.freeze(await collectArtifactEntries('dist'));
+const artifacts = Object.freeze(await collectArtifactEntries(distDir));
 const artifactRoot = artifactRootSha256(artifacts);
 const release = {
   schemaVersion: 2,
@@ -98,7 +99,7 @@ const release = {
   artifactRootSha256: artifactRoot,
   manifest: '/release-manifest.json'
 };
-await writeFile('dist/release.json', `${JSON.stringify(release, null, 2)}\n`, 'utf8');
+await writeFile(`${distDir}/release.json`, `${JSON.stringify(release, null, 2)}\n`, 'utf8');
 
 const manifest = {
   schemaVersion: 2,
@@ -115,5 +116,5 @@ const manifest = {
   artifactRootSha256: artifactRoot,
   artifacts
 };
-await writeFile('dist/release-manifest.json', `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-console.log(`Built dist/ as ordinary same-origin static ES modules; release commit=${release.commit ?? 'unbound-local-build'}; artifact root=${artifactRoot}.`);
+await writeFile(`${distDir}/release-manifest.json`, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+console.log(`Built ${distDir}/ as ordinary same-origin static ES modules; release commit=${release.commit ?? 'unbound-local-build'}; artifact root=${artifactRoot}.`);
