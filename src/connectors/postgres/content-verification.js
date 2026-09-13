@@ -4,6 +4,7 @@ import { withPostgresClient } from './connection.js';
 import { postgresTargetContractId } from './preflight.js';
 
 const FIELD = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const HASH = /^sha256:[a-f0-9]{64}$/;
 const MAX_BIND_PARAMS = 60_000;
 
 function quoteIdentifier(value) {
@@ -24,6 +25,11 @@ function requireSchema(targetSchema) {
   });
 }
 
+function requireTargetContractId(value) {
+  if (typeof value !== 'string' || !HASH.test(value)) fail('INVALID_POSTGRES_VERIFICATION', 'targetContractId must be a canonical sha256 identity');
+  return value;
+}
+
 function normalizeLocalDateTime(value) {
   const text = String(value).trim().replace(' ', 'T');
   const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?$/.exec(text);
@@ -35,8 +41,7 @@ function normalizeLocalDateTime(value) {
 function normalizeValue(value, field) {
   if (value === null || value === undefined) return null;
   switch (field.type) {
-    case 'string':
-      return String(value);
+    case 'string': return String(value);
     case 'integer': {
       const number = Number(value);
       if (!Number.isSafeInteger(number)) fail('POSTGRES_VERIFICATION_VALUE_INVALID', `PostgreSQL field ${field.name} is not a safe integer`);
@@ -59,10 +64,8 @@ function normalizeValue(value, field) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) fail('POSTGRES_VERIFICATION_VALUE_INVALID', `PostgreSQL field ${field.name} is not a canonical date`);
       return text;
     }
-    case 'local_datetime':
-      return normalizeLocalDateTime(value);
-    default:
-      fail('POSTGRES_VERIFICATION_TYPE_UNSUPPORTED', `Unsupported verification type ${field.type}`);
+    case 'local_datetime': return normalizeLocalDateTime(value);
+    default: fail('POSTGRES_VERIFICATION_TYPE_UNSUPPORTED', `Unsupported verification type ${field.type}`);
   }
 }
 
@@ -89,19 +92,18 @@ async function discoverVerificationContract(client, targetRef, targetSchema) {
 
   const names = targetSchema.map(field => field.name);
   const columnsResult = await client.query(`
-    SELECT a.attname AS name, t.typname AS pg_type
+    SELECT a.attname AS name
     FROM pg_attribute a
-    JOIN pg_type t ON t.oid = a.atttypid
     WHERE a.attrelid = $1::oid AND a.attnum > 0 AND NOT a.attisdropped AND a.attname = ANY($2::text[])
   `, [oid, names]);
-  const pgTypes = new Map(columnsResult.rows.map(row => [row.name, row.pg_type]));
+  const actualColumns = new Set(columnsResult.rows.map(row => row.name));
   for (const field of targetSchema) {
-    if (!pgTypes.has(field.name)) fail('TARGET_SCHEMA_INCOMPATIBLE', `Verification field ${field.name} is not present on the live PostgreSQL target`);
+    if (!actualColumns.has(field.name)) fail('TARGET_SCHEMA_INCOMPATIBLE', `Verification field ${field.name} is not present on the live PostgreSQL target`);
   }
   for (const key of primaryKey) {
     if (!names.includes(key)) fail('POSTGRES_VERIFICATION_PRIMARY_KEY_UNPROJECTED', `Primary-key field ${key} is not part of targetSchema`);
   }
-  return { primaryKey, pgTypes };
+  return { primaryKey };
 }
 
 function normalizeExpectedRows(rows, targetSchema) {
@@ -150,11 +152,10 @@ async function readRows(client, targetRef, normalizedExpectedRows, primaryKey, t
   return out;
 }
 
-export async function verifyPostgresContent({ targetRef, credentialBroker, expectedRows, targetSchema, targetContractId } = {}) {
+export async function withPostgresContentVerificationSession({ targetRef, credentialBroker, targetSchema, targetContractId } = {}, callback) {
   const schema = requireSchema(targetSchema);
-  if (typeof targetContractId !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(targetContractId)) {
-    fail('INVALID_POSTGRES_VERIFICATION', 'targetContractId must be a canonical sha256 identity');
-  }
+  const expectedTargetContractId = requireTargetContractId(targetContractId);
+  if (typeof callback !== 'function') fail('INVALID_POSTGRES_VERIFICATION', 'Verification session callback is required');
 
   return withPostgresClient({ targetRef, credentialBroker }, async client => {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -162,27 +163,57 @@ export async function verifyPostgresContent({ targetRef, credentialBroker, expec
       const quotedTable = `${quoteIdentifier(targetRef.schema)}.${quoteIdentifier(targetRef.table)}`;
       await client.query(`LOCK TABLE ${quotedTable} IN ACCESS SHARE MODE`);
       const actualTargetContractId = await postgresTargetContractId(client, targetRef);
-      if (actualTargetContractId !== targetContractId) {
+      if (actualTargetContractId !== expectedTargetContractId) {
         fail('TARGET_CONTRACT_CHANGED', 'Live PostgreSQL target contract changed before content verification', {
-          expectedTargetContractId: targetContractId,
+          expectedTargetContractId,
           actualTargetContractId
         });
       }
       const contract = await discoverVerificationContract(client, targetRef, schema);
-      const normalizedExpectedRows = normalizeExpectedRows(expectedRows, schema);
-      const rawActualRows = await readRows(client, targetRef, normalizedExpectedRows, contract.primaryKey, schema);
-      const normalizedActualRows = normalizeActualRows(rawActualRows, schema);
-      const verification = verifyContentProjection({
-        expectedRows: normalizedExpectedRows,
-        actualRows: normalizedActualRows,
-        primaryKey: contract.primaryKey,
-        columns: schema.map(field => field.name)
+      const stateResult = await client.query(`
+        SELECT current_database() AS database,
+               pg_current_snapshot()::text AS mvcc_snapshot,
+               pg_current_wal_lsn()::text AS wal_lsn
+      `);
+      const state = stateResult.rows[0] ?? {};
+      const targetReadState = Object.freeze({
+        connector: 'postgres',
+        database: state.database ?? targetRef.database,
+        schema: targetRef.schema,
+        table: targetRef.table,
+        targetContractId: expectedTargetContractId,
+        mvccSnapshot: String(state.mvcc_snapshot ?? ''),
+        walLsn: String(state.wal_lsn ?? '')
       });
+      if (!targetReadState.mvccSnapshot || !targetReadState.walLsn) fail('POSTGRES_VERIFICATION_STATE_UNAVAILABLE', 'PostgreSQL verification snapshot identity is unavailable');
+
+      const verifier = Object.freeze({
+        primaryKey: Object.freeze([...contract.primaryKey]),
+        columns: Object.freeze(schema.map(field => field.name)),
+        targetReadState,
+        async verifyBatch(expectedRows) {
+          const normalizedExpectedRows = normalizeExpectedRows(expectedRows, schema);
+          const rawActualRows = await readRows(client, targetRef, normalizedExpectedRows, contract.primaryKey, schema);
+          const normalizedActualRows = normalizeActualRows(rawActualRows, schema);
+          return verifyContentProjection({
+            expectedRows: normalizedExpectedRows,
+            actualRows: normalizedActualRows,
+            primaryKey: contract.primaryKey,
+            columns: schema.map(field => field.name)
+          });
+        }
+      });
+
+      const result = await callback(verifier);
       await client.query('COMMIT');
-      return verification;
+      return result;
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch {}
       throw error;
     }
   });
+}
+
+export async function verifyPostgresContent({ targetRef, credentialBroker, expectedRows, targetSchema, targetContractId } = {}) {
+  return withPostgresContentVerificationSession({ targetRef, credentialBroker, targetSchema, targetContractId }, verifier => verifier.verifyBatch(expectedRows));
 }
