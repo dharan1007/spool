@@ -2,6 +2,12 @@ import { createHash } from 'node:crypto';
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 const RELEASE_FILES = new Set(['release.json', 'release-manifest.json']);
+// vercel.json is host-consumed deployment configuration, not a served static
+// artifact: the host applies it and never serves it byte-identical (the SPA
+// rewrite answers /vercel.json with /index.html instead), so no production
+// deployment can ever attest it. It stays in dist/ for the host, but must
+// not enter the served-artifact manifest or its root hash.
+const HOST_CONSUMED_CONFIG = new Set(['vercel.json']);
 const EXACT_GIT_SHA = /^[a-f0-9]{40}$/i;
 
 function resolveCommitIdentity() {
@@ -34,6 +40,7 @@ async function collectArtifactEntries(root, relative = '') {
   for (const entry of entries) {
     const path = relative ? `${relative}/${entry.name}` : entry.name;
     if (!relative && RELEASE_FILES.has(entry.name)) continue;
+    if (!relative && HOST_CONSUMED_CONFIG.has(entry.name)) continue;
     if (entry.isDirectory()) {
       artifacts.push(...await collectArtifactEntries(root, path));
       continue;
