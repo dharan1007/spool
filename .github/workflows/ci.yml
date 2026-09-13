@@ -122,6 +122,16 @@ jobs:
           SPOOL_TEST_PG_PASSWORD: spooltest-password
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node --test --test-concurrency=1 tests/conformance/postgres-conformance.test.js tests/conformance/postgres-source-conformance.test.js tests/conformance/postgres-command-source-conformance.test.js tests/conformance/postgres-command-recovery-conformance.test.js tests/conformance/postgres-metadata-concurrency.test.js
+      - name: Qualify durable PostgreSQL materialization beyond the former 256 MiB ceiling
+        env:
+          SPOOL_TEST_POSTGRES_ENDPOINT: postgresql://127.0.0.1:5432/?sslmode=disable
+          SPOOL_TEST_POSTGRES_DATABASE: spooltest
+          SPOOL_TEST_POSTGRES_USER: spooltest
+          SPOOL_TEST_PG_PASSWORD: spooltest-password
+          SPOOL_QUALIFICATION_ROWS: '300000'
+          SPOOL_QUALIFICATION_PAYLOAD_BYTES: '1024'
+          SPOOL_QUALIFICATION_MAX_RSS_BYTES: '536870912'
+        run: node scripts/qualify-postgres-materialization.js
 
   release:
     name: publish-release
