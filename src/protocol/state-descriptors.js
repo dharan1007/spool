@@ -248,13 +248,13 @@ export function createMysqlSourceState(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('INVALID_SOURCE_STATE', 'MySQL SourceState input must be an object');
   exactObject(
     input.snapshot ?? null,
-    new Set(['engine', 'trxId', 'isolationLevel']),
+    new Set(['engine', 'connectionId', 'isolationLevel']),
     'UNKNOWN_SOURCE_STATE_FIELD',
     'INVALID_SOURCE_STATE',
     'snapshot'
   );
   if (input.snapshot.engine !== 'innodb-consistent-read') fail('INVALID_SOURCE_STATE', 'snapshot.engine must be innodb-consistent-read');
-  if (typeof input.snapshot.trxId !== 'string' || !TXID.test(input.snapshot.trxId)) fail('INVALID_SOURCE_STATE', 'snapshot.trxId must be a decimal transaction ID');
+  if (typeof input.snapshot.connectionId !== 'string' || !TXID.test(input.snapshot.connectionId)) fail('INVALID_SOURCE_STATE', 'snapshot.connectionId must be a decimal connection ID');
   if (input.snapshot.isolationLevel !== 'REPEATABLE READ') fail('INVALID_SOURCE_STATE', 'snapshot.isolationLevel must be REPEATABLE READ');
   const base = normalizeMysqlBase(input, { unknownCode: 'UNKNOWN_SOURCE_STATE_FIELD', invalidCode: 'INVALID_SOURCE_STATE', includeSnapshot: true });
   return buildDescriptor({
@@ -263,7 +263,7 @@ export function createMysqlSourceState(input) {
     domain: SOURCE_DOMAIN,
     state: {
       ...base,
-      snapshot: { engine: 'innodb-consistent-read', trxId: input.snapshot.trxId, isolationLevel: 'REPEATABLE READ' }
+      snapshot: { engine: 'innodb-consistent-read', connectionId: input.snapshot.connectionId, isolationLevel: 'REPEATABLE READ' }
     }
   });
 }

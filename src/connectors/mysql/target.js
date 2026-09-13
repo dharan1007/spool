@@ -112,7 +112,7 @@ function validateMetadataDescription(rows) {
 }
 
 export async function ensureMysqlMetadata({ targetRef, credentialBroker } = {}) {
-  const description = await withMysqlConnection({ ref: targetRef, credentialBroker }, async connection => {
+  const description = await withMysqlConnection({ targetRef, credentialBroker }, async connection => {
     await connection.query(`
       CREATE TABLE IF NOT EXISTS ${quoteIdentifier(LEDGER_TABLE)} (
         batch_identity VARCHAR(255) PRIMARY KEY,
@@ -271,7 +271,7 @@ export class MysqlTarget {
     let evidence;
     try {
       evidence = evidenceFrom(input, input.payloadHash, input.rowCount);
-      const row = await withMysqlConnection({ ref: this.targetRef, credentialBroker: this.credentialBroker }, async connection => {
+      const row = await withMysqlConnection({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async connection => {
         const [rows] = await connection.query(
           `SELECT batch_identity, migration_id, plan_id, source_snapshot_id, mapping_revision,
                   row_count, payload_hash, target_database, target_table, committed_at
@@ -301,7 +301,7 @@ export class MysqlTarget {
     const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
     if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production MySQL mutation requires a fencing token');
 
-    const result = await withMysqlConnection({ ref: this.targetRef, credentialBroker: this.credentialBroker }, async connection => {
+    const result = await withMysqlConnection({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async connection => {
       await connection.beginTransaction();
       try {
         if (this.requireFencing) {
@@ -363,7 +363,7 @@ export class MysqlTarget {
     const values = [this.targetRef.database, this.targetRef.table];
     let migrationClause = '';
     if (migrationId) { values.push(migrationId); migrationClause = ' AND migration_id = ?'; }
-    const rows = await withMysqlConnection({ ref: this.targetRef, credentialBroker: this.credentialBroker }, async connection => {
+    const rows = await withMysqlConnection({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async connection => {
       const [found] = await connection.query(
         `SELECT batch_identity AS batchIdentity, migration_id AS migrationId, plan_id AS planId,
                 source_snapshot_id AS sourceSnapshotId, mapping_revision AS mappingRevision,

@@ -119,7 +119,7 @@ export async function inspectMysqlTarget({ targetRef, targetSchema, credentialBr
   requireMysqlTargetRef(targetRef);
   const schema = requireTargetSchema(targetSchema);
   if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_MYSQL_PREFLIGHT', 'credentialBroker.withSecret() is required');
-  return withMysqlConnection({ ref: targetRef, credentialBroker }, async connection => {
+  return withMysqlConnection({ targetRef, credentialBroker }, async connection => {
     const description = await describeTable(connection, targetRef.database, targetRef.table);
     checkSchema(schema, description);
     const targetContractId = await mysqlTargetContractId(connection, targetRef);

@@ -100,19 +100,22 @@ async function captureSourceState(connection, ref, inspection) {
   try {
     identity = await connection.query(
       `SELECT @@server_uuid AS server_uuid, DATABASE() AS database_name, VERSION() AS server_version,
-              (SELECT TRX_ID FROM INFORMATION_SCHEMA.INNODB_TRX WHERE TRX_MYSQL_THREAD_ID = CONNECTION_ID()) AS trx_id`
+              CONNECTION_ID() AS connection_id`
     );
   } catch (error) {
     fail('MYSQL_SOURCE_IDENTITY_UNAVAILABLE', 'Unable to capture MySQL source identity', { cause: error?.message });
   }
   const row = identity[0][0];
-  if (row.trx_id === null || row.trx_id === undefined) fail('MYSQL_SOURCE_IDENTITY_UNAVAILABLE', 'MySQL source transaction has no InnoDB transaction ID');
+  // The consistent snapshot is pinned to this session for the transaction
+  // lifetime, so the connection id identifies the snapshot without requiring
+  // any privilege beyond reading user tables.
+  if (row.connection_id === null || row.connection_id === undefined) fail('MYSQL_SOURCE_IDENTITY_UNAVAILABLE', 'MySQL source connection has no connection ID');
   return createMysqlSourceState({
     serverUuid: String(row.server_uuid),
     databaseName: row.database_name,
     serverVersion: String(row.server_version),
     relation: { table: inspection.contract.relation.table },
-    snapshot: { engine: 'innodb-consistent-read', trxId: String(row.trx_id), isolationLevel: 'REPEATABLE READ' },
+    snapshot: { engine: 'innodb-consistent-read', connectionId: String(row.connection_id), isolationLevel: 'REPEATABLE READ' },
     contractId: inspection.contractId
   });
 }
@@ -193,7 +196,7 @@ export async function withMysqlSourceSnapshot({ sourceRef, credentialBroker, bat
   const ref = sourceRefConfig(sourceRef);
   const size = requireBatchSize(batchSize);
 
-  return withMysqlConnection({ ref, credentialBroker }, async connection => {
+  return withMysqlConnection({ targetRef: ref, credentialBroker }, async connection => {
     await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
     let snapshot;
     try {

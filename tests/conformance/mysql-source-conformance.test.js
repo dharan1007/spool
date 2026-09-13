@@ -68,7 +68,7 @@ test('MySQL source streams exact snapshot contents with snapshot identity', { sk
   const seen = await runtime.withSnapshot(tableRef('mysql_src_items'), async snapshot => {
     assert.equal(snapshot.sourceState.kind, SOURCE_STATE_KINDS.MYSQL);
     assert.match(snapshot.sourceState.state.serverUuid, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-    assert.match(snapshot.sourceState.state.snapshot.trxId, /^\d+$/);
+    assert.match(snapshot.sourceState.state.snapshot.connectionId, /^\d+$/);
     assert.equal(snapshot.sourceState.state.snapshot.isolationLevel, 'REPEATABLE READ');
     assert.deepEqual(snapshot.contract.primaryKey, ['id']);
     const rows = [];

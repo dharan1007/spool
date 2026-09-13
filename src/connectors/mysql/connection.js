@@ -58,11 +58,11 @@ export function mysqlConnectionConfig(ref, password) {
   return config;
 }
 
-export async function withMysqlConnection({ ref, credentialBroker }, callback) {
+export async function withMysqlConnection({ targetRef, credentialBroker }, callback) {
   if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_MYSQL_CONFIG', 'credentialBroker.withSecret() is required');
   if (typeof callback !== 'function') fail('INVALID_MYSQL_CONFIG', 'MySQL connection callback is required');
-  return credentialBroker.withSecret(ref?.secretRef, async password => {
-    const connection = await mysql.createConnection(mysqlConnectionConfig(ref, password));
+  return credentialBroker.withSecret(targetRef?.secretRef, async password => {
+    const connection = await mysql.createConnection(mysqlConnectionConfig(targetRef, password));
     try {
       return await callback(connection);
     } finally {
