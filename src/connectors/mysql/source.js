@@ -147,9 +147,18 @@ class MysqlSourceSnapshot {
 
   async assertReadOnly() {
     this.#assertOpen();
-    const [rows] = await this.#connection.query('SELECT @@transaction_read_only AS read_only');
-    if (Number(rows[0]?.read_only) !== 1) fail('MYSQL_SOURCE_NOT_READ_ONLY', 'MySQL source transaction is not read-only');
-    return true;
+    // Session variables do not reliably report the current transaction mode
+    // across versions, so prove read-only with a session-private write probe:
+    // temporary tables are invisible to other sessions and vanish on
+    // disconnect, and a refused probe fails the snapshot closed.
+    await this.#connection.query('CREATE TEMPORARY TABLE IF NOT EXISTS `spool_read_only_probe` (id INT PRIMARY KEY)');
+    try {
+      await this.#connection.query('INSERT INTO `spool_read_only_probe` (id) VALUES (1)');
+    } catch (error) {
+      if (error?.code === 'ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION' || /read.only/i.test(String(error?.message ?? ''))) return true;
+      throw error;
+    }
+    fail('MYSQL_SOURCE_NOT_READ_ONLY', 'MySQL source transaction accepted a write and is not read-only');
   }
 
   async *batches() {
@@ -197,7 +206,8 @@ export async function withMysqlSourceSnapshot({ sourceRef, credentialBroker, bat
   const size = requireBatchSize(batchSize);
 
   return withMysqlConnection({ targetRef: ref, credentialBroker }, async connection => {
-    await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
+    await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+    await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT');
     let snapshot;
     try {
       const inspection = await inspectRelation(connection, ref);
