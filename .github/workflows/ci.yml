@@ -121,7 +121,7 @@ jobs:
           SPOOL_TEST_POSTGRES_USER: spooltest
           SPOOL_TEST_PG_PASSWORD: spooltest-password
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: node --test --test-concurrency=1 tests/conformance/postgres-conformance.test.js tests/conformance/postgres-source-conformance.test.js tests/conformance/postgres-command-source-conformance.test.js tests/conformance/postgres-command-recovery-conformance.test.js tests/conformance/postgres-metadata-concurrency.test.js tests/conformance/postgres-content-verification.test.js
+        run: node --test --test-concurrency=1 tests/conformance/postgres-conformance.test.js tests/conformance/postgres-source-conformance.test.js tests/conformance/postgres-command-source-conformance.test.js tests/conformance/postgres-command-recovery-conformance.test.js tests/conformance/postgres-metadata-concurrency.test.js tests/conformance/postgres-content-verification.test.js tests/conformance/postgres-repair-conformance.test.js
       - name: Qualify durable PostgreSQL materialization beyond the former 256 MiB ceiling
         env:
           SPOOL_TEST_POSTGRES_ENDPOINT: postgresql://127.0.0.1:5432/?sslmode=disable

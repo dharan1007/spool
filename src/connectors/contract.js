@@ -17,8 +17,9 @@ const CAPABILITIES = new Set([
   'readOnlySnapshot',
   'targetContractBinding',
   'exactCommitEvidence',
-  'readAfterWriteVerification',
-  'continuousChangeCapture'
+    'readAfterWriteVerification',
+    'repairExecution',
+    'continuousChangeCapture'
 ]);
 
 export const CONNECTOR_ASSURANCE_SEMANTICS = Object.freeze({

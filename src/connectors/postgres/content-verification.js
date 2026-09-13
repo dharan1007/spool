@@ -1,9 +1,9 @@
 import { fail } from '../../core/errors.js';
 import { verifyContentProjection } from '../../execution/content-verification.js';
+import { normalizePostgresRow, normalizePostgresSchema } from './row-codec.js';
 import { withPostgresClient } from './connection.js';
 import { postgresTargetContractId } from './preflight.js';
 
-const FIELD = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const HASH = /^sha256:[a-f0-9]{64}$/;
 const MAX_BIND_PARAMS = 60_000;
 
@@ -13,16 +13,7 @@ function quoteIdentifier(value) {
 }
 
 function requireSchema(targetSchema) {
-  if (!Array.isArray(targetSchema) || targetSchema.length === 0) fail('INVALID_POSTGRES_VERIFICATION', 'targetSchema is required for PostgreSQL verification');
-  const seen = new Set();
-  return targetSchema.map(field => {
-    if (!field || typeof field !== 'object' || !FIELD.test(field.name ?? '') || typeof field.type !== 'string') {
-      fail('INVALID_POSTGRES_VERIFICATION', 'targetSchema contains an invalid field');
-    }
-    if (seen.has(field.name)) fail('INVALID_POSTGRES_VERIFICATION', `targetSchema contains duplicate field ${field.name}`);
-    seen.add(field.name);
-    return { name: field.name, type: field.type };
-  });
+  return normalizePostgresSchema(targetSchema);
 }
 
 function requireTargetContractId(value) {
@@ -30,43 +21,13 @@ function requireTargetContractId(value) {
   return value;
 }
 
-function normalizeLocalDateTime(value) {
-  const text = String(value).trim().replace(' ', 'T');
-  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?$/.exec(text);
-  if (!match) fail('POSTGRES_VERIFICATION_VALUE_INVALID', `Unsupported local datetime value ${text}`);
-  const fraction = (match[2] ?? '').replace(/0+$/, '');
-  return fraction ? `${match[1]}.${fraction}` : match[1];
+function normalizeExpectedRows(rows, targetSchema) {
+  if (!Array.isArray(rows)) fail('INVALID_POSTGRES_VERIFICATION', 'expectedRows must be an array');
+  return rows.map(row => normalizePostgresRow(row, targetSchema));
 }
 
-function normalizeValue(value, field) {
-  if (value === null || value === undefined) return null;
-  switch (field.type) {
-    case 'string': return String(value);
-    case 'integer': {
-      const number = Number(value);
-      if (!Number.isSafeInteger(number)) fail('POSTGRES_VERIFICATION_VALUE_INVALID', `PostgreSQL field ${field.name} is not a safe integer`);
-      return number;
-    }
-    case 'number': {
-      const number = Number(value);
-      if (!Number.isFinite(number)) fail('POSTGRES_VERIFICATION_VALUE_INVALID', `PostgreSQL field ${field.name} is not finite`);
-      return number;
-    }
-    case 'boolean': {
-      if (value === true || value === false) return value;
-      if (value === 't' || value === 'true') return true;
-      if (value === 'f' || value === 'false') return false;
-      fail('POSTGRES_VERIFICATION_VALUE_INVALID', `PostgreSQL field ${field.name} is not boolean`);
-      break;
-    }
-    case 'date': {
-      const text = String(value).trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) fail('POSTGRES_VERIFICATION_VALUE_INVALID', `PostgreSQL field ${field.name} is not a canonical date`);
-      return text;
-    }
-    case 'local_datetime': return normalizeLocalDateTime(value);
-    default: fail('POSTGRES_VERIFICATION_TYPE_UNSUPPORTED', `Unsupported verification type ${field.type}`);
-  }
+function normalizeActualRows(rows, targetSchema) {
+  return rows.map(row => normalizePostgresRow(row, targetSchema));
 }
 
 async function discoverVerificationContract(client, targetRef, targetSchema) {
@@ -104,27 +65,6 @@ async function discoverVerificationContract(client, targetRef, targetSchema) {
     if (!names.includes(key)) fail('POSTGRES_VERIFICATION_PRIMARY_KEY_UNPROJECTED', `Primary-key field ${key} is not part of targetSchema`);
   }
   return { primaryKey };
-}
-
-function normalizeExpectedRows(rows, targetSchema) {
-  if (!Array.isArray(rows)) fail('INVALID_POSTGRES_VERIFICATION', 'expectedRows must be an array');
-  return rows.map((row, index) => {
-    if (!row || typeof row !== 'object' || Array.isArray(row)) fail('INVALID_POSTGRES_VERIFICATION', `expectedRows[${index}] must be an object`);
-    const normalized = {};
-    for (const field of targetSchema) {
-      if (!Object.hasOwn(row, field.name)) fail('CONTENT_PROJECTION_FIELD_MISSING', `Expected row ${index} is missing field ${field.name}`);
-      normalized[field.name] = normalizeValue(row[field.name], field);
-    }
-    return normalized;
-  });
-}
-
-function normalizeActualRows(rows, targetSchema) {
-  return rows.map(row => {
-    const normalized = {};
-    for (const field of targetSchema) normalized[field.name] = normalizeValue(row[field.name], field);
-    return normalized;
-  });
 }
 
 async function readRows(client, targetRef, normalizedExpectedRows, primaryKey, targetSchema) {
