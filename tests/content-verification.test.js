@@ -6,7 +6,17 @@ import { createRepairPlan } from '../src/execution/repair-plan.js';
 const PLAN_ID = `sha256:${'1'.repeat(64)}`;
 const SNAPSHOT_ID = `sha256:${'2'.repeat(64)}`;
 const TARGET_CONTRACT_ID = `sha256:${'3'.repeat(64)}`;
-const targetIdentity = Object.freeze({ connector: 'postgres', resource: 'public.orders' });
+const targetIdentity = Object.freeze({
+  connector: 'postgres',
+  connectionId: 'orders-db',
+  resource: 'public.orders',
+  endpoint: 'postgres://db.internal:5432',
+  database: 'app',
+  schema: 'public',
+  table: 'orders',
+  identity: { user: 'spool' },
+  secretRef: { provider: 'env', key: 'SPOOL_REF' }
+});
 
 const expected = Object.freeze([
   Object.freeze({ tenant_id: 1, id: 10, name: 'alpha', amount: 12.5 }),
@@ -64,7 +74,7 @@ test('content verification rejects duplicate primary keys on either side', () =>
   );
 });
 
-test('repair plan is deterministic and binds every operation to verification evidence', () => {
+test('repair plan is deterministic, credential-reference-free and binds every operation to verification evidence', () => {
   const actual = [
     { tenant_id: 1, id: 10, name: 'alpha', amount: 12.5 },
     { tenant_id: 1, id: 11, name: 'changed', amount: 20 },
@@ -87,6 +97,8 @@ test('repair plan is deterministic and binds every operation to verification evi
   assert.equal(first.operations[0].precondition.actualRowHash, verification.diff.entries[0].actualRowHash);
   assert.equal(first.operations[1].precondition.absent, true);
   assert.equal(first.operations[2].precondition.actualRowHash, verification.diff.entries[2].actualRowHash);
+  assert.equal(Object.hasOwn(first.targetIdentity, 'secretRef'), false);
+  assert.doesNotMatch(JSON.stringify(first), /SPOOL_REF/);
 });
 
 test('verified content cannot produce a repair plan', () => {
