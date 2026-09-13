@@ -21,9 +21,10 @@ export class RunStore {
     this.path = resolve(path);
     this.db = new Database(this.path);
     this.closed = false;
-    this.db.pragma('busy_timeout = 5000');
-    this.db.pragma('journal_mode = WAL');
-    this.db.exec(`
+    try {
+      this.db.pragma('busy_timeout = 5000');
+      this.db.pragma('journal_mode = WAL');
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS spool_runs (
         migration_id TEXT PRIMARY KEY NOT NULL,
         status TEXT NOT NULL,
@@ -51,7 +52,11 @@ export class RunStore {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS spool_verification_batches_migration_range
         ON spool_verification_batches(migration_id, source_start, source_end_exclusive);
-    `);
+      `);
+    } catch (error) {
+      try { this.db.close(); } catch { /* preserve the original error */ }
+      throw error;
+    }
   }
   #open() { if (this.closed) fail('RUN_STORE_CLOSED', 'Run store is closed'); }
   get(migrationId) {

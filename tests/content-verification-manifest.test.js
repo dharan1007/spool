@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createContentVerificationAccumulator } from '../src/execution/content-verification-manifest.js';
 
+const HEX = '0123456789abcdef';
 const hash = char => `sha256:${char.repeat(64)}`;
+const hexFor = (id, offset) => HEX[(id.charCodeAt(0) + offset) % 16];
 const targetReadState = Object.freeze({
   connector: 'postgres',
   database: 'app',
@@ -23,8 +25,8 @@ function batch({ id, start, end, rows, status = 'VERIFIED', missing = 0, mismatc
       verificationId: hash(id),
       primaryKey: ['id'],
       columns: ['id', 'name'],
-      expected: { rowCount: rows, rootHash: hash(String.fromCharCode(id.charCodeAt(0) + 1)) },
-      actual: { rowCount: rows - missing + unexpected, rootHash: hash(String.fromCharCode(id.charCodeAt(0) + 2)) },
+      expected: { rowCount: rows, rootHash: hash(hexFor(id, 1)) },
+      actual: { rowCount: rows - missing + unexpected, rootHash: hash(hexFor(id, 2)) },
       diff: { counts: { missing, mismatch, unexpected }, total: missing + mismatch + unexpected, entries: [] }
     }
   };

@@ -27,15 +27,20 @@ export class LeaseStore {
     this.path = resolve(path);
     this.db = new Database(this.path);
     this.closed = false;
-    this.db.pragma('busy_timeout = 5000');
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS spool_execution_leases (
-        resource TEXT PRIMARY KEY NOT NULL,
-        owner TEXT NOT NULL,
-        expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
-        fencing_token INTEGER NOT NULL CHECK (fencing_token >= 1)
-      ) STRICT;
-    `);
+    try {
+      this.db.pragma('busy_timeout = 5000');
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS spool_execution_leases (
+          resource TEXT PRIMARY KEY NOT NULL,
+          owner TEXT NOT NULL,
+          expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
+          fencing_token INTEGER NOT NULL CHECK (fencing_token >= 1)
+        ) STRICT;
+      `);
+    } catch (error) {
+      try { this.db.close(); } catch { /* preserve the original error */ }
+      throw error;
+    }
   }
 
   #open() {

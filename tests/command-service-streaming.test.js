@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile, appendFile, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { SpoolCommandService } from '../src/daemon/command-service.js';
@@ -140,7 +140,7 @@ test('inspect and dry-run use a durable per-migration snapshot with exact stream
     assert.equal(inspected.sourceSchema.length, 2);
     const snapshots = await allSnapshotFiles(f.snapshotDir);
     assert.equal(snapshots.length, 1);
-    assert.equal(snapshots[0].includes(':'), false);
+    assert.equal(basename(snapshots[0]).includes(':'), false);
     const dry = await f.service.dryRun(request);
     assert.equal(dry.processedRows, 1201);
     assert.equal(dry.validRows, 1200);
