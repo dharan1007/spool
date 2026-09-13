@@ -2,7 +2,8 @@ import { SVMP_STATES } from './svmp.js';
 
 export const UNSAFE_MODEL_MUTATIONS = Object.freeze({
   ALLOW_CHECKPOINT_WITHOUT_EVIDENCE: 'ALLOW_CHECKPOINT_WITHOUT_EVIDENCE',
-  ALLOW_STALE_FENCE_WRITE: 'ALLOW_STALE_FENCE_WRITE'
+  ALLOW_STALE_FENCE_WRITE: 'ALLOW_STALE_FENCE_WRITE',
+  ALLOW_CUTOVER_WITHOUT_VERIFICATION: 'ALLOW_CUTOVER_WITHOUT_VERIFICATION'
 });
 
 const INVARIANTS = Object.freeze({
@@ -49,6 +50,13 @@ const INVARIANTS = Object.freeze({
       && !state.verified
       && state.phase === SVMP_STATES.RECONCILIATION_CONFLICT
     );
+  },
+  cutover_requires_verified_evidence(state) {
+    if (![SVMP_STATES.CUTOVER_ARMED, SVMP_STATES.CUTOVER_COMMITTED].includes(state.phase)) return true;
+    return state.verified
+      && state.checkpointAdvanced
+      && state.targetCommitted
+      && state.evidencePresent;
   }
 });
 
@@ -82,6 +90,8 @@ function initialState() {
     staleWriteSucceeded: false,
     verificationFailed: false,
     verified: false,
+    cutoverArmed: false,
+    cutoverCommitted: false,
     crashed: false
   };
 }
@@ -263,6 +273,36 @@ function actionsFor(state, mutation) {
       leaseHeld: false
     }));
 
+  add('arm_cutover',
+    (mutation === UNSAFE_MODEL_MUTATIONS.ALLOW_CUTOVER_WITHOUT_VERIFICATION
+      ? [SVMP_STATES.VERIFYING, SVMP_STATES.VERIFIED, SVMP_STATES.CUTOVER_ABORTED].includes(state.phase)
+      : [SVMP_STATES.VERIFIED, SVMP_STATES.CUTOVER_ABORTED].includes(state.phase))
+      && !state.cutoverArmed
+      && !state.cutoverCommitted
+      && (mutation === UNSAFE_MODEL_MUTATIONS.ALLOW_CUTOVER_WITHOUT_VERIFICATION || state.verified),
+    () => next(state, {
+      phase: SVMP_STATES.CUTOVER_ARMED,
+      cutoverArmed: true
+    }));
+
+  add('commit_cutover',
+    state.phase === SVMP_STATES.CUTOVER_ARMED
+      && state.cutoverArmed
+      && state.targetStable
+      && !state.driftObserved,
+    () => next(state, {
+      phase: SVMP_STATES.CUTOVER_COMMITTED,
+      cutoverArmed: false,
+      cutoverCommitted: true
+    }));
+
+  add('abort_cutover',
+    state.phase === SVMP_STATES.CUTOVER_ARMED,
+    () => next(state, {
+      phase: SVMP_STATES.CUTOVER_ABORTED,
+      cutoverArmed: false
+    }));
+
   const sourceDriftPhase = [
     SVMP_STATES.SNAPSHOTTED,
     SVMP_STATES.PLANNED,
@@ -284,7 +324,8 @@ function actionsFor(state, mutation) {
     SVMP_STATES.VALIDATED,
     SVMP_STATES.AUTHORIZED,
     SVMP_STATES.EXECUTING,
-    SVMP_STATES.RECONCILING
+    SVMP_STATES.RECONCILING,
+    SVMP_STATES.CUTOVER_ARMED
   ].includes(state.phase);
   add('target_drift', targetDriftPhase && state.targetStable, () => next(state, {
     phase: SVMP_STATES.TARGET_DRIFT,

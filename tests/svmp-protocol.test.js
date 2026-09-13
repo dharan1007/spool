@@ -18,7 +18,9 @@ test('SVMP exposes the canonical success path and explicit exceptional states', 
     SVMP_STATES.EXECUTING,
     SVMP_STATES.RECONCILING,
     SVMP_STATES.VERIFYING,
-    SVMP_STATES.VERIFIED
+    SVMP_STATES.VERIFIED,
+    SVMP_STATES.CUTOVER_ARMED,
+    SVMP_STATES.CUTOVER_COMMITTED
   ]);
   assert.deepEqual([...SVMP_EXCEPTION_STATES].sort(), [
     'AUTHORITY_EXPIRED', 'COMMIT_UNKNOWN', 'COMPENSATION_REQUIRED', 'LEASE_LOST',
@@ -36,6 +38,22 @@ test('SVMP rejects phase skipping and allows only declared recovery transitions'
   assert.equal(assertSvmpTransition('COMMIT_UNKNOWN', 'RECONCILING'), true);
   assert.equal(assertSvmpTransition('VERIFICATION_FAILED', 'COMPENSATION_REQUIRED'), true);
   assert.throws(() => assertSvmpTransition('LEASE_LOST', 'EXECUTING'), error => error?.code === 'SVMP_INVALID_TRANSITION');
+});
+
+test('SVMP cutover arms only from verified evidence and commits, aborts or re-arms explicitly', async () => {
+  const { SVMP_STATES, assertSvmpTransition, listSvmpTransitions } = await loadProtocol();
+  assert.equal(assertSvmpTransition('VERIFIED', 'CUTOVER_ARMED'), true);
+  assert.equal(assertSvmpTransition('CUTOVER_ARMED', 'CUTOVER_COMMITTED'), true);
+  assert.equal(assertSvmpTransition('CUTOVER_ARMED', 'CUTOVER_ABORTED'), true);
+  assert.equal(assertSvmpTransition('CUTOVER_ARMED', 'TARGET_DRIFT'), true);
+  assert.equal(assertSvmpTransition('CUTOVER_ABORTED', 'CUTOVER_ARMED'), true);
+  assert.deepEqual(listSvmpTransitions('CUTOVER_COMMITTED'), []);
+  assert.deepEqual(listSvmpTransitions('CUTOVER_ABORTED'), ['CUTOVER_ARMED']);
+  assert.throws(() => assertSvmpTransition('VERIFYING', 'CUTOVER_ARMED'), error => error?.code === 'SVMP_INVALID_TRANSITION');
+  assert.throws(() => assertSvmpTransition('VERIFICATION_FAILED', 'CUTOVER_ARMED'), error => error?.code === 'SVMP_INVALID_TRANSITION');
+  assert.throws(() => assertSvmpTransition('CUTOVER_COMMITTED', 'CUTOVER_ARMED'), error => error?.code === 'SVMP_INVALID_TRANSITION');
+  assert.throws(() => assertSvmpTransition('CUTOVER_ARMED', 'VERIFIED'), error => error?.code === 'SVMP_INVALID_TRANSITION');
+  assert.equal(SVMP_STATES.CUTOVER_ARMED, 'CUTOVER_ARMED');
 });
 
 test('SVMP mutation identity set binds all eight correctness identities deterministically', async () => {
