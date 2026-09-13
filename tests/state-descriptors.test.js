@@ -7,9 +7,11 @@ import {
   createPostgresSourceState,
   createPostgresDatabaseSourceState,
   createMysqlSourceState,
+  createMssqlSourceState,
   createSqliteTargetState,
   createPostgresTargetState,
   createMysqlTargetState,
+  createMssqlTargetState,
   assertSourceStateBinding,
   assertTargetStateBinding
 } from '../src/protocol/state-descriptors.js';
@@ -246,6 +248,54 @@ test('MySQL states reject foreign dialects and unsafe identity material', () => 
   );
   assert.throws(
     () => createMysqlTargetState({ ...mysqlBase(), relation: { schema: 'public', table: 'orders', relid: 1 } }),
+    error => error?.code === 'UNKNOWN_TARGET_STATE_FIELD'
+  );
+});
+
+const mssqlBase = () => ({
+  serverName: 'MSSQLCI',
+  databaseName: 'spooltest',
+  serverVersion: 'Microsoft SQL Server 2022 (RTM-CU14)',
+  relation: { table: 'orders' },
+  contractId: HASH('e')
+});
+
+test('SQL Server source and target states bind server, database and snapshot identity', () => {
+  const source = createMssqlSourceState({
+    ...mssqlBase(),
+    snapshot: { engine: 'snapshot-isolation', sessionId: '57', isolationLevel: 'SNAPSHOT' }
+  });
+  const target = createMssqlTargetState(mssqlBase());
+  assert.equal(source.kind, SOURCE_STATE_KINDS.MSSQL);
+  assert.equal(target.kind, TARGET_STATE_KINDS.MSSQL);
+  assert.match(source.sourceStateId, /^sha256:[a-f0-9]{64}$/);
+  assert.match(target.targetStateId, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(source.sourceStateId, createMssqlSourceState({
+    ...mssqlBase(),
+    snapshot: { engine: 'snapshot-isolation', sessionId: '57', isolationLevel: 'SNAPSHOT' }
+  }).sourceStateId);
+  assert.notEqual(source.sourceStateId, createMssqlSourceState({
+    ...mssqlBase(),
+    snapshot: { engine: 'snapshot-isolation', sessionId: '58', isolationLevel: 'SNAPSHOT' }
+  }).sourceStateId);
+  assert.equal(assertSourceStateBinding(source, source), true);
+});
+
+test('SQL Server states reject foreign dialects and unsafe identity material', () => {
+  assert.throws(
+    () => createMssqlSourceState({ ...mssqlBase(), snapshot: { engine: 'innodb-consistent-read', sessionId: '57', isolationLevel: 'SNAPSHOT' } }),
+    error => error?.code === 'INVALID_SOURCE_STATE'
+  );
+  assert.throws(
+    () => createMssqlSourceState({ ...mssqlBase(), snapshot: { engine: 'snapshot-isolation', sessionId: 'abc', isolationLevel: 'SNAPSHOT' } }),
+    error => error?.code === 'INVALID_SOURCE_STATE'
+  );
+  assert.throws(
+    () => createMssqlSourceState({ ...mssqlBase(), relation: { schema: 'dbo', table: 'orders' }, snapshot: { engine: 'snapshot-isolation', sessionId: '57', isolationLevel: 'SNAPSHOT' } }),
+    error => error?.code === 'UNKNOWN_SOURCE_STATE_FIELD'
+  );
+  assert.throws(
+    () => createMssqlTargetState({ ...mssqlBase(), relation: { schema: 'dbo', table: 'orders', relid: 1 } }),
     error => error?.code === 'UNKNOWN_TARGET_STATE_FIELD'
   );
 });

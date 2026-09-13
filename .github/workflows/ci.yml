@@ -164,10 +164,42 @@ jobs:
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node --test --test-concurrency=1 tests/conformance/mysql-source-conformance.test.js tests/conformance/mysql-target-conformance.test.js
 
+  mssql-conformance:
+    name: mssql-production-conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: SpoolTest-2026!Strong#
+        ports:
+          - 1433:1433
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exactly from committed lockfile
+        run: npm ci
+      - name: Run real SQL Server source and target conformance
+        env:
+          SPOOL_TEST_MSSQL_ENDPOINT: mssql://127.0.0.1:1433/?sslmode=disable
+          SPOOL_TEST_MSSQL_DATABASE: spooltest
+          SPOOL_TEST_MSSQL_USER: sa
+          SPOOL_TEST_MSSQL_PASSWORD: SpoolTest-2026!Strong#
+          SPOOL_TEST_MSSQL_READER_USER: spool_reader
+          SPOOL_TEST_MSSQL_READER_PASSWORD: SpoolTest-2026!Reader#
+          SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node --test --test-concurrency=1 tests/conformance/mssql-source-conformance.test.js tests/conformance/mssql-target-conformance.test.js
+
   release:
     name: publish-release
     if: github.event_name == 'workflow_dispatch' && inputs.release == true
-    needs: [verify, sqlite-portability, postgres-conformance, mysql-conformance]
+    needs: [verify, sqlite-portability, postgres-conformance, mysql-conformance, mssql-conformance]
     permissions:
       contents: write
     runs-on: ubuntu-latest
