@@ -64,16 +64,15 @@ const expectedRows = [
   { id: 2, name: 'Lin', amount: 20, active: false, day: '2026-09-14', local_at: '2026-09-14T11:00:00' }
 ];
 
-test('PostgreSQL preflight discovers ordered primary-key columns and advertises read-after-write verification capability', { skip: !enabled }, async () => {
+test('PostgreSQL truthfully advertises read-after-write verification without overclaiming connector-level C5', { skip: !enabled }, async () => {
   const table = 'spool_pg_content_preflight';
   await reset(table);
-  const preflight = await inspectPostgresTarget({ targetRef: ref(table), targetSchema: schema(), credentialBroker: broker });
-  assert.deepEqual(preflight.primaryKey, ['id']);
+  await inspectPostgresTarget({ targetRef: ref(table), targetSchema: schema(), credentialBroker: broker });
   assert.equal(POSTGRES_TARGET_DESCRIPTOR.assurance.level, 'C4');
   assert.equal(POSTGRES_TARGET_DESCRIPTOR.capabilities.readAfterWriteVerification, true);
 });
 
-test('PostgreSQL verifies exact committed values for only the expected migration keys', { skip: !enabled }, async () => {
+test('PostgreSQL verifies exact committed values for only the expected migration keys and discovers the real PK', { skip: !enabled }, async () => {
   const table = 'spool_pg_content_exact';
   await reset(table);
   const runtime = createPostgresTargetRuntime({ credentialBroker: broker, leaseTtlMs: 60_000 });
@@ -101,10 +100,10 @@ test('PostgreSQL verifies exact committed values for only the expected migration
     const verified = await execution.verifyContent({
       expectedRows,
       targetSchema: schema(),
-      primaryKey: preflight.primaryKey,
       targetContractId: preflight.targetContractId
     });
     assert.equal(verified.status, 'VERIFIED');
+    assert.deepEqual(verified.primaryKey, ['id']);
     assert.equal(verified.expected.rowCount, 2);
     assert.equal(verified.actual.rowCount, 2);
     assert.equal(verified.diff.total, 0);
@@ -138,10 +137,10 @@ test('PostgreSQL verification detects changed and missing committed rows and yie
     const verification = await execution.verifyContent({
       expectedRows,
       targetSchema: schema(),
-      primaryKey: preflight.primaryKey,
       targetContractId: preflight.targetContractId
     });
     assert.equal(verification.status, 'DIFF');
+    assert.deepEqual(verification.primaryKey, ['id']);
     assert.deepEqual(verification.diff.counts, { missing: 1, mismatch: 1, unexpected: 0 });
 
     const repair = createRepairPlan({
