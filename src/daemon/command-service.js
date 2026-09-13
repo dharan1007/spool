@@ -13,6 +13,7 @@ import {
   createPostgresTargetRuntime
 } from '../connectors/postgres/runtime.js';
 import { createPathPolicy } from '../platform/path-policy.js';
+import { canonicalJson } from '../platform/canonical-json.js';
 import { connectorIdentity } from '../platform/contracts.js';
 import { createMigrationPlan } from '../platform/plan.js';
 import { createBoundApproval, assertBoundApproval } from '../platform/approval.js';
@@ -268,6 +269,7 @@ export class SpoolCommandService {
   }
 
   async approve(request, { expiresAt, nonce } = {}) {
+    requireRequest(request); this.#requireCutoverOpen(request.migrationId);
     const prepared = await this.#prepare(request);
     if (typeof expiresAt !== 'string' || typeof nonce !== 'string') fail('INVALID_APPROVAL_REQUEST', 'expiresAt and nonce are required');
     const effects = await prepared.targetRuntime.approvalEffects(prepared.plan);
@@ -280,7 +282,7 @@ export class SpoolCommandService {
   runSyncGuard() { fail('ASYNC_COMMAND_ONLY', 'Production command execution is asynchronous'); }
 
   async run(request, { approval = null } = {}) {
-    this.#open(); requireRequest(request);
+    this.#open(); requireRequest(request); this.#requireCutoverOpen(request.migrationId);
     const requestSemanticId = migrationRequestSemanticId(request);
     const current = this.runs.get(request.migrationId);
     if (current?.status === 'COMPLETE' && current.receipt?.record?.requestSemanticId) {
@@ -540,7 +542,7 @@ export class SpoolCommandService {
   }
 
   async approveRepair(request, { repairPlanIds, expiresAt, nonce } = {}) {
-    this.#open(); requireRequest(request);
+    this.#open(); requireRequest(request); this.#requireCutoverOpen(request.migrationId);
     if (!Array.isArray(repairPlanIds) || repairPlanIds.length === 0) fail('INVALID_REPAIR_REQUEST', 'repairPlanIds must be a non-empty array');
     if (typeof expiresAt !== 'string' || typeof nonce !== 'string') fail('INVALID_REPAIR_REQUEST', 'expiresAt and nonce are required');
     const run = this.runs.get(request.migrationId);
@@ -565,7 +567,7 @@ export class SpoolCommandService {
   }
 
   async runRepair(request, { repairApproval = null } = {}) {
-    this.#open(); requireRequest(request);
+    this.#open(); requireRequest(request); this.#requireCutoverOpen(request.migrationId);
     if (!repairApproval) fail('REPAIR_APPROVAL_REQUIRED', 'Repair execution requires a separately-authorized repair approval');
     const run = this.runs.get(request.migrationId);
     if (!run) fail('REPAIR_NOT_REQUIRED', 'Repair execution requires a run in VERIFICATION_FAILED status');
@@ -666,6 +668,95 @@ export class SpoolCommandService {
     if (!run?.repair?.receipt) fail('REPAIR_RECEIPT_NOT_AVAILABLE', 'Repair receipt is not available');
     return run.repair.receipt;
   }
+
+  #requireCutoverOpen(migrationId) {
+    if (this.runs.cutover(migrationId)?.status === 'COMMITTED') {
+      fail('CUTOVER_ALREADY_COMMITTED', 'Target is cut over; migration mutation is frozen');
+    }
+  }
+
+  async beginCutover(request, { receipt } = {}) {
+    this.#open(); requireRequest(request);
+    if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) fail('INVALID_CUTOVER_REQUEST', 'Cutover arming requires the recorded migration or repair receipt');
+    const run = this.runs.get(request.migrationId);
+    if (!run || (run.status !== 'COMPLETE' && run.status !== 'REPAIR_COMPLETE')) fail('CUTOVER_NOT_ALLOWED', 'Cutover requires a completed verified run');
+    let receiptKind = null;
+    let recorded = null;
+    if (run.status === 'COMPLETE' && run.receipt?.receiptId === receipt.receiptId) {
+      receiptKind = 'migration';
+      recorded = run.receipt.record;
+    } else if (run.status === 'REPAIR_COMPLETE' && run.repair?.receipt?.receiptId === receipt.receiptId) {
+      receiptKind = 'repair';
+      recorded = run.repair.receipt.record;
+    } else {
+      fail('CUTOVER_RECEIPT_MISMATCH', 'Cutover receipt does not match the recorded run outcome');
+    }
+    if (recorded.migrationId !== request.migrationId) fail('CUTOVER_RECEIPT_MISMATCH', 'Cutover receipt is bound to a different migration');
+    if (canonicalJson(receipt.record) !== canonicalJson(recorded)) {
+      fail('CUTOVER_RECEIPT_MISMATCH', 'Cutover receipt content does not match the recorded run outcome');
+    }
+    const existing = this.runs.cutover(request.migrationId);
+    if (existing?.status === 'COMMITTED') fail('CUTOVER_ALREADY_COMMITTED', 'Cutover is already committed');
+    return this.runs.beginCutover({
+      migrationId: request.migrationId,
+      receiptId: receipt.receiptId,
+      receiptKind,
+      planId: recorded.planId,
+      sourceSnapshotId: recorded.sourceSnapshotId,
+      targetIdentity: recorded.targetIdentity,
+      targetContractId: recorded.targetContractId,
+      armedAt: new Date().toISOString()
+    });
+  }
+
+  async commitCutover(request) {
+    this.#open(); requireRequest(request);
+    const armed = this.runs.cutover(request.migrationId);
+    if (!armed) fail('CUTOVER_NOT_ARMED', 'Cutover commit requires an armed cutover');
+    if (armed.status === 'COMMITTED') fail('CUTOVER_ALREADY_COMMITTED', 'Cutover is already committed');
+    if (armed.status !== 'ARMED') fail('CUTOVER_NOT_ARMED', 'Cutover commit requires an armed cutover');
+    const run = this.runs.get(request.migrationId);
+    if (!run || (run.status !== 'COMPLETE' && run.status !== 'REPAIR_COMPLETE')) fail('CUTOVER_NOT_ALLOWED', 'Cutover requires a completed verified run');
+    const prepared = await this.#prepare(request);
+    if (prepared.plan.planId !== armed.planId) fail('CUTOVER_PLAN_CHANGED', 'Migration plan changed since cutover arming');
+    if (prepared.targetPreflight.targetContractId !== armed.targetContractId) {
+      fail('CUTOVER_CONTRACT_CHANGED', 'Target contract changed since cutover arming', {
+        armedTargetContractId: armed.targetContractId,
+        actualTargetContractId: prepared.targetPreflight.targetContractId
+      });
+    }
+    const targetExecution = await prepared.targetRuntime.createExecution({ migrationId: request.migrationId, targetRef: prepared.plan.targetRef });
+    try {
+      const lease = await targetExecution.renewLease();
+      const decidedAt = new Date().toISOString();
+      return this.runs.commitCutover({
+        migrationId: request.migrationId,
+        commitEvidence: {
+          targetContractId: prepared.targetPreflight.targetContractId,
+          leaseResource: targetExecution.leaseResource ?? null,
+          fencingToken: lease.fencingToken,
+          fenced: true,
+          committedAt: decidedAt
+        },
+        decidedAt
+      });
+    } finally {
+      await targetExecution.close();
+    }
+  }
+
+  async abortCutover(migrationId, { reason } = {}) {
+    this.#open();
+    if (typeof migrationId !== 'string' || !migrationId) fail('INVALID_CUTOVER_REQUEST', 'migrationId is required');
+    if (typeof reason !== 'string' || !reason.trim() || reason.length > 256) fail('INVALID_CUTOVER_REQUEST', 'abort reason must be a non-empty bounded string');
+    const armed = this.runs.cutover(migrationId);
+    if (!armed) fail('CUTOVER_NOT_ARMED', 'Cutover abort requires an armed cutover');
+    if (armed.status === 'COMMITTED') fail('CUTOVER_ALREADY_COMMITTED', 'A committed cutover cannot be aborted');
+    if (armed.status !== 'ARMED') fail('CUTOVER_NOT_ARMED', 'Cutover abort requires an armed cutover');
+    return this.runs.abortCutover({ migrationId, reason: reason.trim(), decidedAt: new Date().toISOString() });
+  }
+
+  cutover(migrationId) { this.#open(); return this.runs.cutover(migrationId); }
 
   close() { if (!this.closed) { this.runs.close(); this.closed = true; } }
 }

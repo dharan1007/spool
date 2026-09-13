@@ -67,6 +67,20 @@ export class RunStore {
         attempted_at TEXT NOT NULL,
         PRIMARY KEY (migration_id, repair_plan_id, key_id)
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS spool_cutovers (
+        migration_id TEXT PRIMARY KEY NOT NULL,
+        status TEXT NOT NULL,
+        receipt_id TEXT NOT NULL,
+        receipt_kind TEXT NOT NULL,
+        plan_id TEXT NOT NULL,
+        source_snapshot_id TEXT NOT NULL,
+        target_identity_json TEXT NOT NULL,
+        target_contract_id TEXT NOT NULL,
+        commit_evidence_json TEXT,
+        abort_reason TEXT,
+        armed_at TEXT NOT NULL,
+        decided_at TEXT
+      ) STRICT;
       `);
     } catch (error) {
       try { this.db.close(); } catch { /* preserve the original error */ }
@@ -199,6 +213,66 @@ export class RunStore {
     if (!repair || typeof repair !== 'object' || Array.isArray(repair)) fail('INVALID_RUN_STORE_INPUT', 'repair record is required');
     this.db.prepare(`UPDATE spool_runs SET status='REPAIR_COMPLETE', repair_json=?, completed_at=?, last_error_code=NULL WHERE migration_id=?`)
       .run(canonicalJson(repair), text(completedAt, 'completedAt'), text(migrationId, 'migrationId'));
+  }
+  beginCutover({ migrationId, receiptId, receiptKind, planId, sourceSnapshotId, targetIdentity, targetContractId, armedAt }) {
+    this.#open();
+    text(migrationId, 'migrationId'); text(receiptId, 'receiptId'); text(planId, 'planId');
+    text(sourceSnapshotId, 'sourceSnapshotId'); text(targetContractId, 'targetContractId'); text(armedAt, 'armedAt');
+    if (receiptKind !== 'migration' && receiptKind !== 'repair') fail('INVALID_RUN_STORE_INPUT', 'receiptKind must be migration or repair');
+    const existing = this.cutover(migrationId);
+    if (existing && existing.status === 'COMMITTED') fail('CUTOVER_STATE_CONFLICT', 'Cutover is already committed');
+    if (existing && existing.status === 'ARMED') return existing;
+    this.db.prepare(`
+      INSERT INTO spool_cutovers (
+        migration_id, status, receipt_id, receipt_kind, plan_id, source_snapshot_id,
+        target_identity_json, target_contract_id, commit_evidence_json, abort_reason, armed_at, decided_at
+      ) VALUES (?, 'ARMED', ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)
+      ON CONFLICT(migration_id) DO UPDATE SET
+        status='ARMED', receipt_id=excluded.receipt_id, receipt_kind=excluded.receipt_kind,
+        plan_id=excluded.plan_id, source_snapshot_id=excluded.source_snapshot_id,
+        target_identity_json=excluded.target_identity_json, target_contract_id=excluded.target_contract_id,
+        commit_evidence_json=NULL, abort_reason=NULL, armed_at=excluded.armed_at, decided_at=NULL
+    `).run(
+      migrationId, receiptId, receiptKind, planId, sourceSnapshotId,
+      canonicalJson(targetIdentity), targetContractId, armedAt
+    );
+    return this.cutover(migrationId);
+  }
+  commitCutover({ migrationId, commitEvidence, decidedAt }) {
+    this.#open();
+    if (!commitEvidence || typeof commitEvidence !== 'object' || Array.isArray(commitEvidence)) fail('INVALID_RUN_STORE_INPUT', 'commit evidence is required');
+    const existing = this.cutover(migrationId);
+    if (!existing || existing.status !== 'ARMED') fail('CUTOVER_STATE_CONFLICT', 'Cutover commit requires an armed cutover');
+    this.db.prepare(`UPDATE spool_cutovers SET status='COMMITTED', commit_evidence_json=?, decided_at=? WHERE migration_id=?`)
+      .run(canonicalJson(commitEvidence), text(decidedAt, 'decidedAt'), text(migrationId, 'migrationId'));
+    return this.cutover(migrationId);
+  }
+  abortCutover({ migrationId, reason, decidedAt }) {
+    this.#open();
+    const existing = this.cutover(migrationId);
+    if (!existing || existing.status !== 'ARMED') fail('CUTOVER_STATE_CONFLICT', 'Cutover abort requires an armed cutover');
+    this.db.prepare(`UPDATE spool_cutovers SET status='ABORTED', abort_reason=?, decided_at=? WHERE migration_id=?`)
+      .run(text(reason, 'reason'), text(decidedAt, 'decidedAt'), text(migrationId, 'migrationId'));
+    return this.cutover(migrationId);
+  }
+  cutover(migrationId) {
+    this.#open(); text(migrationId, 'migrationId');
+    const row = this.db.prepare('SELECT * FROM spool_cutovers WHERE migration_id = ?').get(migrationId);
+    if (!row) return null;
+    return Object.freeze({
+      migrationId: row.migration_id,
+      status: row.status,
+      receiptId: row.receipt_id,
+      receiptKind: row.receipt_kind,
+      planId: row.plan_id,
+      sourceSnapshotId: row.source_snapshot_id,
+      targetIdentity: parse(row.target_identity_json),
+      targetContractId: row.target_contract_id,
+      commitEvidence: parse(row.commit_evidence_json),
+      abortReason: row.abort_reason,
+      armedAt: row.armed_at,
+      decidedAt: row.decided_at
+    });
   }
   checkpointStore(migrationId) {
     this.#open(); text(migrationId, 'migrationId');

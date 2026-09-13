@@ -22,7 +22,8 @@ const requiredInvariants = [
   'execution_requires_current_authority',
   'drift_cannot_reach_verified',
   'unknown_commit_requires_reconciliation',
-  'conflicting_reconciliation_cannot_advance'
+  'conflicting_reconciliation_cannot_advance',
+  'cutover_requires_verified_evidence'
 ];
 const proved = new Set(safe.invariantsProved);
 for (const invariant of requiredInvariants) {
@@ -53,6 +54,17 @@ if (!staleFenceMutation.violations.some(item => Array.isArray(item.trace) && ite
   fail('stale-fence mutation failure did not produce a counterexample trace', staleFenceMutation);
 }
 
+const cutoverMutation = checkSvmpExecutionModel({
+  mutation: UNSAFE_MODEL_MUTATIONS.ALLOW_CUTOVER_WITHOUT_VERIFICATION
+});
+if (cutoverMutation.ok ||
+    !cutoverMutation.violations.some(item => item.invariant === 'cutover_requires_verified_evidence')) {
+  fail('mutation test failed to detect cutover arming without verification', cutoverMutation);
+}
+if (!cutoverMutation.violations.some(item => Array.isArray(item.trace) && item.trace.length > 0)) {
+  fail('cutover mutation failure did not produce a counterexample trace', cutoverMutation);
+}
+
 console.log(JSON.stringify({
   ok: true,
   protocol: 'SVMP',
@@ -62,6 +74,7 @@ console.log(JSON.stringify({
   invariantsProved: safe.invariantsProved,
   mutationTests: {
     checkpointWithoutEvidence: 'counterexample detected',
-    staleFenceWrite: 'counterexample detected'
+    staleFenceWrite: 'counterexample detected',
+    cutoverWithoutVerification: 'counterexample detected'
   }
 }, null, 2));
