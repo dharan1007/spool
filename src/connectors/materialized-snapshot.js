@@ -1,16 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { chmod, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fail } from '../core/errors.js';
 import { canonicalJson, sha256Canonical } from '../platform/canonical-json.js';
+import { SOURCE_STATE_KINDS } from '../protocol/state-descriptors.js';
 
 export const MATERIALIZED_SNAPSHOT_ALGORITHM = 'spool-materialized-source-v1';
 const SNAPSHOT_ID = /^sha256:[a-f0-9]{64}$/;
 const DEFAULT_CHUNK_ROWS = 10_000;
 const MAX_CHUNK_ROWS = 100_000;
 const DEFAULT_MAX_CHUNK_BYTES = 16 * 1024 * 1024;
+const PUBLICATION_RACE_CODES = new Set(['EEXIST', 'ENOTEMPTY', 'EPERM']);
+const UNSUPPORTED_DIRECTORY_SYNC_CODES = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP']);
 
 function requirePlainObject(value, code, message) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(code, message);
@@ -51,6 +54,17 @@ function immutable(value) {
   return Object.freeze(out);
 }
 
+function assertSourceContractBinding(sourceState, contractId) {
+  if (sourceState?.kind !== SOURCE_STATE_KINDS.POSTGRES) return;
+  const sourceContractId = sourceState?.state?.contractId;
+  if (sourceContractId !== contractId) {
+    fail('SOURCE_SNAPSHOT_CONTRACT_MISMATCH', 'PostgreSQL materialized snapshot contract does not match its bound SourceState', {
+      sourceContractId: sourceContractId ?? null,
+      manifestContractId: contractId
+    });
+  }
+}
+
 function semanticManifest({ sourceState, contract, contractId, sourceIdentity, chunkRows, chunks, rowCount, byteCount }) {
   return {
     schemaVersion: 1,
@@ -71,6 +85,21 @@ function finalSnapshotPath(snapshotDir, snapshotId) {
   requireSnapshotDir(snapshotDir);
   requireSnapshotId(snapshotId);
   return join(snapshotDir, snapshotId.slice('sha256:'.length));
+}
+
+async function syncDirectory(path) {
+  if (process.platform === 'win32') return false;
+  let handle = null;
+  try {
+    handle = await open(path, 'r');
+    await handle.sync();
+    return true;
+  } catch (error) {
+    if (UNSUPPORTED_DIRECTORY_SYNC_CODES.has(error?.code)) return false;
+    throw error;
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
 }
 
 async function syncTextFile(path, text) {
@@ -134,6 +163,7 @@ function validateManifestShape(manifest, snapshotId) {
   if (manifest.snapshotId !== snapshotId) fail('SOURCE_SNAPSHOT_CORRUPT', 'Materialized source manifest identity does not match requested snapshot');
   if (!manifest.sourceState || manifest.sourceState.sourceStateId !== manifest.sourceStateId) fail('SOURCE_SNAPSHOT_CORRUPT', 'Materialized source manifest has invalid SourceState binding');
   if (typeof manifest.contractId !== 'string' || !SNAPSHOT_ID.test(manifest.contractId)) fail('SOURCE_SNAPSHOT_CORRUPT', 'Materialized source manifest has invalid contract identity');
+  assertSourceContractBinding(manifest.sourceState, manifest.contractId);
   if (!Array.isArray(manifest.chunks) || !Number.isSafeInteger(manifest.rowCount) || manifest.rowCount < 0 || !Number.isSafeInteger(manifest.byteCount) || manifest.byteCount < 0) {
     fail('SOURCE_SNAPSHOT_CORRUPT', 'Materialized source manifest has invalid accounting');
   }
@@ -181,11 +211,14 @@ export async function materializeSnapshotBatches({ snapshotDir, sourceState, con
   if (typeof sourceState.sourceStateId !== 'string' || !SNAPSHOT_ID.test(sourceState.sourceStateId)) fail('INVALID_SOURCE_STATE', 'sourceState.sourceStateId must be canonical');
   requirePlainObject(contract, 'INVALID_SOURCE_CONTRACT', 'source contract is required for materialization');
   if (typeof contractId !== 'string' || !SNAPSHOT_ID.test(contractId)) fail('INVALID_SOURCE_CONTRACT', 'contractId must be canonical');
+  assertSourceContractBinding(sourceState, contractId);
   if (!batches || typeof batches[Symbol.asyncIterator] !== 'function') fail('INVALID_MATERIALIZATION_SOURCE', 'batches must be an async iterable');
   const rowsPerChunk = requireChunkRows(chunkRows);
   const chunkByteLimit = requireMaxChunkBytes(maxChunkBytes);
 
   await mkdir(snapshotDir, { recursive: true, mode: 0o700 });
+  await syncDirectory(snapshotDir);
+  await syncDirectory(dirname(snapshotDir));
   const partialPath = join(snapshotDir, `.materialize-${process.pid}-${randomUUID()}.partial`);
   const chunksDir = join(partialPath, 'chunks');
   await mkdir(chunksDir, { recursive: true, mode: 0o700 });
@@ -242,6 +275,8 @@ export async function materializeSnapshotBatches({ snapshotDir, sourceState, con
     const snapshotId = sha256Canonical(MATERIALIZED_SNAPSHOT_ALGORITHM, semantic);
     const manifest = { ...semantic, snapshotId };
     await syncTextFile(join(partialPath, 'manifest.json'), `${canonicalJson(manifest)}\n`);
+    await syncDirectory(chunksDir);
+    await syncDirectory(partialPath);
 
     const finalPath = finalSnapshotPath(snapshotDir, snapshotId);
     try {
@@ -251,9 +286,25 @@ export async function materializeSnapshotBatches({ snapshotDir, sourceState, con
     } catch (error) {
       if (error?.code !== 'SOURCE_SNAPSHOT_NOT_AVAILABLE') throw error;
     }
-    await rename(partialPath, finalPath);
-    published = true;
+
+    try {
+      await rename(partialPath, finalPath);
+      published = true;
+    } catch (error) {
+      if (!PUBLICATION_RACE_CODES.has(error?.code)) throw error;
+      try {
+        const winner = await loadMaterializedSnapshot({ snapshotDir, snapshotId });
+        await syncDirectory(snapshotDir);
+        return winner;
+      } catch (winnerError) {
+        if (winnerError?.code === 'SOURCE_SNAPSHOT_NOT_AVAILABLE') throw error;
+        throw winnerError;
+      }
+    }
+
     if (process.platform !== 'win32') await chmod(finalPath, 0o700);
+    await syncDirectory(snapshotDir);
+    await syncDirectory(dirname(snapshotDir));
     return loadMaterializedSnapshot({ snapshotDir, snapshotId });
   } finally {
     if (!published) await rm(partialPath, { recursive: true, force: true }).catch(() => {});
