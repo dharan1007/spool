@@ -6,6 +6,7 @@ import { POSTGRES_METADATA_SCHEMA, postgresTargetContractId } from './preflight.
 const LEDGER_TABLE = 'batch_ledger';
 const LEASE_TABLE = 'execution_leases';
 const PAYLOAD_DOMAIN = 'spool-postgres-batch-payload-v1';
+const METADATA_BOOTSTRAP_LOCK = 'spool:postgres-metadata-bootstrap:v1';
 const HASH = /^sha256:[0-9a-f]{64}$/;
 
 function requiredString(name, value) {
@@ -115,32 +116,41 @@ function validateMetadataDescription(rows) {
 
 export async function ensurePostgresMetadata({ targetRef, credentialBroker } = {}) {
   const rows = await withPostgresClient({ targetRef, credentialBroker }, async client => {
-    await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}`);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)} (
-        batch_identity text PRIMARY KEY,
-        migration_id text NOT NULL,
-        plan_id text NOT NULL,
-        source_snapshot_id text NOT NULL,
-        mapping_revision integer NOT NULL CHECK (mapping_revision >= 1),
-        row_count integer NOT NULL CHECK (row_count >= 0),
-        payload_hash text NOT NULL,
-        target_database text NOT NULL,
-        target_schema text NOT NULL,
-        target_table text NOT NULL,
-        committed_at timestamptz NOT NULL DEFAULT clock_timestamp()
-      )
-    `);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEASE_TABLE)} (
-        resource text PRIMARY KEY,
-        owner text NOT NULL,
-        fencing_token bigint NOT NULL CHECK (fencing_token >= 1),
-        expires_at timestamptz NOT NULL,
-        updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
-      )
-    `);
-    return metadataDescription(client);
+    await client.query('BEGIN');
+    try {
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [METADATA_BOOTSTRAP_LOCK]);
+      await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}`);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)} (
+          batch_identity text PRIMARY KEY,
+          migration_id text NOT NULL,
+          plan_id text NOT NULL,
+          source_snapshot_id text NOT NULL,
+          mapping_revision integer NOT NULL CHECK (mapping_revision >= 1),
+          row_count integer NOT NULL CHECK (row_count >= 0),
+          payload_hash text NOT NULL,
+          target_database text NOT NULL,
+          target_schema text NOT NULL,
+          target_table text NOT NULL,
+          committed_at timestamptz NOT NULL DEFAULT clock_timestamp()
+        )
+      `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEASE_TABLE)} (
+          resource text PRIMARY KEY,
+          owner text NOT NULL,
+          fencing_token bigint NOT NULL CHECK (fencing_token >= 1),
+          expires_at timestamptz NOT NULL,
+          updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+        )
+      `);
+      const description = await metadataDescription(client);
+      await client.query('COMMIT');
+      return description;
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
+      throw error;
+    }
   });
   validateMetadataDescription(rows);
 }
