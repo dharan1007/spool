@@ -19,6 +19,7 @@ const CAPABILITIES = new Set([
   'exactCommitEvidence',
     'readAfterWriteVerification',
     'repairExecution',
+    'databaseSnapshot',
     'continuousChangeCapture'
 ]);
 
