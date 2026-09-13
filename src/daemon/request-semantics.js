@@ -1,5 +1,5 @@
 import { fail } from '../core/errors.js';
-import { sha256Canonical } from '../platform/canonical-json.js';
+import { canonicalJson, sha256Canonical } from '../platform/canonical-json.js';
 import { connectorIdentity } from '../platform/contracts.js';
 
 const REQUEST_DOMAIN = 'spool-migration-request-v1';
@@ -9,9 +9,9 @@ export function migrationRequestSemanticId(request) {
   if (typeof request.migrationId !== 'string' || !request.migrationId) fail('INVALID_MIGRATION_ID', 'migrationId is required');
   if (typeof request.principal !== 'string' || !request.principal.trim()) fail('INVALID_PRINCIPAL', 'principal is required');
   if (!request.planInput || typeof request.planInput !== 'object' || Array.isArray(request.planInput)) fail('INVALID_MIGRATION_REQUEST', 'planInput is required');
-  const input = JSON.parse(JSON.stringify(request.planInput));
-  input.sourceRef = connectorIdentity(request.planInput.sourceRef);
-  input.targetRef = connectorIdentity(request.planInput.targetRef);
+  const input = JSON.parse(canonicalJson(request.planInput));
+  input.sourceRef = connectorIdentity(input.sourceRef);
+  input.targetRef = connectorIdentity(input.targetRef);
   return sha256Canonical(REQUEST_DOMAIN, {
     migrationId: request.migrationId,
     principal: request.principal,
