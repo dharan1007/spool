@@ -53,6 +53,21 @@ export class RunStore {
       CREATE INDEX IF NOT EXISTS spool_verification_batches_migration_range
         ON spool_verification_batches(migration_id, source_start, source_end_exclusive);
       `);
+      const runColumns = new Set(this.db.prepare('PRAGMA table_info(spool_runs)').all().map(column => column.name));
+      if (!runColumns.has('repair_json')) this.db.exec('ALTER TABLE spool_runs ADD COLUMN repair_json TEXT');
+      this.db.exec(`
+      CREATE TABLE IF NOT EXISTS spool_repair_operations (
+        migration_id TEXT NOT NULL,
+        repair_plan_id TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        effect TEXT NOT NULL,
+        applied INTEGER NOT NULL,
+        observed_row_hash TEXT,
+        written_row_hash TEXT,
+        attempted_at TEXT NOT NULL,
+        PRIMARY KEY (migration_id, repair_plan_id, key_id)
+      ) STRICT;
+      `);
     } catch (error) {
       try { this.db.close(); } catch { /* preserve the original error */ }
       throw error;
@@ -71,6 +86,7 @@ export class RunStore {
       targetIdentity: parse(row.target_identity_json),
       verification: parse(row.verification_json),
       receipt: parse(row.receipt_json),
+      repair: parse(row.repair_json),
       startedAt: row.started_at,
       completedAt: row.completed_at,
       lastErrorCode: row.last_error_code
@@ -84,18 +100,20 @@ export class RunStore {
       ON CONFLICT(migration_id) DO UPDATE SET
         status='RUNNING', plan_id=excluded.plan_id, source_snapshot_id=excluded.source_snapshot_id,
         target_identity_json=excluded.target_identity_json, started_at=COALESCE(spool_runs.started_at, excluded.started_at),
-        receipt_json=NULL, completed_at=NULL, last_error_code=NULL
+        receipt_json=NULL, repair_json=NULL, completed_at=NULL, last_error_code=NULL
     `).run(text(migrationId, 'migrationId'), text(planId, 'planId'), text(sourceSnapshotId, 'sourceSnapshotId'), canonicalJson(targetIdentity), text(startedAt, 'startedAt'));
+    this.db.prepare('DELETE FROM spool_repair_operations WHERE migration_id=?').run(text(migrationId, 'migrationId'));
   }
   complete({ migrationId, verification, receipt, completedAt }) {
     this.#open();
-    this.db.prepare(`UPDATE spool_runs SET status='COMPLETE', verification_json=?, receipt_json=?, completed_at=?, last_error_code=NULL WHERE migration_id=?`)
+    this.db.prepare(`UPDATE spool_runs SET status='COMPLETE', verification_json=?, receipt_json=?, repair_json=NULL, completed_at=?, last_error_code=NULL WHERE migration_id=?`)
       .run(canonicalJson(verification), canonicalJson(receipt), text(completedAt, 'completedAt'), text(migrationId, 'migrationId'));
   }
   verificationFailed({ migrationId, verification }) {
     this.#open();
-    this.db.prepare(`UPDATE spool_runs SET status='VERIFICATION_FAILED', verification_json=?, receipt_json=NULL, completed_at=NULL, last_error_code='VERIFICATION_FAILED' WHERE migration_id=?`)
+    this.db.prepare(`UPDATE spool_runs SET status='VERIFICATION_FAILED', verification_json=?, receipt_json=NULL, repair_json=NULL, completed_at=NULL, last_error_code='VERIFICATION_FAILED' WHERE migration_id=?`)
       .run(canonicalJson(verification), text(migrationId, 'migrationId'));
+    this.db.prepare('DELETE FROM spool_repair_operations WHERE migration_id=?').run(text(migrationId, 'migrationId'));
   }
   fail({ migrationId, errorCode }) {
     this.#open();
@@ -137,6 +155,50 @@ export class RunStore {
   clearVerificationBatches(migrationId) {
     this.#open();
     this.db.prepare('DELETE FROM spool_verification_batches WHERE migration_id=?').run(text(migrationId, 'migrationId'));
+  }
+  saveRepairOperation({ migrationId, repairPlanId, keyId, effect, applied, observedRowHash = null, writtenRowHash = null, attemptedAt }) {
+    this.#open();
+    text(migrationId, 'migrationId'); text(repairPlanId, 'repairPlanId'); text(keyId, 'keyId'); text(effect, 'effect');
+    if (!['INSERT', 'UPDATE', 'DELETE'].includes(effect)) fail('INVALID_RUN_STORE_INPUT', 'repair operation effect must be INSERT, UPDATE or DELETE');
+    this.db.prepare(`
+      INSERT INTO spool_repair_operations (
+        migration_id, repair_plan_id, key_id, effect, applied, observed_row_hash, written_row_hash, attempted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(migration_id, repair_plan_id, key_id) DO UPDATE SET
+        effect=excluded.effect,
+        applied=excluded.applied,
+        observed_row_hash=excluded.observed_row_hash,
+        written_row_hash=excluded.written_row_hash,
+        attempted_at=excluded.attempted_at
+    `).run(
+      migrationId, repairPlanId, keyId, effect, applied === true ? 1 : 0,
+      observedRowHash, writtenRowHash, text(attemptedAt, 'attemptedAt')
+    );
+  }
+  repairOperations(migrationId) {
+    this.#open(); text(migrationId, 'migrationId');
+    return this.db.prepare(`
+      SELECT repair_plan_id, key_id, effect, applied, observed_row_hash, written_row_hash, attempted_at
+      FROM spool_repair_operations WHERE migration_id=? ORDER BY repair_plan_id, key_id
+    `).all(migrationId).map(row => Object.freeze({
+      repairPlanId: row.repair_plan_id,
+      keyId: row.key_id,
+      effect: row.effect,
+      applied: Number(row.applied) === 1,
+      observedRowHash: row.observed_row_hash,
+      writtenRowHash: row.written_row_hash,
+      attemptedAt: row.attempted_at
+    }));
+  }
+  clearRepairOperations(migrationId) {
+    this.#open();
+    this.db.prepare('DELETE FROM spool_repair_operations WHERE migration_id=?').run(text(migrationId, 'migrationId'));
+  }
+  completeRepair({ migrationId, repair, completedAt }) {
+    this.#open();
+    if (!repair || typeof repair !== 'object' || Array.isArray(repair)) fail('INVALID_RUN_STORE_INPUT', 'repair record is required');
+    this.db.prepare(`UPDATE spool_runs SET status='REPAIR_COMPLETE', repair_json=?, completed_at=?, last_error_code=NULL WHERE migration_id=?`)
+      .run(canonicalJson(repair), text(completedAt, 'completedAt'), text(migrationId, 'migrationId'));
   }
   checkpointStore(migrationId) {
     this.#open(); text(migrationId, 'migrationId');

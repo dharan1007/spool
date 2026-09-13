@@ -3,6 +3,7 @@ import { canonicalJson, sha256Canonical } from '../platform/canonical-json.js';
 import { connectorIdentity } from '../platform/contracts.js';
 
 const RECEIPT_DOMAIN = 'spool-migration-receipt-v1';
+const REPAIR_RECEIPT_DOMAIN = 'spool-repair-receipt-v1';
 const HASH = /^sha256:[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}$/;
 
@@ -55,5 +56,52 @@ export function createMigrationReceipt(input = {}) {
   if (Date.parse(record.completedAt) < Date.parse(record.startedAt)) fail('INVALID_RECEIPT_INPUT', 'completedAt cannot precede startedAt');
   const canonicalRecord = JSON.parse(canonicalJson(record));
   const receiptId = sha256Canonical(RECEIPT_DOMAIN, canonicalRecord);
+  return Object.freeze({ receiptId, record: Object.freeze(canonicalRecord) });
+}
+
+function normalizeRepairPlanIds(items) {
+  if (!Array.isArray(items) || items.length === 0) fail('INVALID_REPAIR_RECEIPT_INPUT', 'repairPlanIds must be a non-empty array');
+  const out = items.map(value => hash('repairPlanId', value));
+  const unique = [...new Set(out)].sort();
+  if (unique.length !== out.length) fail('INVALID_REPAIR_RECEIPT_INPUT', 'repairPlanIds must be unique');
+  return unique;
+}
+
+function normalizeRepairCounts(counts) {
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) fail('INVALID_REPAIR_RECEIPT_INPUT', 'opCounts are required');
+  return {
+    insert: nonNegative('opCounts.insert', counts.insert),
+    update: nonNegative('opCounts.update', counts.update),
+    delete: nonNegative('opCounts.delete', counts.delete),
+    alreadyApplied: nonNegative('opCounts.alreadyApplied', counts.alreadyApplied)
+  };
+}
+
+export function createRepairReceipt(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) fail('INVALID_REPAIR_RECEIPT_INPUT', 'Repair receipt input must be an object');
+  if (!input.release || typeof input.release !== 'object') fail('INVALID_REPAIR_RECEIPT_INPUT', 'Release identity is required');
+  const commitSha = text('release commitSha', input.release.commitSha, 40);
+  if (!COMMIT.test(commitSha)) fail('INVALID_REPAIR_RECEIPT_INPUT', 'release commitSha must be a 40-character lowercase git SHA');
+  if (!input.verification || input.verification.status !== 'VERIFIED') fail('REPAIR_RECEIPT_REQUIRES_REVERIFICATION', 'Repair receipt may only be created after exact re-verification');
+  const record = {
+    schemaVersion: 1,
+    kind: 'repair',
+    release: { version: text('release version', input.release.version, 64), commitSha },
+    migrationId: text('migrationId', input.migrationId, 128),
+    repairApprovalId: hash('repairApprovalId', input.repairApprovalId),
+    repairPlanIds: normalizeRepairPlanIds(input.repairPlanIds),
+    planId: hash('planId', input.planId),
+    sourceSnapshotId: hash('sourceSnapshotId', input.sourceSnapshotId),
+    targetIdentity: connectorIdentity(input.targetIdentity),
+    targetContractId: input.targetContractId == null ? null : hash('targetContractId', input.targetContractId),
+    opCounts: normalizeRepairCounts(input.opCounts),
+    verification: JSON.parse(canonicalJson(input.verification)),
+    startedAt: timestamp('startedAt', input.startedAt),
+    completedAt: timestamp('completedAt', input.completedAt)
+  };
+  if (input.requestSemanticId != null) record.requestSemanticId = hash('requestSemanticId', input.requestSemanticId);
+  if (Date.parse(record.completedAt) < Date.parse(record.startedAt)) fail('INVALID_REPAIR_RECEIPT_INPUT', 'completedAt cannot precede startedAt');
+  const canonicalRecord = JSON.parse(canonicalJson(record));
+  const receiptId = sha256Canonical(REPAIR_RECEIPT_DOMAIN, canonicalRecord);
   return Object.freeze({ receiptId, record: Object.freeze(canonicalRecord) });
 }

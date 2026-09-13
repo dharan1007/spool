@@ -1,5 +1,6 @@
 import { fail } from '../../core/errors.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
+import { normalizePostgresRow, normalizePostgresSchema, normalizePostgresValue, postgresContentKeyId, postgresContentRowHash } from './row-codec.js';
 import { withPostgresClient } from './connection.js';
 import { POSTGRES_METADATA_SCHEMA, postgresTargetContractId } from './preflight.js';
 
@@ -220,6 +221,83 @@ export async function releasePostgresLease({ targetRef, credentialBroker, resour
   });
 }
 
+function requireRepairKey(key, primaryKey) {
+  if (!key || typeof key !== 'object' || Array.isArray(key)) fail('INVALID_REPAIR_OPERATION', 'Repair operation key must be an object');
+  const keyFields = Object.keys(key).sort();
+  if (keyFields.length === 0 || keyFields.length !== primaryKey.length || !primaryKey.every(field => Object.hasOwn(key, field))) {
+    fail('INVALID_REPAIR_OPERATION', 'Repair operation key must identify exactly the verification primary key');
+  }
+  for (const field of primaryKey) {
+    if (key[field] === null || key[field] === undefined) fail('INVALID_REPAIR_OPERATION', 'Repair operation key fields must not be null');
+  }
+  return key;
+}
+
+function requireRepairOperation(operation, primaryKey, schema) {
+  if (!operation || typeof operation !== 'object' || Array.isArray(operation)) fail('INVALID_REPAIR_OPERATION', 'Repair operation must be an object');
+  const columns = schema.map(field => field.name);
+  const { effect, keyId, key, row, precondition } = operation;
+  if (!['INSERT', 'UPDATE', 'DELETE'].includes(effect)) fail('INVALID_REPAIR_OPERATION', `Unsupported repair effect ${effect}`);
+  requireRepairKey(key, primaryKey);
+  if (postgresContentKeyId({ primaryKey, key }) !== keyId) fail('INVALID_REPAIR_OPERATION', 'Repair operation keyId does not match its key');
+  if (!precondition || typeof precondition !== 'object' || Array.isArray(precondition)) fail('INVALID_REPAIR_OPERATION', 'Repair operation precondition is required');
+  if (effect === 'INSERT') {
+    if (row == null || typeof row !== 'object') fail('INVALID_REPAIR_OPERATION', 'INSERT repair requires the expected row');
+    if (precondition.absent !== true) fail('INVALID_REPAIR_OPERATION', 'INSERT repair requires an absent precondition');
+  }
+  if (effect === 'UPDATE') {
+    if (row == null || typeof row !== 'object') fail('INVALID_REPAIR_OPERATION', 'UPDATE repair requires the expected row');
+    if (typeof precondition.actualRowHash !== 'string' || !HASH.test(precondition.actualRowHash)) fail('INVALID_REPAIR_OPERATION', 'UPDATE repair requires the observed actual row hash');
+  }
+  if (effect === 'DELETE') {
+    if (row != null) fail('INVALID_REPAIR_OPERATION', 'DELETE repair must not carry a row payload');
+    if (typeof precondition.actualRowHash !== 'string' || !HASH.test(precondition.actualRowHash)) fail('INVALID_REPAIR_OPERATION', 'DELETE repair requires the observed actual row hash');
+  }
+  const normalized = row == null ? null : normalizePostgresRow(structuredClone(row), schema);
+  if (normalized) {
+    const typeByField = new Map(schema.map(field => [field.name, field]));
+    for (const field of primaryKey) {
+      const expected = normalizePostgresValue(key[field], typeByField.get(field));
+      if (normalized[field] !== expected) fail('INVALID_REPAIR_OPERATION', 'Repair operation key must match the expected row primary key');
+    }
+    const expectedHash = operation.expectedRowHash ?? null;
+    if (typeof expectedHash === 'string' && postgresContentRowHash({ primaryKey, columns, key, row: normalized }) !== expectedHash) {
+      fail('INVALID_REPAIR_OPERATION', 'Repair operation row does not match its expected row hash');
+    }
+  }
+  return { effect, keyId, key, columns, normalized, precondition };
+}
+
+async function checkRepairFence(client, target, fencingToken) {
+  if (target.requireFencing && (!Number.isSafeInteger(fencingToken) || fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL repair requires a fencing token');
+  if (!target.requireFencing) return;
+  const fenceResult = await client.query(`
+    SELECT owner, fencing_token::text AS fencing_token,
+           expires_at > clock_timestamp() AS active
+    FROM ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEASE_TABLE)}
+    WHERE resource = $1
+    FOR UPDATE
+  `, [target.fenceResource]);
+  const fence = fenceResult.rows[0] ?? null;
+  if (!fence || Number(fence.fencing_token) !== fencingToken || fence.owner !== target.fenceOwner) {
+    await client.query('ROLLBACK');
+    fail('STALE_FENCE', 'PostgreSQL repair fencing token is stale', { resource: target.fenceResource, expected: fence?.fencing_token ?? null, actual: fencingToken });
+  }
+  if (fence.active !== true) {
+    await client.query('ROLLBACK');
+    fail('LEASE_EXPIRED', 'PostgreSQL repair lease has expired', { resource: target.fenceResource, fencingToken });
+  }
+}
+
+async function checkRepairContract(client, target, targetContractId) {
+  if (targetContractId == null) return;
+  requiredHash('targetContractId', targetContractId);
+  const actualTargetContractId = await postgresTargetContractId(client, target.targetRef);
+  if (actualTargetContractId !== targetContractId) {
+    await client.query('ROLLBACK');
+    fail('TARGET_CONTRACT_CHANGED', 'Live PostgreSQL target contract changed before repair', { expectedTargetContractId: targetContractId, actualTargetContractId });
+  }
+}
 async function insertRows(client, targetRef, columns, rows) {
   if (!rows.length) return;
   const quotedTable = `${quoteIdentifier(targetRef.schema)}.${quoteIdentifier(targetRef.table)}`;
@@ -390,6 +468,96 @@ export class PostgresTarget {
       return result.rows;
     });
     return rows.map(row => Object.freeze({ ...row, mappingRevision: Number(row.mappingRevision), rowCount: Number(row.rowCount), committedAt: new Date(row.committedAt).toISOString() }));
+  }
+
+  async applyRepairOperation(input = {}) {
+    this.#assertOpen();
+    if (!Array.isArray(input.primaryKey) || input.primaryKey.length === 0) fail('INVALID_REPAIR_OPERATION', 'Repair primaryKey is required');
+    const primaryKey = Object.freeze([...input.primaryKey]);
+    const schema = normalizePostgresSchema(input.targetSchema);
+    const prepared = requireRepairOperation(input.operation, primaryKey, schema);
+    const { effect, keyId, key, columns, normalized, precondition } = prepared;
+    const expectedRowHash = normalized == null ? null : postgresContentRowHash({ primaryKey, columns, key, row: normalized });
+
+    const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
+      await client.query('BEGIN');
+      try {
+        await checkRepairFence(client, this, input.fencingToken);
+        await checkRepairContract(client, this, input.targetContractId);
+
+        const quotedTable = `${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`;
+        const whereValues = [];
+        const whereClauses = primaryKey.map(field => {
+          whereValues.push(key[field]);
+          return `${quoteIdentifier(field)} = $${whereValues.length}`;
+        });
+        const selectList = columns.map(field => `${quoteIdentifier(field)}::text AS ${quoteIdentifier(field)}`).join(', ');
+        const found = await client.query(`SELECT ${selectList} FROM ${quotedTable} WHERE ${whereClauses.join(' AND ')} FOR UPDATE`, whereValues);
+        if (found.rows.length > 1) {
+          await client.query('ROLLBACK');
+          fail('REPAIR_KEY_NOT_UNIQUE', 'Repair operation key matches more than one target row');
+        }
+        const current = found.rows.length === 0 ? null : normalizePostgresRow(found.rows[0], schema);
+        const observedRowHash = current == null ? null : postgresContentRowHash({ primaryKey, columns, key, row: current });
+
+        let applied = false;
+        if (effect === 'INSERT') {
+          if (current == null) {
+            const values = [];
+            const placeholders = columns.map(column => {
+              values.push(normalized[column]);
+              return `$${values.length}`;
+            });
+            await client.query(
+              `INSERT INTO ${quotedTable} (${columns.map(quoteIdentifier).join(', ')}) VALUES (${placeholders.join(', ')})`,
+              values
+            );
+            applied = true;
+          } else if (observedRowHash !== expectedRowHash) {
+            await client.query('ROLLBACK');
+            fail('REPAIR_PRECONDITION_FAILED', 'INSERT repair precondition failed: target row is present with unexpected content', { keyId });
+          }
+        } else if (effect === 'UPDATE') {
+          if (current == null) {
+            await client.query('ROLLBACK');
+            fail('REPAIR_PRECONDITION_FAILED', 'UPDATE repair precondition failed: target row is missing', { keyId });
+          } else if (observedRowHash !== expectedRowHash && observedRowHash !== precondition.actualRowHash) {
+            await client.query('ROLLBACK');
+            fail('REPAIR_PRECONDITION_FAILED', 'UPDATE repair precondition failed: target row changed since verification', { keyId });
+          } else if (observedRowHash !== expectedRowHash) {
+            const setValues = [];
+            const setClauses = [];
+            for (const column of columns) {
+              if (primaryKey.includes(column)) continue;
+              setValues.push(normalized[column]);
+              setClauses.push(`${quoteIdentifier(column)} = $${setValues.length}`);
+            }
+            const params = [...setValues, ...whereValues];
+            const where = primaryKey.map((field, index) => `${quoteIdentifier(field)} = $${setValues.length + index + 1}`);
+            await client.query(`UPDATE ${quotedTable} SET ${setClauses.join(', ')} WHERE ${where.join(' AND ')}`, params);
+            applied = true;
+          }
+        } else if (current != null && observedRowHash !== precondition.actualRowHash) {
+          await client.query('ROLLBACK');
+          fail('REPAIR_PRECONDITION_FAILED', 'DELETE repair precondition failed: target row changed since verification', { keyId });
+        } else if (current != null) {
+          await client.query(`DELETE FROM ${quotedTable} WHERE ${whereClauses.join(' AND ')}`, whereValues);
+          applied = true;
+        }
+
+        await client.query('COMMIT');
+        return { applied, observedRowHash };
+      } catch (error) {
+        try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
+        throw error;
+      }
+    });
+
+    return Object.freeze({
+      effect, keyId, applied: result.applied,
+      observedRowHash: result.observedRowHash,
+      writtenRowHash: !result.applied ? result.observedRowHash : (effect === 'DELETE' ? null : expectedRowHash)
+    });
   }
 
   close() { this.closed = true; }

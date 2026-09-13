@@ -23,7 +23,8 @@ export const POSTGRES_TARGET_DESCRIPTOR = validateConnectorDescriptor({
     fencing: true,
     targetContractBinding: true,
     exactCommitEvidence: true,
-    readAfterWriteVerification: true
+    readAfterWriteVerification: true,
+    repairExecution: true
   }
 });
 
@@ -136,6 +137,12 @@ class PostgresTargetExecution {
       targetSchema,
       targetContractId
     }, callback);
+  }
+
+  async applyRepairOperation({ operation, primaryKey, targetSchema, fencingToken, targetContractId } = {}) {
+    this.#assertOpen();
+    if (!this.target) fail('POSTGRES_TARGET_NOT_OPEN', 'PostgreSQL target must be opened before repair execution');
+    return this.target.applyRepairOperation({ operation, primaryKey, targetSchema, fencingToken, targetContractId });
   }
 
   async close() {

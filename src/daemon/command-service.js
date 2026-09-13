@@ -16,12 +16,14 @@ import { createPathPolicy } from '../platform/path-policy.js';
 import { connectorIdentity } from '../platform/contracts.js';
 import { createMigrationPlan } from '../platform/plan.js';
 import { createBoundApproval, assertBoundApproval } from '../platform/approval.js';
+import { createRepairApproval, assertRepairApproval } from '../platform/repair-approval.js';
 import { createBatchIdentity } from '../execution/batch-identity.js';
 import { assertCheckpointBinding } from '../execution/checkpoint.js';
 import { MigrationRunner } from '../execution/migration-runner.js';
 import { verifyMigration } from '../execution/verify.js';
-import { createMigrationReceipt } from '../execution/receipt.js';
+import { createMigrationReceipt, createRepairReceipt } from '../execution/receipt.js';
 import { createRepairPlan } from '../execution/repair-plan.js';
+import { executeRepairOperations, summarizeRepairOperations } from '../execution/repair-runner.js';
 import { createContentVerificationAccumulator } from '../execution/content-verification-manifest.js';
 import { CredentialBroker } from './credential-broker.js';
 import { createDurableSourceCoordinator } from './durable-source.js';
@@ -84,6 +86,35 @@ function assertContentVerificationCapability(plan, targetRuntime) {
 
 function sameExecutionSummary(left, right) {
   return left.processedRows === right.processedRows && left.validRows === right.validRows && left.invalidRows === right.invalidRows;
+}
+
+function repairApprovalEffects(connector) {
+  if (typeof connector !== 'string' || !connector) fail('INVALID_TARGET_REF', 'targetRef.connector is required');
+  return Object.freeze([`${connector}:apply_repair`, `${connector}:read_after_write_verify`].sort());
+}
+
+function assertRepairCapability(targetRuntime, targetExecution = null) {
+  if (targetRuntime?.descriptor?.capabilities?.repairExecution !== true) {
+    fail('REPAIR_CAPABILITY_REQUIRED', 'Target connector cannot execute fenced repair operations');
+  }
+  if (targetExecution != null && (typeof targetExecution.applyRepairOperation !== 'function' || typeof targetExecution.withContentVerifier !== 'function')) {
+    fail('REPAIR_CAPABILITY_REQUIRED', 'Target execution does not implement repair execution and re-verification');
+  }
+}
+
+function repairApprovalBinding({ migrationId, plans, plan, snapshot, targetContractId, effects, principal, expiresAt, nonce }) {
+  return {
+    migrationId,
+    repairPlanIds: plans.map(item => item.repairPlanId),
+    planId: plan.planId,
+    sourceSnapshotId: snapshot.snapshotId,
+    targetIdentity: plan.targetRef,
+    targetContractId,
+    effects: [...effects].sort(),
+    principal,
+    expiresAt,
+    nonce
+  };
 }
 
 export class SpoolCommandService {
@@ -442,5 +473,187 @@ export class SpoolCommandService {
       .filter(item => item.repair != null)
       .map(item => Object.freeze({ ordinal: item.ordinal, sourceRange: item.sourceRange, repair: item.repair })));
   }
+
+  #repairPlans(migrationId, repairPlanIds) {
+    const wanted = new Set(repairPlanIds);
+    const plans = this.runs.verificationBatches(migrationId)
+      .filter(item => item.repair != null && wanted.has(item.repair.repairPlanId))
+      .sort((left, right) => left.ordinal - right.ordinal)
+      .map(item => item.repair);
+    if (plans.length !== wanted.size) fail('REPAIR_PLAN_UNKNOWN', 'One or more repair plans are not part of the stored verification evidence');
+    return Object.freeze(plans);
+  }
+
+  async #reverifyContentExact({ migrationId, source, plan, sourceRows, targetExecution, targetPreflight, renewLease }) {
+    const batchSize = plan.writeStrategy.batchSize;
+    const replayAccumulator = new MigrationEngine().createAccumulator(plan.mapping, plan.mappingRevision, plan.targetSchema);
+    const content = await targetExecution.withContentVerifier({
+      targetSchema: plan.targetSchema,
+      targetContractId: targetPreflight.targetContractId
+    }, async verifier => {
+      const evidence = createContentVerificationAccumulator({ targetReadState: verifier.targetReadState });
+      let expectedRows = [];
+      let replayLastSeen = -1;
+      for await (const { rowIndex, row } of source.streamRows()) {
+        replayLastSeen = rowIndex;
+        const transformed = replayAccumulator.process(row, rowIndex);
+        if (transformed.ok) expectedRows.push(transformed.row);
+        const sourceRangeStart = Math.floor(rowIndex / batchSize) * batchSize;
+        const sourceRangeEnd = Math.min(sourceRows, sourceRangeStart + batchSize);
+        if (rowIndex + 1 === sourceRangeEnd) {
+          await renewLease();
+          evidence.add({
+            sourceRange: { start: sourceRangeStart, endExclusive: sourceRangeEnd },
+            verification: await verifier.verifyBatch(expectedRows)
+          });
+          expectedRows = [];
+        }
+      }
+      if (replayLastSeen + 1 !== sourceRows) fail('SOURCE_ROW_COUNT_CHANGED', 'Durable snapshot row count changed during repair re-verification');
+      if (expectedRows.length !== 0) fail('INTERNAL_BATCH_STATE', 'Repair re-verification ended with an incomplete batch');
+      return evidence.summary();
+    });
+    const expectedValidRows = this.runs.verificationBatches(migrationId)
+      .reduce((total, item) => total + (item.verification?.expected?.rowCount ?? 0), 0);
+    const replaySummary = replayAccumulator.summary();
+    if (replaySummary.processedRows !== sourceRows || replaySummary.validRows !== expectedValidRows || replaySummary.invalidRows !== sourceRows - expectedValidRows) {
+      fail('TRANSFORM_REPLAY_DIVERGED', 'Deterministic transform replay produced different row accounting during repair re-verification');
+    }
+    if (content.sourceRowsCovered !== sourceRows || content.rowCount !== expectedValidRows) {
+      fail('CONTENT_VERIFICATION_ACCOUNTING_MISMATCH', 'Repair re-verification evidence does not cover the executed output exactly', {
+        sourceRows, sourceRowsCovered: content.sourceRowsCovered, verifiedRows: content.rowCount
+      });
+    }
+    return content;
+  }
+
+  async approveRepair(request, { repairPlanIds, expiresAt, nonce } = {}) {
+    this.#open(); requireRequest(request);
+    if (!Array.isArray(repairPlanIds) || repairPlanIds.length === 0) fail('INVALID_REPAIR_REQUEST', 'repairPlanIds must be a non-empty array');
+    if (typeof expiresAt !== 'string' || typeof nonce !== 'string') fail('INVALID_REPAIR_REQUEST', 'expiresAt and nonce are required');
+    const run = this.runs.get(request.migrationId);
+    if (!run || run.status !== 'VERIFICATION_FAILED') fail('REPAIR_NOT_REQUIRED', 'Repair approval requires a run in VERIFICATION_FAILED status');
+    const prepared = await this.#prepare(request, { expectedSourceSnapshotId: run.sourceSnapshotId });
+    assertRepairCapability(prepared.targetRuntime);
+    const plans = this.#repairPlans(request.migrationId, repairPlanIds);
+    return createRepairApproval(
+      repairApprovalBinding({
+        migrationId: request.migrationId,
+        plans,
+        plan: prepared.plan,
+        snapshot: prepared.snapshot,
+        targetContractId: prepared.targetPreflight.targetContractId,
+        effects: repairApprovalEffects(prepared.plan.targetRef.connector),
+        principal: request.principal,
+        expiresAt,
+        nonce
+      }),
+      { signingKey: this.approvalSigningKey }
+    );
+  }
+
+  async runRepair(request, { repairApproval = null } = {}) {
+    this.#open(); requireRequest(request);
+    if (!repairApproval) fail('REPAIR_APPROVAL_REQUIRED', 'Repair execution requires a separately-authorized repair approval');
+    const run = this.runs.get(request.migrationId);
+    if (!run) fail('REPAIR_NOT_REQUIRED', 'Repair execution requires a run in VERIFICATION_FAILED status');
+    const prepared = await this.#prepare(request, { expectedSourceSnapshotId: repairApproval.record?.sourceSnapshotId ?? null });
+    const plans = this.#repairPlans(request.migrationId, repairApproval.record?.repairPlanIds ?? []);
+    const expectedBinding = repairApprovalBinding({
+      migrationId: request.migrationId,
+      plans,
+      plan: prepared.plan,
+      snapshot: prepared.snapshot,
+      targetContractId: prepared.targetPreflight.targetContractId,
+      effects: repairApprovalEffects(prepared.plan.targetRef.connector),
+      principal: request.principal,
+      expiresAt: repairApproval.record?.expiresAt,
+      nonce: repairApproval.record?.nonce
+    });
+    assertRepairApproval(repairApproval, expectedBinding, { signingKey: this.approvalSigningKey });
+
+    if (run.status === 'REPAIR_COMPLETE' && run.repair?.receipt) {
+      const storedPlanIds = [...(run.repair.repairPlanIds ?? [])].sort();
+      if (JSON.stringify(storedPlanIds) === JSON.stringify(repairApproval.record.repairPlanIds)) {
+        return Object.freeze({ status: 'REPAIR_COMPLETE', repair: run.repair, receipt: run.repair.receipt, replay: true });
+      }
+      fail('REPAIR_PLAN_SUPERSEDED', 'A different repair outcome is already recorded for this migration');
+    }
+    if (run.status !== 'VERIFICATION_FAILED') fail('REPAIR_NOT_REQUIRED', 'Repair execution requires a run in VERIFICATION_FAILED status');
+
+    const { plan, snapshot, source, sourceRows, targetRuntime, targetPreflight } = prepared;
+    assertRepairCapability(targetRuntime);
+    const targetExecution = await targetRuntime.createExecution({ migrationId: request.migrationId, targetRef: plan.targetRef });
+    let lease;
+    const renewLease = async () => { lease = await targetExecution.renewLease(); return lease; };
+    const repairStartedAt = new Date().toISOString();
+    try {
+      assertRepairCapability(targetRuntime, targetExecution);
+      await renewLease();
+      await targetExecution.openTarget();
+      const storedOps = new Map(this.runs.repairOperations(request.migrationId).map(item => [`${item.repairPlanId}\0${item.keyId}`, item]));
+      const progress = {
+        loadOperation: async (repairPlanId, keyId) => storedOps.get(`${repairPlanId}\0${keyId}`) ?? null,
+        saveOperation: async record => {
+          this.runs.saveRepairOperation({ migrationId: request.migrationId, ...record });
+          storedOps.set(`${record.repairPlanId}\0${record.keyId}`, { ...record, applied: record.applied === true });
+        }
+      };
+      const opResults = await executeRepairOperations({
+        plans,
+        target: targetExecution,
+        targetSchema: plan.targetSchema,
+        fencingToken: lease.fencingToken,
+        targetContractId: targetPreflight.targetContractId,
+        progress
+      });
+      const content = await this.#reverifyContentExact({
+        migrationId: request.migrationId, source, plan, sourceRows, targetExecution, targetPreflight, renewLease
+      });
+      if (content.status !== 'VERIFIED') {
+        fail('REPAIR_REVERIFICATION_FAILED', 'Target content still differs after repair execution', {
+          rootHash: content.rootHash,
+          diffCounts: content.diffCounts
+        });
+      }
+      const completedAt = new Date().toISOString();
+      const receipt = createRepairReceipt({
+        release: this.release,
+        migrationId: request.migrationId,
+        requestSemanticId: migrationRequestSemanticId(request),
+        repairApprovalId: repairApproval.approvalId,
+        repairPlanIds: repairApproval.record.repairPlanIds,
+        planId: plan.planId,
+        sourceSnapshotId: snapshot.snapshotId,
+        targetIdentity: plan.targetRef,
+        targetContractId: targetPreflight.targetContractId,
+        opCounts: summarizeRepairOperations(opResults),
+        verification: content,
+        startedAt: repairStartedAt,
+        completedAt
+      });
+      const repair = Object.freeze({
+        repairApprovalId: repairApproval.approvalId,
+        repairPlanIds: Object.freeze([...repairApproval.record.repairPlanIds]),
+        opCounts: summarizeRepairOperations(opResults),
+        operations: opResults,
+        verification: content,
+        receipt,
+        startedAt: repairStartedAt,
+        completedAt
+      });
+      this.runs.completeRepair({ migrationId: request.migrationId, repair, completedAt });
+      return Object.freeze({ status: 'REPAIR_COMPLETE', repair, receipt, replay: false });
+    } finally {
+      await targetExecution.close();
+    }
+  }
+
+  repairReceipt(migrationId) {
+    const run = this.status(migrationId);
+    if (!run?.repair?.receipt) fail('REPAIR_RECEIPT_NOT_AVAILABLE', 'Repair receipt is not available');
+    return run.repair.receipt;
+  }
+
   close() { if (!this.closed) { this.runs.close(); this.closed = true; } }
 }
