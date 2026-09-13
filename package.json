@@ -32,7 +32,8 @@
   "dependencies": {
     "better-sqlite3": "12.10.1",
     "pg": "8.23.0",
-    "pg-copy-streams": "^7.0.0"
+    "pg-copy-streams": "^7.0.0",
+    "pg-logical-replication": "^2.5.0"
   },
   "engines": {
     "node": ">=22"
