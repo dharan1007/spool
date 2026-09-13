@@ -1,5 +1,6 @@
 import { fail } from '../core/errors.js';
 import { canonicalJson, sha256Canonical } from '../platform/canonical-json.js';
+import { connectorIdentity } from '../platform/contracts.js';
 
 const REPAIR_PLAN_DOMAIN = 'spool-repair-plan-v1';
 const HASH = /^sha256:[a-f0-9]{64}$/;
@@ -17,7 +18,7 @@ function requireMigrationId(value) {
 
 function requireTargetIdentity(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('INVALID_REPAIR_PLAN_INPUT', 'targetIdentity is required');
-  return JSON.parse(canonicalJson(value));
+  return connectorIdentity(value);
 }
 
 function operationFromDiff(entry) {
