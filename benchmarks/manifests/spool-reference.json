@@ -1,0 +1,16 @@
+{
+  "suite": "spool-reference",
+  "description": "External reference benchmark for SPOOL commercial claims (public dataset or real Postgres/MySQL instance). Pin exact benchmark commit before any superiority claim (Rules A, B, C, D).",
+  "benchmarkRepo": "REPLACE-WITH-EXTERNAL-BENCHMARK-URL",
+  "benchmarkCommit": "0000000000000000000000000000000000000000",
+  "benchmarkCommitNote": "REPLACE with exact 40-char SHA. Gate warns until pinned.",
+  "container": null,
+  "containerDigest": null,
+  "budgets": {
+    "toolCallBudget": 100,
+    "wallClockTimeoutSec": 1200,
+    "tokenBudget": 200000,
+    "retryPolicy": "record-every-retry"
+  },
+  "excludedFailures": []
+}
