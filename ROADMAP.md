@@ -48,6 +48,22 @@ Implemented safety contract:
 
 Gate B explicitly rejects virtual/triggered SQLite targets, unsupported destructive/write strategies, unlimited source size and hosted raw-row ingestion.
 
+## Delivered in Gate C — verified multi-engine migration
+
+- Protocol-level exact content verification (`content_exact`): per-batch target-content proofs with durable evidence, no receipt on mismatch, replay-determinism and accounting guards, connector capability enforcement.
+- Verified repair protocol: separately-authorized `RepairApproval` (a migration approval can never authorize repair), fenced per-operation execution with hash-bound preconditions and crash-resume, exact re-verification, and `RepairReceipt`; failed-verification evidence is preserved and runs advance to `REPAIR_COMPLETE`.
+- Whole-database PostgreSQL sources: catalog discovery with deterministic catalog identity plus database-level exported snapshots, so every table streams under one shared MVCC view and LSN identity.
+- PostgreSQL bulk `COPY` writes sharing the row path's batch-identity domain, so bulk and row commits reconcile across paths.
+- Merkle trees over content row identities with inclusion proofs, carried on every content proof summary.
+- PostgreSQL logical CDC capture: replication slots, publications, ordered pgoutput change streams with explicit acknowledgement, and durable per-slot LSN checkpoints with resume.
+- Cutover protocol: receipt-bound arming, fenced commit with unchanged contract/plan checks, reasoned abort and re-arm; approve/run/repair freeze once cutover commits. SVMP models the cutover states with a proved invariant and counterexample mutation test.
+- Distributed fenced workers: stable-identity lease claims with heartbeat, takeover and visibility over the existing fencing domain.
+- MySQL connector (C1 consistent-snapshot sources, C4 ledger-backed fenced targets) and SQL Server connector (C1 snapshot-isolation sources with least-privilege read-only proof, C4 fenced targets), each with live service conformance.
+- Control plane: `spoold` dispatches the full repair and cutover surface with its existing bearer/host/origin hardening.
+- SPOOL-Bench v1: content-verification, Merkle, repair-plan and fenced SQLite end-to-end measurements with evidence assertions.
+
+Explicit boundaries carried forward: no read-after-write verification, repair or bulk COPY on MySQL/SQL Server; no cross-session snapshot export on MySQL; SQL Server sources require least-privilege readers; `Uint8Array` row values are outside the canonical evidence domain on every engine.
+
 ## Next — broaden only after the same contract is proven
 
 ### PostgreSQL adapter
