@@ -1,0 +1,472 @@
+{
+  "schemaVersion": 1,
+  "release": "1.1.1",
+  "statuses": ["PRODUCTION", "EXPERIMENTAL", "PLANNED", "UNSUPPORTED"],
+  "productionRule": "implementation + real integration test + fault test + security test + load test + benchmark evidence + documented limits",
+  "capabilities": [
+    {
+      "id": "filesystem.source",
+      "label": "Filesystem CSV source",
+      "status": "PRODUCTION",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/connectors/filesystem/stream-csv.js", "src/daemon/durable-source.js"],
+        "integrationTests": ["tests/command-service-streaming.test.js", "tests/e2e.test.js", "tests/crm-example.test.js"],
+        "faultTests": ["tests/command-service-streaming-faults.test.js"],
+        "securityTests": ["tests/path-policy.test.js", "tests/credential-broker.test.js"],
+        "loadTests": ["tests/streaming-memory.test.js"],
+        "benchmarks": ["benchmarks/run.js (migration suite)"],
+        "limits": "docs/LIMITS.md#filesystem-source"
+      },
+      "notes": "Gate B production claim; bounded-memory proof above the 50 MiB boundary."
+    },
+    {
+      "id": "filesystem.target",
+      "label": "Filesystem target",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "No filesystem target exists; writes go to database connectors only."
+    },
+    {
+      "id": "sqlite.target",
+      "label": "SQLite target",
+      "status": "EXPERIMENTAL",
+      "assurance": "C4",
+      "evidence": {
+        "implementation": ["src/connectors/sqlite/target.js", "src/connectors/sqlite/runtime.js", "src/connectors/sqlite/preflight.js"],
+        "integrationTests": ["tests/sqlite-target.test.js", "tests/conformance/sqlite-conformance.test.js"],
+        "faultTests": ["tests/conformance/sqlite-faults.test.js", "tests/fencing.test.js", "tests/crash-recovery.test.js"],
+        "securityTests": ["tests/credential-broker.test.js"],
+        "loadTests": [],
+        "benchmarks": ["benchmarks/run.js (sqliteEndToEnd suite)"],
+        "limits": "docs/LIMITS.md#sqlite-target"
+      },
+      "notes": "Missing a sustained load test; promoted from PRODUCTION under the strict rule until one lands."
+    },
+    {
+      "id": "sqlite.source",
+      "label": "SQLite source",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "No SQLite source connector exists."
+    },
+    {
+      "id": "sqlite.content-exact",
+      "label": "SQLite read-after-write verification",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "The SQLite connector cannot prove exact read-after-write content."
+    },
+    {
+      "id": "sqlite.repair",
+      "label": "SQLite repair execution",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Repair requires a verifying connector."
+    },
+    {
+      "id": "sqlite.bulk",
+      "label": "SQLite bulk writes",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "No bulk COPY path on SQLite."
+    },
+    {
+      "id": "postgres.source",
+      "label": "PostgreSQL source",
+      "status": "PRODUCTION",
+      "assurance": "C1",
+      "evidence": {
+        "implementation": ["src/connectors/postgres/source.js"],
+        "integrationTests": ["tests/conformance/postgres-source-conformance.test.js", "tests/postgres-materialization-contract.test.js"],
+        "faultTests": ["tests/conformance/postgres-command-recovery-conformance.test.js"],
+        "securityTests": ["tests/credential-broker.test.js", "tests/platform-security.test.js"],
+        "loadTests": ["scripts/qualify-postgres-materialization.js"],
+        "benchmarks": ["scripts/qualify-postgres-materialization.js (MiB/s + RSS ceiling)"],
+        "limits": "docs/LIMITS.md#postgresql"
+      },
+      "notes": "300k-row qualification with RSS ceiling runs in CI on every change."
+    },
+    {
+      "id": "postgres.target",
+      "label": "PostgreSQL target",
+      "status": "EXPERIMENTAL",
+      "assurance": "C4",
+      "evidence": {
+        "implementation": ["src/connectors/postgres/target.js", "src/connectors/postgres/runtime.js", "src/connectors/postgres/preflight.js"],
+        "integrationTests": ["tests/conformance/postgres-conformance.test.js", "tests/conformance/postgres-command-source-conformance.test.js"],
+        "faultTests": ["tests/conformance/postgres-conformance.test.js", "tests/conformance/postgres-command-recovery-conformance.test.js", "tests/conformance/postgres-metadata-concurrency.test.js"],
+        "securityTests": ["tests/credential-broker.test.js", "tests/platform-security.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#postgresql"
+      },
+      "notes": "Missing sustained write-load and write-throughput benchmark evidence."
+    },
+    {
+      "id": "postgres.content-exact",
+      "label": "PostgreSQL exact content verification",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/connectors/postgres/content-verification.js", "src/execution/content-verification.js", "src/execution/content-verification-manifest.js"],
+        "integrationTests": ["tests/conformance/postgres-command-source-conformance.test.js", "tests/conformance/postgres-content-verification.test.js"],
+        "faultTests": ["tests/conformance/postgres-content-verification.test.js", "tests/conformance/postgres-repair-conformance.test.js"],
+        "securityTests": ["tests/credential-broker.test.js"],
+        "loadTests": [],
+        "benchmarks": ["benchmarks/run.js (contentVerification suite)"],
+        "limits": "docs/LIMITS.md#postgresql"
+      },
+      "notes": "Missing sustained verification-load evidence at scale."
+    },
+    {
+      "id": "postgres.repair",
+      "label": "PostgreSQL verified repair",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/execution/repair-plan.js", "src/execution/repair-runner.js", "src/platform/repair-approval.js", "src/execution/receipt.js"],
+        "integrationTests": ["tests/conformance/postgres-repair-conformance.test.js"],
+        "faultTests": ["tests/conformance/postgres-repair-conformance.test.js", "tests/repair-refusal.test.js"],
+        "securityTests": ["tests/repair-approval.test.js"],
+        "loadTests": [],
+        "benchmarks": ["benchmarks/run.js (repairPlan suite)"],
+        "limits": "docs/LIMITS.md#repair-and-cutover"
+      },
+      "notes": "Missing sustained repair-load evidence."
+    },
+    {
+      "id": "postgres.bulk",
+      "label": "PostgreSQL bulk COPY writes",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/connectors/postgres/target.js"],
+        "integrationTests": ["tests/conformance/postgres-bulk-conformance.test.js"],
+        "faultTests": ["tests/conformance/postgres-bulk-conformance.test.js"],
+        "securityTests": ["tests/credential-broker.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#postgresql"
+      },
+      "notes": "Single-shot throughput printed in conformance, not a benchmark suite claim; no load test."
+    },
+    {
+      "id": "postgres.cdc",
+      "label": "PostgreSQL logical CDC capture",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/connectors/postgres/cdc.js"],
+        "integrationTests": ["tests/conformance/postgres-cdc-conformance.test.js"],
+        "faultTests": [],
+        "securityTests": ["tests/credential-broker.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#postgresql"
+      },
+      "notes": "Missing fault-injection (slot loss, event loss/duplication), load and benchmark evidence."
+    },
+    {
+      "id": "postgres.workers",
+      "label": "PostgreSQL distributed fenced workers",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/connectors/postgres/workers.js"],
+        "integrationTests": ["tests/conformance/postgres-workers-conformance.test.js"],
+        "faultTests": ["tests/conformance/postgres-workers-conformance.test.js"],
+        "securityTests": ["tests/credential-broker.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#postgresql"
+      },
+      "notes": "Missing multi-worker load and throughput evidence."
+    },
+    {
+      "id": "postgres.database-source",
+      "label": "PostgreSQL whole-database source state",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/connectors/postgres/database-source.js"],
+        "integrationTests": ["tests/conformance/postgres-database-source-conformance.test.js"],
+        "faultTests": [],
+        "securityTests": ["tests/credential-broker.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#postgresql"
+      },
+      "notes": "Missing fault, load and benchmark evidence."
+    },
+    {
+      "id": "mysql.source",
+      "label": "MySQL source",
+      "status": "EXPERIMENTAL",
+      "assurance": "C1",
+      "evidence": {
+        "implementation": ["src/connectors/mysql/source.js"],
+        "integrationTests": ["tests/conformance/mysql-source-conformance.test.js"],
+        "faultTests": [],
+        "securityTests": ["tests/mysql-connector.test.js", "tests/credential-broker.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#mysql"
+      },
+      "notes": "Missing fault, load and benchmark evidence."
+    },
+    {
+      "id": "mysql.target",
+      "label": "MySQL target",
+      "status": "EXPERIMENTAL",
+      "assurance": "C4",
+      "evidence": {
+        "implementation": ["src/connectors/mysql/target.js", "src/connectors/mysql/runtime.js", "src/connectors/mysql/preflight.js"],
+        "integrationTests": ["tests/conformance/mysql-target-conformance.test.js"],
+        "faultTests": ["tests/conformance/mysql-target-conformance.test.js"],
+        "securityTests": ["tests/mysql-connector.test.js", "tests/credential-broker.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#mysql"
+      },
+      "notes": "Missing load and benchmark evidence."
+    },
+    {
+      "id": "mysql.content-exact",
+      "label": "MySQL read-after-write verification",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "The MySQL connector cannot prove exact read-after-write content."
+    },
+    {
+      "id": "mysql.repair",
+      "label": "MySQL repair execution",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Repair requires a verifying connector."
+    },
+    {
+      "id": "mysql.bulk",
+      "label": "MySQL bulk writes",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "No bulk load path on MySQL."
+    },
+    {
+      "id": "mysql.cdc",
+      "label": "MySQL CDC capture",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "No binlog capture exists."
+    },
+    {
+      "id": "mssql.source",
+      "label": "SQL Server source",
+      "status": "EXPERIMENTAL",
+      "assurance": "C1",
+      "evidence": {
+        "implementation": ["src/connectors/mssql/source.js"],
+        "integrationTests": ["tests/conformance/mssql-source-conformance.test.js"],
+        "faultTests": [],
+        "securityTests": ["tests/mssql-connector.test.js", "tests/credential-broker.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#sql-server"
+      },
+      "notes": "Missing fault, load and benchmark evidence."
+    },
+    {
+      "id": "mssql.target",
+      "label": "SQL Server target",
+      "status": "EXPERIMENTAL",
+      "assurance": "C4",
+      "evidence": {
+        "implementation": ["src/connectors/mssql/target.js", "src/connectors/mssql/runtime.js", "src/connectors/mssql/preflight.js"],
+        "integrationTests": ["tests/conformance/mssql-target-conformance.test.js"],
+        "faultTests": ["tests/conformance/mssql-target-conformance.test.js"],
+        "securityTests": ["tests/mssql-connector.test.js", "tests/credential-broker.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#sql-server"
+      },
+      "notes": "Missing load and benchmark evidence."
+    },
+    {
+      "id": "mssql.content-exact",
+      "label": "SQL Server read-after-write verification",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "The SQL Server connector cannot prove exact read-after-write content."
+    },
+    {
+      "id": "mssql.repair",
+      "label": "SQL Server repair execution",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Repair requires a verifying connector."
+    },
+    {
+      "id": "mssql.bulk",
+      "label": "SQL Server bulk writes",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "No bulk load path on SQL Server."
+    },
+    {
+      "id": "mssql.cdc",
+      "label": "SQL Server CDC capture",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "No change-tracking capture exists."
+    },
+    {
+      "id": "repair.protocol",
+      "label": "Verified repair protocol",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/daemon/command-service.js", "src/daemon/run-store.js"],
+        "integrationTests": ["tests/conformance/postgres-repair-conformance.test.js", "tests/cutover.test.js"],
+        "faultTests": ["tests/conformance/postgres-repair-conformance.test.js", "tests/repair-refusal.test.js"],
+        "securityTests": ["tests/repair-approval.test.js"],
+        "loadTests": [],
+        "benchmarks": ["benchmarks/run.js (repairPlan suite)"],
+        "limits": "docs/LIMITS.md#repair-and-cutover"
+      },
+      "notes": "Missing sustained repair-load evidence."
+    },
+    {
+      "id": "cutover.protocol",
+      "label": "Cutover protocol",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/daemon/command-service.js", "src/daemon/run-store.js", "src/protocol/svmp.js", "src/protocol/svmp-model.js"],
+        "integrationTests": ["tests/cutover.test.js"],
+        "faultTests": ["tests/cutover.test.js"],
+        "securityTests": ["tests/cutover.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#repair-and-cutover"
+      },
+      "notes": "Missing load and benchmark evidence."
+    },
+    {
+      "id": "control-plane",
+      "label": "spoold control plane",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/daemon/spoold.js"],
+        "integrationTests": ["tests/spoold.test.js"],
+        "faultTests": ["tests/spoold.test.js"],
+        "securityTests": ["tests/spoold.test.js", "tests/platform-security.test.js"],
+        "loadTests": [],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#control-plane-and-benchmarks"
+      },
+      "notes": "Missing load and benchmark evidence."
+    },
+    {
+      "id": "merkle-proofs",
+      "label": "Merkle proofs over content identities",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/execution/merkle.js", "src/execution/content-verification.js"],
+        "integrationTests": ["tests/content-verification.test.js"],
+        "faultTests": [],
+        "securityTests": [],
+        "loadTests": [],
+        "benchmarks": ["benchmarks/run.js (merkle suite)"],
+        "limits": "docs/LIMITS.md#control-plane-and-benchmarks"
+      },
+      "notes": "Missing fault, security and load evidence."
+    },
+    {
+      "id": "oracle",
+      "label": "Oracle verification",
+      "status": "PLANNED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Blocked: vendor sandbox access."
+    },
+    {
+      "id": "db2",
+      "label": "Db2 verification",
+      "status": "PLANNED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Blocked: vendor sandbox access."
+    },
+    {
+      "id": "snowflake",
+      "label": "Snowflake verification",
+      "status": "PLANNED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Blocked: vendor sandbox access."
+    },
+    {
+      "id": "bigquery",
+      "label": "BigQuery verification",
+      "status": "PLANNED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Blocked: vendor sandbox access."
+    },
+    {
+      "id": "databricks",
+      "label": "Databricks verification",
+      "status": "PLANNED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Blocked: vendor sandbox access."
+    },
+    {
+      "id": "redshift",
+      "label": "Redshift verification",
+      "status": "PLANNED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Blocked: vendor sandbox access."
+    },
+    {
+      "id": "aurora-postgres",
+      "label": "Aurora PostgreSQL verification",
+      "status": "PLANNED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Wire-compatible by design with the PostgreSQL connector; blocked: Aurora instance for proof."
+    },
+    {
+      "id": "aurora-mysql",
+      "label": "Aurora MySQL verification",
+      "status": "PLANNED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Wire-compatible by design with the MySQL connector; blocked: Aurora instance for proof."
+    },
+    {
+      "id": "sap-hana",
+      "label": "SAP HANA verification",
+      "status": "PLANNED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Blocked: vendor sandbox access."
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import { readFile, stat, readdir } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { scanProductionPurity, stalePurityAllowlist } from './production-purity.js';
 
 const required = [
   'index.html', 'styles.css', 'boot-watchdog.js', 'src/app.js', 'src/core/autopilot.js', 'src/webmcp/optional.js', 'src/storage/indexeddb.js',
@@ -54,6 +55,14 @@ try {
 } catch {}
 
 try { JSON.parse(await readFile('vercel.json', 'utf8')); } catch (error) { failures.push(`vercel.json: invalid JSON: ${error.message}`); }
+
+const purity = await scanProductionPurity({ root: process.cwd() });
+if (!purity.ok) {
+  for (const hit of purity.uncovered) failures.push(`${hit.file}:${hit.line}: fake-production pattern [${hit.pattern}]`);
+}
+for (const entry of stalePurityAllowlist(purity.violations)) {
+  failures.push(`purity allowlist is stale: ${entry.file} [${entry.pattern}]`);
+}
 
 if (failures.length) {
   console.error(`Static release check failed (${failures.length}):`);
