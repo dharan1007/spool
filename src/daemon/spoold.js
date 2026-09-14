@@ -2,7 +2,11 @@ import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { fail, toErrorEnvelope } from '../core/errors.js';
 
-const COMMANDS = new Set(['inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt']);
+const COMMANDS = new Set([
+  'inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt',
+  'repair-evidence', 'approve-repair', 'run-repair', 'repair-receipt',
+  'begin-cutover', 'commit-cutover', 'abort-cutover', 'cutover'
+]);
 
 function safeTokenEqual(expected, actual) {
   const a = Buffer.from(String(expected ?? ''), 'utf8');
@@ -61,6 +65,14 @@ async function dispatch(service, body) {
     case 'status': return service.status(body.migrationId);
     case 'verify': return service.verification(body.migrationId);
     case 'receipt': return service.receipt(body.migrationId);
+    case 'repair-evidence': return service.repairEvidence(body.migrationId);
+    case 'approve-repair': return service.approveRepair(body.request, body.options ?? {});
+    case 'run-repair': return service.runRepair(body.request, body.options ?? {});
+    case 'repair-receipt': return service.repairReceipt(body.migrationId);
+    case 'begin-cutover': return service.beginCutover(body.request, body.options ?? {});
+    case 'commit-cutover': return service.commitCutover(body.request);
+    case 'abort-cutover': return service.abortCutover(body.migrationId, body.options ?? {});
+    case 'cutover': return service.cutover(body.migrationId);
     default: fail('INVALID_COMMAND', 'Unsupported command');
   }
 }
