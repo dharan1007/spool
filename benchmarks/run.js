@@ -5,6 +5,7 @@ import { parseCsv } from '../src/core/csv.js';
 import { MigrationEngine } from '../src/core/migration.js';
 import { PHASES } from '../src/core/state-machine.js';
 import { toolNamesForPhase, toolDefinitionForName } from '../src/webmcp/registry.js';
+import { runSpoolBench } from './spool-bench.js';
 
 const sizes = [1_000, 10_000, 50_000];
 const migration = [];
@@ -38,6 +39,8 @@ const averageTools = temporal.reduce((s, x) => s + x.toolCount, 0) / temporal.le
 const averageBytes = temporal.reduce((s, x) => s + x.serializedDefinitionBytes, 0) / temporal.length;
 
 const report = {
+  suite: 'SPOOL-Bench',
+  suiteVersion: 1,
   generatedAt: new Date().toISOString(),
   environment: { node: process.version, platform: process.platform, arch: process.arch },
   migration,
@@ -50,10 +53,57 @@ const report = {
     averageDefinitionByteReductionPct: Number(((1 - averageBytes / baselineBytes) * 100).toFixed(1)),
     phases: temporal
   },
+  ...(await runSpoolBench()),
   caveat: 'These are local deterministic engine and serialized-schema measurements, not universal LLM success-rate claims.'
 };
 
 await writeFile(new URL('./latest.json', import.meta.url), `${JSON.stringify(report, null, 2)}\n`);
-const md = `# SPOOL Benchmarks\n\nGenerated: ${report.generatedAt}\n\n## Deterministic migration engine\n\n| Rows | CSV parse | Transform + target validation | Rows/sec | Valid | Invalid |\n|---:|---:|---:|---:|---:|---:|\n${migration.map(x => `| ${x.rows.toLocaleString()} | ${x.parseMs} ms | ${x.transformMs} ms | ${x.transformRowsPerSecond.toLocaleString()} | ${x.validRows.toLocaleString()} | ${x.invalidRows.toLocaleString()} |`).join('\n')}\n\n## Temporal WebMCP surface\n\nA permanent surface across the measured phases contains **${allNames.length} tools** / **${baselineBytes.toLocaleString()} serialized definition bytes**. SPOOL exposes **${report.temporalWebMcp.averageActiveToolCount} tools** / **${report.temporalWebMcp.averageSerializedDefinitionBytes.toLocaleString()} bytes on average**, reducing active tool count by **${report.temporalWebMcp.averageToolCountReductionPct}%** and serialized definition bytes by **${report.temporalWebMcp.averageDefinitionByteReductionPct}%** for this tool set.\n\n| Phase | Active tools | Definition bytes |\n|---|---:|---:|\n${temporal.map(x => `| ${x.phase} | ${x.toolCount} | ${x.serializedDefinitionBytes.toLocaleString()} |`).join('\n')}\n\n> These are local deterministic engine and serialized-schema measurements. They are not claims about universal model success rate, tokenization, or browser-agent performance.\n`;
-await writeFile(new URL('../docs/BENCHMARKS.md', import.meta.url), md);
+const lines = [
+  '# SPOOL Benchmarks',
+  '',
+  `Generated: ${report.generatedAt}`,
+  'Suite: SPOOL-Bench v1',
+  '',
+  '## Deterministic migration engine',
+  '',
+  '| Rows | CSV parse | Transform + target validation | Rows/sec | Valid | Invalid |',
+  '|---:|---:|---:|---:|---:|---:|',
+  ...migration.map(x => `| ${x.rows.toLocaleString()} | ${x.parseMs} ms | ${x.transformMs} ms | ${x.transformRowsPerSecond.toLocaleString()} | ${x.validRows.toLocaleString()} | ${x.invalidRows.toLocaleString()} |`),
+  '',
+  '## Content verification (exact row-hash projection)',
+  '',
+  '| Rows | Verify | Rows/sec |',
+  '|---:|---:|---:|',
+  ...report.contentVerification.map(x => `| ${x.rows.toLocaleString()} | ${x.verifyMs} ms | ${x.verifyRowsPerSecond.toLocaleString()} |`),
+  '',
+  '## Merkle trees (root + inclusion proof + verify)',
+  '',
+  '| Leaves | Root/prove/verify | Leaves/sec |',
+  '|---:|---:|---:|',
+  ...report.merkle.map(x => `| ${x.leaves.toLocaleString()} | ${x.rootProveVerifyMs} ms | ${x.leavesPerSecond.toLocaleString()} |`),
+  '',
+  '## Repair plans (DIFF evidence to hash-bound operations)',
+  '',
+  '| Missing rows | Operations | Plan build |',
+  '|---:|---:|---:|',
+  ...report.repairPlan.map(x => `| ${x.missingRows.toLocaleString()} | ${x.operations.toLocaleString()} | ${x.planMs} ms |`),
+  '',
+  '## SQLite end-to-end (fenced ledger-backed batches)',
+  '',
+  '| Rows | Write | Rows/sec |',
+  '|---:|---:|---:|',
+  ...report.sqliteEndToEnd.map(x => `| ${x.rows.toLocaleString()} | ${x.writeMs} ms | ${x.writeRowsPerSecond.toLocaleString()} |`),
+  '',
+  '## Temporal WebMCP surface',
+  '',
+  `A permanent surface across the measured phases contains **${allNames.length} tools** / **${baselineBytes.toLocaleString()} serialized definition bytes**. SPOOL exposes **${report.temporalWebMcp.averageActiveToolCount} tools** / **${report.temporalWebMcp.averageSerializedDefinitionBytes.toLocaleString()} bytes on average**, reducing active tool count by **${report.temporalWebMcp.averageToolCountReductionPct}%** and serialized definition bytes by **${report.temporalWebMcp.averageDefinitionByteReductionPct}%** for this tool set.`,
+  '',
+  '| Phase | Active tools | Definition bytes |',
+  '|---|---:|---:|',
+  ...temporal.map(x => `| ${x.phase} | ${x.toolCount} | ${x.serializedDefinitionBytes.toLocaleString()} |`),
+  '',
+  '> These are local deterministic engine and serialized-schema measurements. They are not claims about universal model success rate, tokenization, or browser-agent performance.',
+  ''
+];
+await writeFile(new URL('../docs/BENCHMARKS.md', import.meta.url), `${lines.join('\n')}`);
 console.log(JSON.stringify(report, null, 2));
