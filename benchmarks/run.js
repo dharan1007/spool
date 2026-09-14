@@ -6,6 +6,7 @@ import { MigrationEngine } from '../src/core/migration.js';
 import { PHASES } from '../src/core/state-machine.js';
 import { toolNamesForPhase, toolDefinitionForName } from '../src/webmcp/registry.js';
 import { runSpoolBench } from './spool-bench.js';
+import { writeBenchmarkEvidence } from './evidence.js';
 
 const sizes = [1_000, 10_000, 50_000];
 const migration = [];
@@ -106,4 +107,11 @@ const lines = [
   ''
 ];
 await writeFile(new URL('../docs/BENCHMARKS.md', import.meta.url), `${lines.join('\n')}`);
+const evidence = await writeBenchmarkEvidence({
+  suite: report.suite,
+  suiteVersion: report.suiteVersion,
+  metrics: report,
+  failures: []
+});
 console.log(JSON.stringify(report, null, 2));
+console.log(`benchmark evidence: ${evidence.dir}`);

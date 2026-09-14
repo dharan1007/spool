@@ -4,3 +4,4 @@ coverage/
 *.log
 .vercel/
 dist/
+benchmarks/results/

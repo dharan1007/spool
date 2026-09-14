@@ -1,0 +1,343 @@
+# SPOOL Capability Matrix
+
+Release: 1.1.1
+Production rule: implementation + real integration test + fault test + security test + load test + benchmark evidence + documented limits.
+
+## PRODUCTION (2)
+
+### `filesystem.source` — Filesystem CSV source
+
+- implementation: src/connectors/filesystem/stream-csv.js, src/daemon/durable-source.js
+- integrationTests: tests/command-service-streaming.test.js, tests/e2e.test.js, tests/crm-example.test.js
+- faultTests: tests/command-service-streaming-faults.test.js
+- securityTests: tests/path-policy.test.js, tests/credential-broker.test.js
+- loadTests: tests/streaming-memory.test.js
+- benchmarks: benchmarks/run.js (migration suite)
+- limits: docs/LIMITS.md#filesystem-source
+
+_Gate B production claim; bounded-memory proof above the 50 MiB boundary._
+
+### `postgres.source` — PostgreSQL source
+
+Assurance: C1
+
+- implementation: src/connectors/postgres/source.js
+- integrationTests: tests/conformance/postgres-source-conformance.test.js, tests/postgres-materialization-contract.test.js
+- faultTests: tests/conformance/postgres-command-recovery-conformance.test.js
+- securityTests: tests/credential-broker.test.js, tests/platform-security.test.js
+- loadTests: scripts/qualify-postgres-materialization.js
+- benchmarks: scripts/qualify-postgres-materialization.js (MiB/s + RSS ceiling)
+- limits: docs/LIMITS.md#postgresql
+
+_300k-row qualification with RSS ceiling runs in CI on every change._
+
+## EXPERIMENTAL (16)
+
+### `sqlite.target` — SQLite target
+
+Assurance: C4
+
+- implementation: src/connectors/sqlite/target.js, src/connectors/sqlite/runtime.js, src/connectors/sqlite/preflight.js
+- integrationTests: tests/sqlite-target.test.js, tests/conformance/sqlite-conformance.test.js
+- faultTests: tests/conformance/sqlite-faults.test.js, tests/fencing.test.js, tests/crash-recovery.test.js
+- securityTests: tests/credential-broker.test.js
+- benchmarks: benchmarks/run.js (sqliteEndToEnd suite)
+- limits: docs/LIMITS.md#sqlite-target
+
+_Missing a sustained load test; promoted from PRODUCTION under the strict rule until one lands._
+
+### `postgres.target` — PostgreSQL target
+
+Assurance: C4
+
+- implementation: src/connectors/postgres/target.js, src/connectors/postgres/runtime.js, src/connectors/postgres/preflight.js
+- integrationTests: tests/conformance/postgres-conformance.test.js, tests/conformance/postgres-command-source-conformance.test.js
+- faultTests: tests/conformance/postgres-conformance.test.js, tests/conformance/postgres-command-recovery-conformance.test.js, tests/conformance/postgres-metadata-concurrency.test.js
+- securityTests: tests/credential-broker.test.js, tests/platform-security.test.js
+- limits: docs/LIMITS.md#postgresql
+
+_Missing sustained write-load and write-throughput benchmark evidence._
+
+### `postgres.content-exact` — PostgreSQL exact content verification
+
+- implementation: src/connectors/postgres/content-verification.js, src/execution/content-verification.js, src/execution/content-verification-manifest.js
+- integrationTests: tests/conformance/postgres-command-source-conformance.test.js, tests/conformance/postgres-content-verification.test.js
+- faultTests: tests/conformance/postgres-content-verification.test.js, tests/conformance/postgres-repair-conformance.test.js
+- securityTests: tests/credential-broker.test.js
+- benchmarks: benchmarks/run.js (contentVerification suite)
+- limits: docs/LIMITS.md#postgresql
+
+_Missing sustained verification-load evidence at scale._
+
+### `postgres.repair` — PostgreSQL verified repair
+
+- implementation: src/execution/repair-plan.js, src/execution/repair-runner.js, src/platform/repair-approval.js, src/execution/receipt.js
+- integrationTests: tests/conformance/postgres-repair-conformance.test.js
+- faultTests: tests/conformance/postgres-repair-conformance.test.js, tests/repair-refusal.test.js
+- securityTests: tests/repair-approval.test.js
+- benchmarks: benchmarks/run.js (repairPlan suite)
+- limits: docs/LIMITS.md#repair-and-cutover
+
+_Missing sustained repair-load evidence._
+
+### `postgres.bulk` — PostgreSQL bulk COPY writes
+
+- implementation: src/connectors/postgres/target.js
+- integrationTests: tests/conformance/postgres-bulk-conformance.test.js
+- faultTests: tests/conformance/postgres-bulk-conformance.test.js
+- securityTests: tests/credential-broker.test.js
+- limits: docs/LIMITS.md#postgresql
+
+_Single-shot throughput printed in conformance, not a benchmark suite claim; no load test._
+
+### `postgres.cdc` — PostgreSQL logical CDC capture
+
+- implementation: src/connectors/postgres/cdc.js
+- integrationTests: tests/conformance/postgres-cdc-conformance.test.js
+- securityTests: tests/credential-broker.test.js
+- limits: docs/LIMITS.md#postgresql
+
+_Missing fault-injection (slot loss, event loss/duplication), load and benchmark evidence._
+
+### `postgres.workers` — PostgreSQL distributed fenced workers
+
+- implementation: src/connectors/postgres/workers.js
+- integrationTests: tests/conformance/postgres-workers-conformance.test.js
+- faultTests: tests/conformance/postgres-workers-conformance.test.js
+- securityTests: tests/credential-broker.test.js
+- limits: docs/LIMITS.md#postgresql
+
+_Missing multi-worker load and throughput evidence._
+
+### `postgres.database-source` — PostgreSQL whole-database source state
+
+- implementation: src/connectors/postgres/database-source.js
+- integrationTests: tests/conformance/postgres-database-source-conformance.test.js
+- securityTests: tests/credential-broker.test.js
+- limits: docs/LIMITS.md#postgresql
+
+_Missing fault, load and benchmark evidence._
+
+### `mysql.source` — MySQL source
+
+Assurance: C1
+
+- implementation: src/connectors/mysql/source.js
+- integrationTests: tests/conformance/mysql-source-conformance.test.js
+- securityTests: tests/mysql-connector.test.js, tests/credential-broker.test.js
+- limits: docs/LIMITS.md#mysql
+
+_Missing fault, load and benchmark evidence._
+
+### `mysql.target` — MySQL target
+
+Assurance: C4
+
+- implementation: src/connectors/mysql/target.js, src/connectors/mysql/runtime.js, src/connectors/mysql/preflight.js
+- integrationTests: tests/conformance/mysql-target-conformance.test.js
+- faultTests: tests/conformance/mysql-target-conformance.test.js
+- securityTests: tests/mysql-connector.test.js, tests/credential-broker.test.js
+- limits: docs/LIMITS.md#mysql
+
+_Missing load and benchmark evidence._
+
+### `mssql.source` — SQL Server source
+
+Assurance: C1
+
+- implementation: src/connectors/mssql/source.js
+- integrationTests: tests/conformance/mssql-source-conformance.test.js
+- securityTests: tests/mssql-connector.test.js, tests/credential-broker.test.js
+- limits: docs/LIMITS.md#sql-server
+
+_Missing fault, load and benchmark evidence._
+
+### `mssql.target` — SQL Server target
+
+Assurance: C4
+
+- implementation: src/connectors/mssql/target.js, src/connectors/mssql/runtime.js, src/connectors/mssql/preflight.js
+- integrationTests: tests/conformance/mssql-target-conformance.test.js
+- faultTests: tests/conformance/mssql-target-conformance.test.js
+- securityTests: tests/mssql-connector.test.js, tests/credential-broker.test.js
+- limits: docs/LIMITS.md#sql-server
+
+_Missing load and benchmark evidence._
+
+### `repair.protocol` — Verified repair protocol
+
+- implementation: src/daemon/command-service.js, src/daemon/run-store.js
+- integrationTests: tests/conformance/postgres-repair-conformance.test.js, tests/cutover.test.js
+- faultTests: tests/conformance/postgres-repair-conformance.test.js, tests/repair-refusal.test.js
+- securityTests: tests/repair-approval.test.js
+- benchmarks: benchmarks/run.js (repairPlan suite)
+- limits: docs/LIMITS.md#repair-and-cutover
+
+_Missing sustained repair-load evidence._
+
+### `cutover.protocol` — Cutover protocol
+
+- implementation: src/daemon/command-service.js, src/daemon/run-store.js, src/protocol/svmp.js, src/protocol/svmp-model.js
+- integrationTests: tests/cutover.test.js
+- faultTests: tests/cutover.test.js
+- securityTests: tests/cutover.test.js
+- limits: docs/LIMITS.md#repair-and-cutover
+
+_Missing load and benchmark evidence._
+
+### `control-plane` — spoold control plane
+
+- implementation: src/daemon/spoold.js
+- integrationTests: tests/spoold.test.js
+- faultTests: tests/spoold.test.js
+- securityTests: tests/spoold.test.js, tests/platform-security.test.js
+- limits: docs/LIMITS.md#control-plane-and-benchmarks
+
+_Missing load and benchmark evidence._
+
+### `merkle-proofs` — Merkle proofs over content identities
+
+- implementation: src/execution/merkle.js, src/execution/content-verification.js
+- integrationTests: tests/content-verification.test.js
+- benchmarks: benchmarks/run.js (merkle suite)
+- limits: docs/LIMITS.md#control-plane-and-benchmarks
+
+_Missing fault, security and load evidence._
+
+## PLANNED (9)
+
+### `oracle` — Oracle verification
+
+- _no evidence claimed_
+
+_Blocked: vendor sandbox access._
+
+### `db2` — Db2 verification
+
+- _no evidence claimed_
+
+_Blocked: vendor sandbox access._
+
+### `snowflake` — Snowflake verification
+
+- _no evidence claimed_
+
+_Blocked: vendor sandbox access._
+
+### `bigquery` — BigQuery verification
+
+- _no evidence claimed_
+
+_Blocked: vendor sandbox access._
+
+### `databricks` — Databricks verification
+
+- _no evidence claimed_
+
+_Blocked: vendor sandbox access._
+
+### `redshift` — Redshift verification
+
+- _no evidence claimed_
+
+_Blocked: vendor sandbox access._
+
+### `aurora-postgres` — Aurora PostgreSQL verification
+
+- _no evidence claimed_
+
+_Wire-compatible by design with the PostgreSQL connector; blocked: Aurora instance for proof._
+
+### `aurora-mysql` — Aurora MySQL verification
+
+- _no evidence claimed_
+
+_Wire-compatible by design with the MySQL connector; blocked: Aurora instance for proof._
+
+### `sap-hana` — SAP HANA verification
+
+- _no evidence claimed_
+
+_Blocked: vendor sandbox access._
+
+## UNSUPPORTED (13)
+
+### `filesystem.target` — Filesystem target
+
+- _no evidence claimed_
+
+_No filesystem target exists; writes go to database connectors only._
+
+### `sqlite.source` — SQLite source
+
+- _no evidence claimed_
+
+_No SQLite source connector exists._
+
+### `sqlite.content-exact` — SQLite read-after-write verification
+
+- _no evidence claimed_
+
+_The SQLite connector cannot prove exact read-after-write content._
+
+### `sqlite.repair` — SQLite repair execution
+
+- _no evidence claimed_
+
+_Repair requires a verifying connector._
+
+### `sqlite.bulk` — SQLite bulk writes
+
+- _no evidence claimed_
+
+_No bulk COPY path on SQLite._
+
+### `mysql.content-exact` — MySQL read-after-write verification
+
+- _no evidence claimed_
+
+_The MySQL connector cannot prove exact read-after-write content._
+
+### `mysql.repair` — MySQL repair execution
+
+- _no evidence claimed_
+
+_Repair requires a verifying connector._
+
+### `mysql.bulk` — MySQL bulk writes
+
+- _no evidence claimed_
+
+_No bulk load path on MySQL._
+
+### `mysql.cdc` — MySQL CDC capture
+
+- _no evidence claimed_
+
+_No binlog capture exists._
+
+### `mssql.content-exact` — SQL Server read-after-write verification
+
+- _no evidence claimed_
+
+_The SQL Server connector cannot prove exact read-after-write content._
+
+### `mssql.repair` — SQL Server repair execution
+
+- _no evidence claimed_
+
+_Repair requires a verifying connector._
+
+### `mssql.bulk` — SQL Server bulk writes
+
+- _no evidence claimed_
+
+_No bulk load path on SQL Server._
+
+### `mssql.cdc` — SQL Server CDC capture
+
+- _no evidence claimed_
+
+_No change-tracking capture exists._
+
+> Generated from capabilities/matrix.json. Do not edit by hand.
