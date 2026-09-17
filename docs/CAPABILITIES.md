@@ -3,7 +3,7 @@
 Release: 1.1.1
 Production rule: implementation + real integration test + fault test + security test + load test + benchmark evidence + documented limits.
 
-## PRODUCTION (2)
+## PRODUCTION (5)
 
 ### `filesystem.source` — Filesystem CSV source
 
@@ -30,6 +30,42 @@ Assurance: C1
 - limits: docs/LIMITS.md#postgresql
 
 _300k-row qualification with RSS ceiling runs in CI on every change._
+
+### `release-integrity` — Release integrity: Git-to-dist SHA parity and per-merge evidence
+
+- implementation: src/platform/artifact-root.js, src/platform/release-chain.js, scripts/build-dist.js, scripts/verify-release-chain.js, scripts/sign-release.js
+- integrationTests: tests/release-chain.test.js, tests/artifact-root.test.js, tests/release-contract.test.js
+- faultTests: tests/release-chain.test.js, tests/artifact-root.test.js
+- securityTests: tests/signing.test.js, tests/release-chain.test.js
+- loadTests: tests/release-integrity-load.test.js
+- benchmarks: benchmarks/run.js (releaseIntegrity suite)
+- limits: docs/LIMITS.md#release-integrity-provenance-and-reproducible-builds
+
+_Gate F production claim: Git commit bounded to dist artifact root through release.json and release-manifest.json; tampering fails the chain closed._
+
+### `release-provenance` — Signed release provenance and offline verification
+
+- implementation: src/platform/signing.js, src/platform/release-chain.js, scripts/sign-release.js, scripts/verify-release-chain.js
+- integrationTests: tests/signing.test.js, tests/release-chain.test.js
+- faultTests: tests/signing.test.js, tests/release-chain.test.js
+- securityTests: tests/signing.test.js, tests/release-chain.test.js
+- loadTests: tests/release-integrity-load.test.js
+- benchmarks: benchmarks/run.js (releaseIntegrity suite)
+- limits: docs/LIMITS.md#release-integrity-provenance-and-reproducible-builds
+
+_Gate F production claim: Ed25519 PEM key management, domain-bound signatures, key fingerprints, fail-closed verification._
+
+### `reproducible-build` — Reproducible build evidence
+
+- implementation: scripts/reproducible-build-evidence.js, scripts/build-dist.js, src/platform/artifact-root.js
+- integrationTests: tests/release-integrity-load.test.js, tests/artifact-root.test.js
+- faultTests: tests/release-integrity-load.test.js
+- securityTests: tests/signing.test.js
+- loadTests: tests/release-integrity-load.test.js
+- benchmarks: benchmarks/run.js (releaseIntegrity suite)
+- limits: docs/LIMITS.md#release-integrity-provenance-and-reproducible-builds
+
+_Gate F production claim: two independent builds over the same committed source must produce the identical artifact root._
 
 ## EXPERIMENTAL (16)
 

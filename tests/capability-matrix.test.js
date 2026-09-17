@@ -83,6 +83,6 @@ test('capability evidence satisfies the production rule and every cited file exi
 test('capability docs are freshly generated from the matrix', async () => {
   const data = await matrix();
   const rendered = renderCapabilityDocs(data);
-  const checkedIn = await readFile(new URL('../docs/CAPABILITIES.md', import.meta.url), 'utf8');
+  const checkedIn = (await readFile(new URL('../docs/CAPABILITIES.md', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
   assert.equal(checkedIn, rendered);
 });

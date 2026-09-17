@@ -54,3 +54,13 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 
 - `spoold` binds loopback only, requires a ≥32-byte bearer token, validates Host/Origin, and caps bodies (default 1 MiB).
 - SPOOL-Bench numbers are local single-run measurements, never cross-machine claims; production readiness is decided by the capability matrix, not by benchmark speed.
+
+## Release integrity, provenance and reproducible builds
+
+- Dist artifacts are identified by `sha256` of file bytes; the canonical artifact root is the hash of `path\0size\0sha256\n` lines in lexicographic path order. Order is fixed by sorted collection, not by root computation.
+- Release parity anchors SHA from Git (`git rev-parse HEAD`) to the artifact root of the built `dist`, cross-checking `release.json` and `release-manifest.json`; any disagreement fails the chain closed before signing is considered.
+- Signatures are Ed25519 over `SPOOL\0release-parity-v1\0` + canonical JSON only; the public key file under `keys/` is the trust root, and the fingerprint (`ed25519:fpr:<sha256 of SPKI DER>`) must match the enrolled key id on every verification.
+- The signing private key is never stored in the repository. Release signing requires an out-of-band secret (`SPOOL_RELEASE_PRIVATE_KEY`); without it, signing commands fail closed.
+- Reproducible-build evidence builds `dist` twice into independent temporary directories and rejects the release if the artifact roots differ; the recorded environment fingerprint pins Node, npm, platform, arch, lockfile hash and source tree.
+- Root and manifest files (`release.json`, `release-manifest.json`) and host-consumed config (`vercel.json`) are excluded from the artifact root by design; modify the exclusion set through the chain call sites only.
+- Envelope verification is a pure function over `(envelope, public key)`; it never trusts mutable process state, and tampered payload, wrong key, wrong commit or wrong domain are all rejected with distinct codes.

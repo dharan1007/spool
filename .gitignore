@@ -5,3 +5,4 @@ coverage/
 .vercel/
 dist/
 benchmarks/results/
+release/reproducibility-evidence.json
