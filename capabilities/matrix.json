@@ -397,6 +397,54 @@
       "notes": "Missing fault, security and load evidence."
     },
     {
+      "id": "release-integrity",
+      "label": "Release integrity: Git-to-dist SHA parity and per-merge evidence",
+      "status": "PRODUCTION",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/platform/artifact-root.js", "src/platform/release-chain.js", "scripts/build-dist.js", "scripts/verify-release-chain.js", "scripts/sign-release.js"],
+        "integrationTests": ["tests/release-chain.test.js", "tests/artifact-root.test.js", "tests/release-contract.test.js"],
+        "faultTests": ["tests/release-chain.test.js", "tests/artifact-root.test.js"],
+        "securityTests": ["tests/signing.test.js", "tests/release-chain.test.js"],
+        "loadTests": ["tests/release-integrity-load.test.js"],
+        "benchmarks": ["benchmarks/run.js (releaseIntegrity suite)"],
+        "limits": "docs/LIMITS.md#release-integrity-provenance-and-reproducible-builds"
+      },
+      "notes": "Gate F production claim: Git commit bounded to dist artifact root through release.json and release-manifest.json; tampering fails the chain closed."
+    },
+    {
+      "id": "release-provenance",
+      "label": "Signed release provenance and offline verification",
+      "status": "PRODUCTION",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/platform/signing.js", "src/platform/release-chain.js", "scripts/sign-release.js", "scripts/verify-release-chain.js"],
+        "integrationTests": ["tests/signing.test.js", "tests/release-chain.test.js"],
+        "faultTests": ["tests/signing.test.js", "tests/release-chain.test.js"],
+        "securityTests": ["tests/signing.test.js", "tests/release-chain.test.js"],
+        "loadTests": ["tests/release-integrity-load.test.js"],
+        "benchmarks": ["benchmarks/run.js (releaseIntegrity suite)"],
+        "limits": "docs/LIMITS.md#release-integrity-provenance-and-reproducible-builds"
+      },
+      "notes": "Gate F production claim: Ed25519 PEM key management, domain-bound signatures, key fingerprints, fail-closed verification."
+    },
+    {
+      "id": "reproducible-build",
+      "label": "Reproducible build evidence",
+      "status": "PRODUCTION",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["scripts/reproducible-build-evidence.js", "scripts/build-dist.js", "src/platform/artifact-root.js"],
+        "integrationTests": ["tests/release-integrity-load.test.js", "tests/artifact-root.test.js"],
+        "faultTests": ["tests/release-integrity-load.test.js"],
+        "securityTests": ["tests/signing.test.js"],
+        "loadTests": ["tests/release-integrity-load.test.js"],
+        "benchmarks": ["benchmarks/run.js (releaseIntegrity suite)"],
+        "limits": "docs/LIMITS.md#release-integrity-provenance-and-reproducible-builds"
+      },
+      "notes": "Gate F production claim: two independent builds over the same committed source must produce the identical artifact root."
+    },
+    {
       "id": "oracle",
       "label": "Oracle verification",
       "status": "PLANNED",

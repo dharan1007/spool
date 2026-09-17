@@ -7,6 +7,8 @@ import { PHASES } from '../src/core/state-machine.js';
 import { toolNamesForPhase, toolDefinitionForName } from '../src/webmcp/registry.js';
 import { runSpoolBench } from './spool-bench.js';
 import { writeBenchmarkEvidence } from './evidence.js';
+import { generateSigningKeyPair, signCanonical, verifyCanonical } from '../src/platform/signing.js';
+import { sha256Bytes, sha256CanonicalList } from '../src/platform/artifact-root.js';
 
 const sizes = [1_000, 10_000, 50_000];
 const migration = [];
@@ -39,6 +41,27 @@ const temporal = phases.map(phase => {
 const averageTools = temporal.reduce((s, x) => s + x.toolCount, 0) / temporal.length;
 const averageBytes = temporal.reduce((s, x) => s + x.serializedDefinitionBytes, 0) / temporal.length;
 
+const signingIterations = 2_000;
+const { privateKey, publicKey } = generateSigningKeyPair();
+const signingPayload = { product: 'SPOOL', schemaVersion: 1, domain: 'release-parity-v1', version: '1.1.1', commit: 'a'.repeat(40), artifactRootSha256: 'b'.repeat(64) };
+const signingStart = performance.now();
+const signed = [];
+for (let i = 0; i < signingIterations; i++) signed.push(signCanonical('release-parity-v1', { ...signingPayload, nonce: i }, privateKey));
+const signingMs = performance.now() - signingStart;
+const verifyStart = performance.now();
+for (let i = 0; i < signingIterations; i++) verifyCanonical('release-parity-v1', { ...signingPayload, nonce: i }, signed[i].signature, publicKey);
+const verifyMs = performance.now() - verifyStart;
+const canonicalStart = performance.now();
+const canonicalIterations = 10_000;
+for (let i = 0; i < canonicalIterations; i++) sha256CanonicalList('release-parity-v1', Buffer.from(`block-${i}`));
+const canonicalMs = performance.now() - canonicalStart;
+
+const releaseIntegrity = Object.freeze({
+  envelopeSignsPerSecond: Math.round(signingIterations / (signingMs / 1000)),
+  envelopeVerificationsPerSecond: Math.round(signingIterations / (verifyMs / 1000)),
+  canonicalListHashesPerSecond: Math.round(canonicalIterations / (canonicalMs / 1000))
+});
+
 const report = {
   suite: 'SPOOL-Bench',
   suiteVersion: 1,
@@ -54,6 +77,7 @@ const report = {
     averageDefinitionByteReductionPct: Number(((1 - averageBytes / baselineBytes) * 100).toFixed(1)),
     phases: temporal
   },
+  releaseIntegrity,
   ...(await runSpoolBench()),
   caveat: 'These are local deterministic engine and serialized-schema measurements, not universal LLM success-rate claims.'
 };
@@ -94,6 +118,14 @@ const lines = [
   '| Rows | Write | Rows/sec |',
   '|---:|---:|---:|',
   ...report.sqliteEndToEnd.map(x => `| ${x.rows.toLocaleString()} | ${x.writeMs} ms | ${x.writeRowsPerSecond.toLocaleString()} |`),
+  '',
+  '## Release integrity (signed envelope + canonical evidence)',
+  '',
+  '| Operation | Ops/sec |',
+  '|---:|---:|',
+  `| Signed envelope creation | ${report.releaseIntegrity.envelopeSignsPerSecond.toLocaleString()} |`,
+  `| Signed envelope verification | ${report.releaseIntegrity.envelopeVerificationsPerSecond.toLocaleString()} |`,
+  `| Canonical evidence list hashing | ${report.releaseIntegrity.canonicalListHashesPerSecond.toLocaleString()} |`,
   '',
   '## Temporal WebMCP surface',
   '',

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "product": "SPOOL",
+  "chain": {
+    "commit": "b0b398ee7e6c83e58d4663e47861a745bedee8da",
+    "version": "1.1.1",
+    "artifactRootSha256": "af05cdb52710481a5bcfe6e5b18b5c048a9f5b30aceb457a10f7613bd363e1bb",
+    "artifactCount": 87
+  },
+  "envelope": {
+    "payload": {
+      "product": "SPOOL",
+      "schemaVersion": 1,
+      "domain": "release-parity-v1",
+      "version": "1.1.1",
+      "commit": "b0b398ee7e6c83e58d4663e47861a745bedee8da",
+      "artifactRootSha256": "af05cdb52710481a5bcfe6e5b18b5c048a9f5b30aceb457a10f7613bd363e1bb",
+      "generatedAt": "2026-09-17T10:01:52.086Z"
+    },
+    "signature": "mYaRUQB5SjBuzcFQdmLA8hkOxU5O-Zmdxzgb4pZYQLrGCCtwJgHNH6AFK6sNMYLAVOvNGuxLCq11hpvNeMXBCQ",
+    "signatureAlgorithm": "spool-signature-v1",
+    "domain": "release-parity-v1",
+    "key": "ed25519:fpr:6920f46ff53468f20838ee29de6ba1a10925cebc5502098f0add045f2adee195"
+  }
+}

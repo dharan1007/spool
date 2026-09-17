@@ -46,6 +46,7 @@ jobs:
       - name: Run production release gate
         env:
           SPOOL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SPOOL_RELEASE_PRIVATE_KEY: ${{ secrets.SPOOL_RELEASE_PRIVATE_KEY }}
         run: npm run check
       - name: Verify packed and globally installed CLI
         env:
