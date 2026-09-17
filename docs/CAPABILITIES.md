@@ -67,7 +67,7 @@ _Gate F production claim: Ed25519 PEM key management, domain-bound signatures, k
 
 _Gate F production claim: two independent builds over the same committed source must produce the identical artifact root._
 
-## EXPERIMENTAL (17)
+## EXPERIMENTAL (18)
 
 ### `sqlite.target` — SQLite target
 
@@ -157,6 +157,16 @@ _Dead-worker lease steal with stale-fence rejection at the commit boundary is co
 - limits: docs/LIMITS.md#postgresql
 
 _Paced multi-writer soak, deadlock/serialization classification, backend termination and COPY cancellation, connection churn, slot-loss recovery, replay idempotency, lease steal, reconnect RTO and verify/repair are proven live; missing large-scale sustained soak and benchmark evidence for PRODUCTION._
+
+### `postgres.schema-migration` — PostgreSQL schema migration protocol
+
+- implementation: src/connectors/postgres/schema-migration.js
+- integrationTests: tests/schema-migration.test.js, tests/conformance/postgres-schema-migration.test.js
+- faultTests: tests/conformance/postgres-schema-migration.test.js
+- securityTests: tests/credential-broker.test.js
+- limits: docs/LIMITS.md#postgresql-schema-migration
+
+_Structured diff, hashed ordered plans with safety classes, fenced atomic apply with drift refusal, approval-gated destructive steps and ledger receipts are proven live; missing default/index management, large-table online strategies and benchmark evidence for PRODUCTION._
 
 ### `postgres.database-source` — PostgreSQL whole-database source state
 
