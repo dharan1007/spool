@@ -33,6 +33,16 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 - Deadlock (`40P01`) and serialization (`40001`) faults are retryable; terminated backends (`57P01`) and read-only violations are classified but not retried.
 - Soak plans require the batch id window to fit one full round (`batchSize * writers <= uniqueEnd - uniqueStart`); RPO/RTO records are measured observations of a run, not guarantees.
 
+## PostgreSQL schema migration
+
+- Desired schemas declare `{name, type, nullable}` with an explicit primary key; new integer columns are created as `bigint`, numbers as `double precision`, strings as `text`.
+- Type changes are allowed without approval only for total casts to `text`; every other type change, and every column drop, is destructive and requires a bound approval carrying the `postgres:schema-migrate-destructive` effect against the migration source contract.
+- Migration applies run fenced inside a single transaction: any step failure rolls the whole plan back with no ledger row, and out-of-band contract drift refuses the apply with a structured report.
+- Replays never take the fencing lease: an applied plan whose recorded contract still matches live returns `ALREADY_APPLIED` from a read-only probe.
+- Column defaults, secondary indexes, triggers, rules and non-PK constraints are never auto-migrated; their presence fails planning closed as unmanaged objects.
+- DDL steps run under the connector statement timeout; large-table rewrites beyond that budget are rejected, not retried.
+- The connector checks destructive-approval binding (migration, effect, source contract, expiry); approval signature verification stays with the service layer.
+
 ## MySQL
 
 - Sources read one table per session under `REPEATABLE READ` with a consistent snapshot; tables require a primary key. Snapshots are single-session: there is no cross-session snapshot export.
