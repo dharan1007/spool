@@ -29,6 +29,9 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 - Bulk `COPY` uses CSV format with all non-null fields quoted; `NULL` is the unquoted empty field.
 - CDC requires `wal_level = logical`, a replication-capable principal and a publication; unconsumed slots retain WAL on the server (monitor slot lag externally).
 - Leases and fencing state live in `spool_internal`; catalog discovery always excludes it.
+- Reference fault workloads fail closed, never silent: a dropped replication slot is reported absent and must be recreated before capture resumes; a cancelled `COPY` leaves no partial rows and no ledger entry, and the commit surfaces the server cancellation message through the credential boundary.
+- Deadlock (`40P01`) and serialization (`40001`) faults are retryable; terminated backends (`57P01`) and read-only violations are classified but not retried.
+- Soak plans require the batch id window to fit one full round (`batchSize * writers <= uniqueEnd - uniqueStart`); RPO/RTO records are measured observations of a run, not guarantees.
 
 ## MySQL
 
