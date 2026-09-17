@@ -163,14 +163,14 @@
       "assurance": null,
       "evidence": {
         "implementation": ["src/connectors/postgres/cdc.js"],
-        "integrationTests": ["tests/conformance/postgres-cdc-conformance.test.js"],
-        "faultTests": [],
+        "integrationTests": ["tests/conformance/postgres-cdc-conformance.test.js", "tests/conformance/postgres-reference-recovery.test.js"],
+        "faultTests": ["tests/conformance/postgres-reference-recovery.test.js"],
         "securityTests": ["tests/credential-broker.test.js"],
-        "loadTests": [],
+        "loadTests": ["tests/conformance/postgres-reference-recovery.test.js"],
         "benchmarks": [],
         "limits": "docs/LIMITS.md#postgresql"
       },
-      "notes": "Missing fault-injection (slot loss, event loss/duplication), load and benchmark evidence."
+      "notes": "Slot-loss detection/recovery and a 100-row concurrent-writer CDC soak with LSN-order proof are covered; missing large-scale soak and benchmark evidence."
     },
     {
       "id": "postgres.workers",
@@ -180,13 +180,29 @@
       "evidence": {
         "implementation": ["src/connectors/postgres/workers.js"],
         "integrationTests": ["tests/conformance/postgres-workers-conformance.test.js"],
-        "faultTests": ["tests/conformance/postgres-workers-conformance.test.js"],
+        "faultTests": ["tests/conformance/postgres-workers-conformance.test.js", "tests/conformance/postgres-reference-recovery.test.js"],
         "securityTests": ["tests/credential-broker.test.js"],
         "loadTests": [],
         "benchmarks": [],
         "limits": "docs/LIMITS.md#postgresql"
       },
-      "notes": "Missing multi-worker load and throughput evidence."
+      "notes": "Dead-worker lease steal with stale-fence rejection at the commit boundary is covered; missing multi-worker load and throughput evidence."
+    },
+    {
+      "id": "postgres.reference",
+      "label": "PostgreSQL reference workloads: soak, faults and recovery",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": ["src/connectors/postgres/reference.js"],
+        "integrationTests": ["tests/conformance/postgres-reference-soak.test.js", "tests/conformance/postgres-reference-recovery.test.js"],
+        "faultTests": ["tests/conformance/postgres-reference-soak.test.js", "tests/conformance/postgres-reference-recovery.test.js"],
+        "securityTests": ["tests/credential-broker.test.js"],
+        "loadTests": ["tests/conformance/postgres-reference-soak.test.js", "tests/conformance/postgres-reference-recovery.test.js"],
+        "benchmarks": [],
+        "limits": "docs/LIMITS.md#postgresql"
+      },
+      "notes": "Paced multi-writer soak, deadlock/serialization classification, backend termination and COPY cancellation, connection churn, slot-loss recovery, replay idempotency, lease steal, reconnect RTO and verify/repair are proven live; missing large-scale sustained soak and benchmark evidence for PRODUCTION."
     },
     {
       "id": "postgres.database-source",

@@ -67,7 +67,7 @@ _Gate F production claim: Ed25519 PEM key management, domain-bound signatures, k
 
 _Gate F production claim: two independent builds over the same committed source must produce the identical artifact root._
 
-## EXPERIMENTAL (16)
+## EXPERIMENTAL (17)
 
 ### `sqlite.target` — SQLite target
 
@@ -129,21 +129,34 @@ _Single-shot throughput printed in conformance, not a benchmark suite claim; no 
 ### `postgres.cdc` — PostgreSQL logical CDC capture
 
 - implementation: src/connectors/postgres/cdc.js
-- integrationTests: tests/conformance/postgres-cdc-conformance.test.js
+- integrationTests: tests/conformance/postgres-cdc-conformance.test.js, tests/conformance/postgres-reference-recovery.test.js
+- faultTests: tests/conformance/postgres-reference-recovery.test.js
 - securityTests: tests/credential-broker.test.js
+- loadTests: tests/conformance/postgres-reference-recovery.test.js
 - limits: docs/LIMITS.md#postgresql
 
-_Missing fault-injection (slot loss, event loss/duplication), load and benchmark evidence._
+_Slot-loss detection/recovery and a 100-row concurrent-writer CDC soak with LSN-order proof are covered; missing large-scale soak and benchmark evidence._
 
 ### `postgres.workers` — PostgreSQL distributed fenced workers
 
 - implementation: src/connectors/postgres/workers.js
 - integrationTests: tests/conformance/postgres-workers-conformance.test.js
-- faultTests: tests/conformance/postgres-workers-conformance.test.js
+- faultTests: tests/conformance/postgres-workers-conformance.test.js, tests/conformance/postgres-reference-recovery.test.js
 - securityTests: tests/credential-broker.test.js
 - limits: docs/LIMITS.md#postgresql
 
-_Missing multi-worker load and throughput evidence._
+_Dead-worker lease steal with stale-fence rejection at the commit boundary is covered; missing multi-worker load and throughput evidence._
+
+### `postgres.reference` — PostgreSQL reference workloads: soak, faults and recovery
+
+- implementation: src/connectors/postgres/reference.js
+- integrationTests: tests/conformance/postgres-reference-soak.test.js, tests/conformance/postgres-reference-recovery.test.js
+- faultTests: tests/conformance/postgres-reference-soak.test.js, tests/conformance/postgres-reference-recovery.test.js
+- securityTests: tests/credential-broker.test.js
+- loadTests: tests/conformance/postgres-reference-soak.test.js, tests/conformance/postgres-reference-recovery.test.js
+- limits: docs/LIMITS.md#postgresql
+
+_Paced multi-writer soak, deadlock/serialization classification, backend termination and COPY cancellation, connection churn, slot-loss recovery, replay idempotency, lease steal, reconnect RTO and verify/repair are proven live; missing large-scale sustained soak and benchmark evidence for PRODUCTION._
 
 ### `postgres.database-source` — PostgreSQL whole-database source state
 

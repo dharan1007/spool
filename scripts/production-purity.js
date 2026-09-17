@@ -26,6 +26,7 @@ const ALLOWLIST = Object.freeze([
   { pattern: 'random-evidence', file: 'src/core/state-machine.js', justification: 'Client-side job label suffix; never part of any evidence chain (evidence uses sha256Canonical).' },
   { pattern: 'sleep-sync', file: 'scripts/browser-smoke.py', justification: 'Bounded test polling helper (wait_for with timeout) for browser smoke; CI test synchronization, not production evidence.' },
   { pattern: 'sleep-sync', file: 'scripts/qualify-postgres-materialization.js', justification: 'Peak-RSS sampler interval (unref timer) for load measurement; observability, not synchronization.' },
+  { pattern: 'sleep-sync', file: 'src/connectors/postgres/reference.js', justification: 'Bounded WAL LSN-advance wait with an explicit deadline for CDC recovery tests; wait loop only, never evidence.' },
   { pattern: 'not-implemented', file: 'scripts/production-purity.js', justification: 'Pattern vocabulary defining this gate itself, not an unimplemented path.' },
   { pattern: 'dummy-data', file: 'scripts/production-purity.js', justification: 'Pattern vocabulary defining this gate itself, not dummy data.' },
   { pattern: 'faker', file: 'scripts/production-purity.js', justification: 'Pattern vocabulary defining this gate itself, not fabricated data.' },
