@@ -211,6 +211,15 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         const exitInfo = await Promise.race([childExit, new Promise(r => setTimeout(() => r({ code: null, signal: 'TIMEOUT' }), 5000))]);
         evidenceWriter.appendRaw({ scenario, event: 'crash_child_exit', ...exitInfo, killed, ledgerBeforeKill, checkpointBeforeKill });
 
+        // Lease held by killed process would block fresh acquisition for TTL; simulate lease expiry
+        try {
+          const leaseClean = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
+          await leaseClean.connect();
+          await leaseClean.query(`DELETE FROM spool_internal.execution_leases WHERE resource LIKE $1`, [`%${killTable}%`]);
+          await leaseClean.end();
+          evidenceWriter.appendRaw({ scenario, event: 'crash_lease_released_after_kill', table: killTable });
+        } catch {}
+
         // Fresh process must reconstruct durable checkpoint + ledger and complete without duplicates
         killRecoveredAt = Date.now();
         const rtoMsKill = killRecoveredAt - killFaultAt;
