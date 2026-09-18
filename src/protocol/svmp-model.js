@@ -3,7 +3,13 @@ import { SVMP_STATES } from './svmp.js';
 export const UNSAFE_MODEL_MUTATIONS = Object.freeze({
   ALLOW_CHECKPOINT_WITHOUT_EVIDENCE: 'ALLOW_CHECKPOINT_WITHOUT_EVIDENCE',
   ALLOW_STALE_FENCE_WRITE: 'ALLOW_STALE_FENCE_WRITE',
-  ALLOW_CUTOVER_WITHOUT_VERIFICATION: 'ALLOW_CUTOVER_WITHOUT_VERIFICATION'
+  ALLOW_CUTOVER_WITHOUT_VERIFICATION: 'ALLOW_CUTOVER_WITHOUT_VERIFICATION',
+  ALLOW_REPAIR_WITH_MIGRATION_APPROVAL: 'ALLOW_REPAIR_WITH_MIGRATION_APPROVAL',
+  ALLOW_SECOND_COMMITTED_OWNER: 'ALLOW_SECOND_COMMITTED_OWNER',
+  ALLOW_CDC_ACK_BEYOND_APPLIED: 'ALLOW_CDC_ACK_BEYOND_APPLIED',
+  ALLOW_PLAN_DRIFT: 'ALLOW_PLAN_DRIFT',
+  ALLOW_BACKWARDS_AFTER_CUTOVER: 'ALLOW_BACKWARDS_AFTER_CUTOVER',
+  ALLOW_COMPLETED_AFTER_FAILED: 'ALLOW_COMPLETED_AFTER_FAILED'
 });
 
 const INVARIANTS = Object.freeze({
@@ -57,6 +63,26 @@ const INVARIANTS = Object.freeze({
       && state.checkpointAdvanced
       && state.targetCommitted
       && state.evidencePresent;
+  },
+  no_repair_with_migration_approval(state) {
+    return !state.migrationApprovalUsedForRepair;
+  },
+  no_two_committed_owners(state) {
+    return state.commitCount <= 1 && !state.secondOwnerCommitted;
+  },
+  cdc_ack_not_beyond_applied(state) {
+    return !state.ackBeyondApplied;
+  },
+  no_plan_drift(state) {
+    return !state.planDriftObserved;
+  },
+  no_backwards_after_cutover(state) {
+    if (state.backwardsAfterCutover) return false;
+    return !state.cutoverCommitted || ![SVMP_STATES.DISCOVERED, SVMP_STATES.SNAPSHOTTED, SVMP_STATES.PLANNED, SVMP_STATES.VALIDATED, SVMP_STATES.AUTHORIZED, SVMP_STATES.EXECUTING, SVMP_STATES.RECONCILING, SVMP_STATES.VERIFYING, SVMP_STATES.VERIFICATION_FAILED, SVMP_STATES.COMPENSATION_REQUIRED].includes(state.phase);
+  },
+  no_completed_after_failed(state) {
+    if (state.completedAfterFailed) return false;
+    return !state.verificationFailed || ![SVMP_STATES.VERIFIED, SVMP_STATES.CUTOVER_ARMED, SVMP_STATES.CUTOVER_COMMITTED].includes(state.phase);
   }
 });
 
@@ -92,7 +118,13 @@ function initialState() {
     verified: false,
     cutoverArmed: false,
     cutoverCommitted: false,
-    crashed: false
+    crashed: false,
+    migrationApprovalUsedForRepair: false,
+    secondOwnerCommitted: false,
+    ackBeyondApplied: false,
+    planDriftObserved: false,
+    backwardsAfterCutover: false,
+    completedAfterFailed: false
   };
 }
 
@@ -342,6 +374,27 @@ function actionsFor(state, mutation) {
       authorityValid: false,
       leaseHeld: false
     }));
+
+  // Unsafe mutations for extended invariants (only when mutated)
+  if (mutation === UNSAFE_MODEL_MUTATIONS.ALLOW_REPAIR_WITH_MIGRATION_APPROVAL && state.phase === SVMP_STATES.VERIFICATION_FAILED) {
+    add('repair_with_migration_approval', true, () => next(state, { migrationApprovalUsedForRepair: true }));
+  }
+  if (mutation === UNSAFE_MODEL_MUTATIONS.ALLOW_SECOND_COMMITTED_OWNER && state.targetCommitted) {
+    add('second_owner_commit', true, () => next(state, { commitCount: 2, secondOwnerCommitted: true }));
+  }
+  if (mutation === UNSAFE_MODEL_MUTATIONS.ALLOW_CDC_ACK_BEYOND_APPLIED) {
+    add('cdc_ack_beyond', true, () => next(state, { ackBeyondApplied: true }));
+  }
+  if (mutation === UNSAFE_MODEL_MUTATIONS.ALLOW_PLAN_DRIFT) {
+    add('plan_drift', true, () => next(state, { planDriftObserved: true }));
+  }
+  if (mutation === UNSAFE_MODEL_MUTATIONS.ALLOW_BACKWARDS_AFTER_CUTOVER && state.phase === SVMP_STATES.CUTOVER_COMMITTED) {
+    add('backwards_after_cutover', true, () => next(state, { phase: SVMP_STATES.DISCOVERING, backwardsAfterCutover: true }));
+  }
+  if (mutation === UNSAFE_MODEL_MUTATIONS.ALLOW_COMPLETED_AFTER_FAILED && state.verificationFailed) {
+    add('completed_after_failed_verification', true, () => next(state, { phase: SVMP_STATES.VERIFIED, verified: true, completedAfterFailed: true }));
+    add('completed_after_failed_cutover', true, () => next(state, { phase: SVMP_STATES.CUTOVER_COMMITTED, cutoverCommitted: true, completedAfterFailed: true }));
+  }
 
   return actions;
 }
