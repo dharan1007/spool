@@ -167,12 +167,16 @@ export async function streamPostgresChanges({
   if (maxMessages != null && (!Number.isSafeInteger(maxMessages) || maxMessages < 1)) fail('INVALID_POSTGRES_CDC_CONFIG', 'maxMessages must be a positive safe integer');
   if (onChange != null && typeof onChange !== 'function') fail('INVALID_POSTGRES_CDC_CONFIG', 'onChange must be a function');
 
-  const parsed = parsePostgresEndpoint(databaseRef.endpoint);
-  const changes = [];
+const parsed = parsePostgresEndpoint(databaseRef.endpoint);
+  let lastAcknowledgedLsn = startLsn ?? null;
+  let messageCount = 0;
   let finished = false;
   let failure = null;
   let resolveDone;
   const done = new Promise(resolve => { resolveDone = resolve; });
+  // Bounded changes array for testing/debugging - bounded to prevent unbounded memory
+  const MAX_CHANGES = 10000;
+  const changes = [];
 
   return credentialBroker.withSecret(databaseRef.secretRef, async secret => {
     if (typeof secret !== 'string' || !secret) fail('SECRET_NOT_FOUND', 'PostgreSQL password is required');
@@ -202,11 +206,21 @@ export async function streamPostgresChanges({
       try {
         const change = normalizeMessage(typeof lsn === 'string' ? lsn : String(lsn ?? ''), message);
         if (change) {
-          changes.push(change);
           if (onChange) await onChange(change);
+          // Checkpoint monotonicity: commit LSN must not go backwards (per pgoutput commit-order guarantee)
+          if (change.tag === 'commit' && lastAcknowledgedLsn && comparePostgresLsn(change.lsn, lastAcknowledgedLsn) < 0) {
+            throw fail('CDC_LSN_MONOTONICITY_VIOLATION', `Commit LSN went backwards: ${lastAcknowledgedLsn} -> ${change.lsn}`);
+          }
+          if (change.tag === 'commit') {
+            lastAcknowledgedLsn = change.lsn;
+          }
+          messageCount += 1;
+          // Bounded changes array for testing - drop oldest if over limit
+          if (changes.length >= MAX_CHANGES) changes.shift();
+          changes.push(change);
         }
         await service.acknowledge(typeof lsn === 'string' ? lsn : String(lsn ?? ''));
-        const stopByCount = maxMessages != null && changes.length >= maxMessages;
+        const stopByCount = maxMessages != null && messageCount >= maxMessages;
         const stopByLsn = untilLsn != null && change && comparePostgresLsn(change.lsn, untilLsn) >= 0;
         if (stopByCount || stopByLsn) {
           try { await service.stop(); } catch { /* stopping wins over stop errors */ }
@@ -228,7 +242,13 @@ export async function streamPostgresChanges({
       try { await service.destroy(); } catch { /* shutdown must not mask results */ }
     }
     if (failure) throw failure;
-    return Object.freeze({ slotName: name, changes: Object.freeze(changes), lastLsn: changes.length ? changes[changes.length - 1].lsn : null });
+    return Object.freeze({ 
+      slotName: name, 
+      changes: Object.freeze(changes),
+      messageCount,
+      lastLsn: lastAcknowledgedLsn,
+      acknowledgedLsn: lastAcknowledgedLsn
+    });
   });
 }
 
