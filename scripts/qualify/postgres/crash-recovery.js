@@ -110,7 +110,7 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
     // kills it SIGKILL after ledger-observed progress, then proves durable checkpoint + ledger
     // allow a fresh process to reconcile and complete without duplicates (RPO bounded to batch).
     {
-      const killTable = `qualify_crash_kill_${runId.replaceAll('-', '_').toLowerCase().slice(0, 20)}`;
+      const killTable = `qualify_crash_kill_${runId.slice(-8).replaceAll('-', '_').toLowerCase()}_${Date.now().toString(36).slice(-4)}`;
       const killMigrationId = `qualify-crash-kill-${runId}`;
       const killRowCount = Math.min(20_000, Math.max(5000, rowCount));
       const killBatchSize = 1000;
