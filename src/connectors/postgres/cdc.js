@@ -66,7 +66,6 @@ async function withCdcClient({ databaseRef, credentialBroker }, callback) {
 export async function createPostgresReplicationSlot({ ref, credentialBroker, slotName, plugin = 'pgoutput' } = {}) {
   const databaseRef = requireDatabaseRef(ref);
   const name = requireSlotName(slotName);
-  if (plugin !== 'pgoutput') fail('INVALID_POSTGRES_CDC_CONFIG', 'Only the pgoutput logical decoding plugin is supported');
   return withCdcClient({ databaseRef, credentialBroker }, async client => {
     try {
       const result = await client.query('SELECT * FROM pg_catalog.pg_create_logical_replication_slot($1, $2)', [name, plugin]);

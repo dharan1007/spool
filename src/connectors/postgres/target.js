@@ -8,8 +8,12 @@ import { POSTGRES_METADATA_SCHEMA, postgresTargetContractId } from './preflight.
 const LEDGER_TABLE = 'batch_ledger';
 const LEASE_TABLE = 'execution_leases';
 const PAYLOAD_DOMAIN = 'spool-postgres-batch-payload-v1';
+const DELETE_MANIFEST_DOMAIN = 'spool-postgres-delete-manifest-v1';
+const TRUNCATE_PAYLOAD_DOMAIN = 'spool-postgres-truncate-v1';
+const TRUNCATE_EFFECT = 'postgres:target-truncate';
 const METADATA_BOOTSTRAP_LOCK = 'spool:postgres-metadata-bootstrap:v1';
 const HASH = /^sha256:[0-9a-f]{64}$/;
+const SAFE_COLUMN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function requiredString(name, value) {
   if (typeof value !== 'string' || !value) fail('INVALID_BATCH_EVIDENCE', `${name} must be a non-empty string`);
@@ -54,6 +58,70 @@ function validateRows(rows) {
 export function postgresPayloadEvidence(rows) {
   validateRows(rows);
   return Object.freeze({ rowCount: rows.length, payloadHash: sha256Canonical(PAYLOAD_DOMAIN, rows) });
+}
+
+export function postgresMutationKeyId({ primaryKey, row } = {}) {
+  if (!Array.isArray(primaryKey) || primaryKey.length === 0) fail('INVALID_MUTATION_KEY', 'Mutation primaryKey must be a non-empty array');
+  if (!row || typeof row !== 'object' || Array.isArray(row)) fail('INVALID_MUTATION_KEY', 'Mutation row must be an object');
+  const key = {};
+  for (const field of primaryKey) {
+    if (typeof field !== 'string' || !SAFE_COLUMN.test(field)) fail('INVALID_MUTATION_KEY', `Mutation primaryKey field ${field} is invalid`);
+    if (!Object.hasOwn(row, field) || row[field] === null || row[field] === undefined) {
+      fail('INVALID_MUTATION_KEY', `Mutation row is missing primary-key field ${field}`);
+    }
+    key[field] = row[field];
+  }
+  return Object.freeze({ key: Object.freeze(key), keyId: postgresContentKeyId({ primaryKey, key }) });
+}
+
+export function requireUniqueMutationKeys(primaryKey, rows) {
+  if (!Array.isArray(rows)) fail('INVALID_MUTATION_ROWS', 'Mutation rows must be an array');
+  const seen = new Set();
+  const keyed = rows.map(row => {
+    const identified = postgresMutationKeyId({ primaryKey, row });
+    if (seen.has(identified.keyId)) fail('DUPLICATE_BATCH_KEY', 'Mutation batch contains a duplicate primary key', { keyId: identified.keyId });
+    seen.add(identified.keyId);
+    return Object.freeze({ ...identified, row });
+  });
+  return Object.freeze(keyed);
+}
+
+export function postgresDeleteManifestEvidence(deletions) {
+  if (!Array.isArray(deletions)) fail('INVALID_DELETE_MANIFEST', 'Delete manifest must be an array');
+  const manifest = deletions.map(entry => {
+    if (!entry || typeof entry !== 'object') fail('INVALID_DELETE_MANIFEST', 'Delete manifest entries must be objects');
+    requiredHash('expectedRowHash', entry.expectedRowHash);
+    if (typeof entry.keyId !== 'string' || !HASH.test(entry.keyId)) fail('INVALID_DELETE_MANIFEST', 'Delete manifest keyId must be a canonical sha256 identity');
+    return { keyId: entry.keyId, expectedRowHash: entry.expectedRowHash };
+  }).sort((left, right) => (left.keyId < right.keyId ? -1 : left.keyId > right.keyId ? 1 : 0));
+  return Object.freeze({ rowCount: manifest.length, payloadHash: sha256Canonical(DELETE_MANIFEST_DOMAIN, manifest) });
+}
+
+export function postgresTruncateEvidence({ database, schema, table, targetContractId, approvalId } = {}) {
+  requiredString('database', database);
+  requiredString('schema', schema);
+  requiredString('table', table);
+  requiredHash('targetContractId', targetContractId);
+  if (typeof approvalId !== 'string' || !approvalId) fail('INVALID_TRUNCATE_EVIDENCE', 'Truncate approvalId is required');
+  return Object.freeze({
+    rowCount: 0,
+    payloadHash: sha256Canonical(TRUNCATE_PAYLOAD_DOMAIN, { database, schema, table, targetContractId, approvalId })
+  });
+}
+
+function assertTruncateApproval({ approval, migrationId, liveContractId }) {
+  if (!approval || typeof approval !== 'object') fail('APPROVAL_REQUIRED', 'Target truncate requires a bound truncate approval');
+  if (typeof approval.approvalId !== 'string' || !approval.approvalId) fail('INVALID_APPROVAL', 'Truncate approval envelope is invalid');
+  const record = approval.record;
+  if (!record || record.migrationId !== migrationId) fail('APPROVAL_BINDING_MISMATCH', 'Truncate approval is not bound to this migration');
+  if (!Array.isArray(record.effects) || !record.effects.includes(TRUNCATE_EFFECT)) {
+    fail('APPROVAL_BINDING_MISMATCH', `Truncate approval must include the ${TRUNCATE_EFFECT} effect`);
+  }
+  if (record.targetContractId !== liveContractId) fail('APPROVAL_BINDING_MISMATCH', 'Truncate approval is not bound to the live target contract');
+  if (!Number.isFinite(Date.parse(record.expiresAt ?? '')) || Date.parse(record.expiresAt) <= Date.now()) {
+    fail('APPROVAL_EXPIRED', 'Truncate approval has expired');
+  }
+  return approval.approvalId;
 }
 
 function evidenceFrom(input, payloadHash, rowCount) {
@@ -514,6 +582,249 @@ export class PostgresTarget {
       status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
       batchIdentity: evidence.batchIdentity, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash
     });
+  }
+
+  async commitUpsertBatch(input = {}) {
+    this.#assertOpen();
+    const rows = input.rows;
+    const columns = validateRows(rows);
+    if (rows.length === 0) fail('INVALID_BATCH_ROWS', 'Upsert batch must contain at least one row');
+    const primaryKey = input.primaryKey;
+    if (!Array.isArray(primaryKey) || primaryKey.length === 0) fail('INVALID_MUTATION_KEY', 'Upsert primaryKey must be a non-empty array');
+    for (const field of primaryKey) {
+      if (!columns.includes(field)) fail('INVALID_MUTATION_KEY', `Upsert primaryKey field ${field} is not part of the batch columns`);
+    }
+    const keyed = requireUniqueMutationKeys(primaryKey, rows);
+    const described = postgresPayloadEvidence(rows);
+    const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
+    if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
+
+    const updatable = columns.filter(column => !primaryKey.includes(column));
+    const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
+      await client.query('BEGIN');
+      try {
+        if (this.requireFencing) {
+          await checkRepairFence(client, this, input.fencingToken, 'upsert');
+        }
+
+        await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
+
+        const existing = await findLedgerEntry(client, this.targetRef, evidence.batchIdentity);
+        if (existing) {
+          if (!ledgerMatches(existing, evidence, this.targetRef)) {
+            await client.query('ROLLBACK');
+            return { kind: 'BATCH_IDENTITY_CONFLICT' };
+          }
+          await client.query('COMMIT');
+          return { kind: 'COMMITTED_EXACT', alreadyCommitted: true, inserted: existing.inserted ?? null, updated: null };
+        }
+
+        const quotedTable = `${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`;
+        const quotedColumns = columns.map(quoteIdentifier).join(', ');
+        const conflictTarget = `(${primaryKey.map(quoteIdentifier).join(', ')})`;
+        const action = updatable.length === 0
+          ? 'DO NOTHING'
+          : `DO UPDATE SET ${updatable.map(column => `${quoteIdentifier(column)} = EXCLUDED.${quoteIdentifier(column)}`).join(', ')}`;
+        const maxRowsPerStatement = Math.max(1, Math.min(1000, Math.floor(60_000 / columns.length)));
+        let inserted = 0;
+        let updated = 0;
+        for (let offset = 0; offset < keyed.length; offset += maxRowsPerStatement) {
+          const chunk = keyed.slice(offset, offset + maxRowsPerStatement);
+          const values = [];
+          const groups = chunk.map(entry => {
+            const placeholders = columns.map(column => {
+              values.push(entry.row[column]);
+              return `$${values.length}`;
+            });
+            return `(${placeholders.join(', ')})`;
+          });
+          const written = await client.query(
+            `INSERT INTO ${quotedTable} (${quotedColumns}) VALUES ${groups.join(', ')} ON CONFLICT ${conflictTarget} ${action} RETURNING (xmax = 0) AS inserted`,
+            values
+          );
+          for (const row of written.rows) {
+            if (row.inserted === true) inserted += 1;
+            else updated += 1;
+          }
+        }
+        if (inserted + updated !== keyed.length && updatable.length > 0) {
+          await client.query('ROLLBACK');
+          fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL upsert did not return exact per-row evidence', { inserted, updated, expected: keyed.length });
+        }
+
+        await insertLedgerEntry(client, this.targetRef, evidence);
+        await client.query('COMMIT');
+        return { kind: 'COMMITTED_EXACT', alreadyCommitted: false, inserted, updated };
+      } catch (error) {
+        try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
+        throw error;
+      }
+    });
+
+    if (result.kind === 'BATCH_IDENTITY_CONFLICT') fail('BATCH_IDENTITY_CONFLICT', 'Batch identity is already committed with different evidence', { batchIdentity: evidence.batchIdentity });
+    if (result.kind !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL target did not return exact upsert evidence');
+    return Object.freeze({
+      status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
+      batchIdentity: evidence.batchIdentity, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash,
+      inserted: result.inserted, updated: result.updated
+    });
+  }
+
+  async commitDeleteBatch(input = {}) {
+    this.#assertOpen();
+    const primaryKey = input.primaryKey;
+    if (!Array.isArray(primaryKey) || primaryKey.length === 0) fail('INVALID_MUTATION_KEY', 'Delete primaryKey must be a non-empty array');
+    const deletions = input.deletions;
+    if (!Array.isArray(deletions) || deletions.length === 0) fail('INVALID_DELETE_MANIFEST', 'Delete batch must contain at least one deletion');
+    const seen = new Set();
+    const prepared = deletions.map(entry => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) fail('INVALID_DELETE_MANIFEST', 'Delete entries must be objects');
+      const identified = postgresMutationKeyId({ primaryKey, row: entry.key });
+      if (seen.has(identified.keyId)) fail('DUPLICATE_BATCH_KEY', 'Delete batch contains a duplicate primary key', { keyId: identified.keyId });
+      seen.add(identified.keyId);
+      requiredHash('expectedRowHash', entry.expectedRowHash);
+      return Object.freeze({ key: identified.key, keyId: identified.keyId, expectedRowHash: entry.expectedRowHash });
+    });
+    const described = postgresDeleteManifestEvidence(prepared);
+    const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
+    if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
+
+    const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
+      await client.query('BEGIN');
+      try {
+        if (this.requireFencing) {
+          await checkRepairFence(client, this, input.fencingToken, 'delete');
+        }
+
+        await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
+
+        const existing = await findLedgerEntry(client, this.targetRef, evidence.batchIdentity);
+        if (existing) {
+          if (!ledgerMatches(existing, evidence, this.targetRef)) {
+            await client.query('ROLLBACK');
+            return { kind: 'BATCH_IDENTITY_CONFLICT' };
+          }
+          await client.query('COMMIT');
+          return { kind: 'COMMITTED_EXACT', alreadyCommitted: true };
+        }
+
+        const quotedTable = `${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`;
+        const missing = [];
+        const mismatched = [];
+        const doomed = [];
+        for (const entry of prepared) {
+          const whereValues = [];
+          const whereClauses = primaryKey.map(field => {
+            whereValues.push(entry.key[field]);
+            return `${quoteIdentifier(field)} = $${whereValues.length}`;
+          });
+          const found = await client.query(`SELECT * FROM ${quotedTable} WHERE ${whereClauses.join(' AND ')} FOR UPDATE`, whereValues);
+          if (found.rows.length === 0) {
+            missing.push(entry.keyId);
+            continue;
+          }
+          const actual = found.rows[0];
+          const observedColumns = Object.keys(actual).filter(name => name !== 'tableoid' && name !== 'ctid' && name !== 'xmin' && name !== 'xmax').sort();
+          const observedRowHash = postgresContentRowHash({ primaryKey, columns: observedColumns, key: entry.key, row: actual });
+          if (observedRowHash !== entry.expectedRowHash) {
+            mismatched.push(entry.keyId);
+            continue;
+          }
+          doomed.push(entry);
+        }
+        if (missing.length > 0 || mismatched.length > 0) {
+          await client.query('ROLLBACK');
+          fail('DELETE_PRECONDITION_FAILED', 'Delete batch preconditions failed; nothing was deleted', { missing, mismatched });
+        }
+        for (const entry of doomed) {
+          const whereValues = [];
+          const whereClauses = primaryKey.map(field => {
+            whereValues.push(entry.key[field]);
+            return `${quoteIdentifier(field)} = $${whereValues.length}`;
+          });
+          const removed = await client.query(`DELETE FROM ${quotedTable} WHERE ${whereClauses.join(' AND ')}`, whereValues);
+          if (removed.rowCount !== 1) {
+            await client.query('ROLLBACK');
+            fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL delete did not remove exactly one row per key', { keyId: entry.keyId });
+          }
+        }
+
+        await insertLedgerEntry(client, this.targetRef, evidence);
+        await client.query('COMMIT');
+        return { kind: 'COMMITTED_EXACT', alreadyCommitted: false };
+      } catch (error) {
+        try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
+        throw error;
+      }
+    });
+
+    if (result.kind === 'BATCH_IDENTITY_CONFLICT') fail('BATCH_IDENTITY_CONFLICT', 'Batch identity is already committed with different evidence', { batchIdentity: evidence.batchIdentity });
+    if (result.kind !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL target did not return exact delete evidence');
+    return Object.freeze({
+      status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
+      batchIdentity: evidence.batchIdentity, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash,
+      deleted: evidence.rowCount
+    });
+  }
+
+  async truncateTarget(input = {}) {
+    this.#assertOpen();
+    const migrationId = requiredString('migrationId', input.migrationId);
+    const planId = requiredHash('planId', input.planId);
+    const sourceSnapshotId = requiredHash('sourceSnapshotId', input.sourceSnapshotId);
+    const mappingRevision = input.mappingRevision;
+    if (!Number.isInteger(mappingRevision) || mappingRevision < 1) fail('INVALID_BATCH_EVIDENCE', 'mappingRevision must be >= 1');
+    if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
+
+    const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
+      await client.query('BEGIN');
+      try {
+        if (this.requireFencing) {
+          await checkRepairFence(client, this, input.fencingToken, 'truncate');
+        }
+
+        await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
+
+        const liveContractId = await postgresTargetContractId(client, this.targetRef);
+        const approvalId = assertTruncateApproval({ approval: input.approval, migrationId, liveContractId });
+        const described = postgresTruncateEvidence({
+          database: this.targetRef.database, schema: this.targetRef.schema, table: this.targetRef.table,
+          targetContractId: liveContractId, approvalId
+        });
+        const evidence = {
+          batchIdentity: requiredHash('batchIdentity', input.batchIdentity),
+          migrationId, planId, sourceSnapshotId, mappingRevision,
+          rowCount: described.rowCount, payloadHash: described.payloadHash
+        };
+
+        const existing = await findLedgerEntry(client, this.targetRef, evidence.batchIdentity);
+        if (existing) {
+          if (!ledgerMatches(existing, evidence, this.targetRef)) {
+            await client.query('ROLLBACK');
+            return { kind: 'BATCH_IDENTITY_CONFLICT' };
+          }
+          await client.query('COMMIT');
+          return { kind: 'TRUNCATED_EXACT', alreadyCommitted: true, approvalId };
+        }
+
+        await client.query(`TRUNCATE ${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`);
+        const verified = await client.query(`SELECT count(*)::int AS n FROM ${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`);
+        if (verified.rows[0]?.n !== 0) {
+          await client.query('ROLLBACK');
+          fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL truncate did not leave an empty table');
+        }
+        await insertLedgerEntry(client, this.targetRef, evidence);
+        await client.query('COMMIT');
+        return { kind: 'TRUNCATED_EXACT', alreadyCommitted: false, approvalId };
+      } catch (error) {
+        try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
+        throw error;
+      }
+    });
+
+    if (result.kind === 'BATCH_IDENTITY_CONFLICT') fail('BATCH_IDENTITY_CONFLICT', 'Batch identity is already committed with different evidence', { batchIdentity: input.batchIdentity });
+    if (result.kind !== 'TRUNCATED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL target did not return exact truncate evidence');
+    return Object.freeze({ status: 'TRUNCATED_EXACT', alreadyCommitted: result.alreadyCommitted, batchIdentity: input.batchIdentity, approvalId: result.approvalId });
   }
 
   async ledgerEntries({ migrationId = null } = {}) {

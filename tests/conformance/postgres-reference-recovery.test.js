@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Client } from 'pg';
 import { CredentialBroker } from '../../src/daemon/credential-broker.js';
@@ -133,7 +134,7 @@ test('dropped replication slot is detected and recovered by recreating it', { sk
 
 test('cancelled COPY fails closed with no partial rows and the retry commits exact evidence', { skip: !enabled, timeout: 180_000 }, async () => {
   const table = 'ref_recovery_copy';
-  const batchIdentity = `sha256:${'d'.repeat(64)}`;
+  const batchIdentity = 'sha256:530f63c10738737d59d4618cc5b84122ed347efe933cab3b2f655b47a65e51f8';
   await resetRecoveryTable(table, [batchIdentity]);
   const runtime = createPostgresTargetRuntime({ credentialBroker: broker, leaseTtlMs: 60_000 });
   const preflight = await inspectPostgresTarget({ targetRef: tableRef(table), targetSchema: targetSchema(), credentialBroker: broker });
@@ -205,7 +206,7 @@ test('cancelled COPY fails closed with no partial rows and the retry commits exa
 
 test('batch replay after interruption is idempotent and conflicting identity reuse is rejected', { skip: !enabled, timeout: 120_000 }, async () => {
   const table = 'ref_recovery_replay';
-  const batchIdentity = `sha256:${'e'.repeat(64)}`;
+  const batchIdentity = 'sha256:e1c29cc502b9528958a3e85af90f8b1900ff42cf028f103af1606d0d550088be';
   await resetRecoveryTable(table, [batchIdentity]);
 
   const target = new PostgresTarget({ targetRef: tableRef(table), credentialBroker: broker });
@@ -235,7 +236,7 @@ test('batch replay after interruption is idempotent and conflicting identity reu
 test('dead worker lease is stolen after expiry and the stale fence is rejected at the commit boundary', { skip: !enabled, timeout: 120_000 }, async () => {
   const table = 'ref_recovery_fence';
   const resource = 'ref-recovery-fence-lease';
-  const fenceIdentity = `sha256:${'f'.repeat(64)}`;
+  const fenceIdentity = 'sha256:52d74565a402524e3bbdf2b3caa4be9bc65b7e382ddcb0bb52894033cfd82635';
   await resetRecoveryTable(table, [fenceIdentity]);
   const setup = await adminClient();
   try {
@@ -309,7 +310,7 @@ test('destination reconnect after backend loss reports a real RTO and resumes wr
 
 test('scale verify detects tamper and loss, repair restores exact content', { skip: !enabled, timeout: 180_000 }, async () => {
   const table = 'ref_recovery_verify';
-  const batchIdentity = `sha256:${'9'.repeat(64)}`;
+  const batchIdentity = 'sha256:3895352d6b00ba4d57032ba1346e0b97253f6df5d82019dbf8090a0f7ed034fe';
   await resetRecoveryTable(table, [batchIdentity]);
 
   const runtime = createPostgresTargetRuntime({ credentialBroker: broker, leaseTtlMs: 60_000 });
