@@ -179,7 +179,8 @@ export class SpoolCommandService {
     const sqliteTargetRuntime = await createSqliteTargetRuntime({ targetRoot: options.targetRoot });
     const postgresTargetRuntime = createPostgresTargetRuntime({
       credentialBroker,
-      leaseTtlMs: options.postgresLeaseTtlMs
+      leaseTtlMs: options.postgresLeaseTtlMs,
+      faultInjector: options.faultInjector ?? null
     });
     const mysqlTargetRuntime = createMysqlTargetRuntime({
       credentialBroker,
@@ -205,11 +206,12 @@ export class SpoolCommandService {
       release: releaseIdentity(options.release ?? {
         version: process.env.SPOOL_RELEASE_VERSION ?? '1.0.0',
         commitSha: process.env.SPOOL_COMMIT_SHA
-      })
+      }),
+      faultInjector: options.faultInjector ?? null
     });
   }
 
-  constructor({ sourcePolicy, sourceCoordinator, targetConnectors, statePath, snapshotRoot, approvalSigningKey, maxSourceBytes, release }) {
+  constructor({ sourcePolicy, sourceCoordinator, targetConnectors, statePath, snapshotRoot, approvalSigningKey, maxSourceBytes, release, faultInjector = null }) {
     this.sourcePolicy = sourcePolicy;
     this.sourceCoordinator = sourceCoordinator;
     this.targetConnectors = targetConnectors;
@@ -217,6 +219,7 @@ export class SpoolCommandService {
     this.approvalSigningKey = approvalSigningKey;
     this.maxSourceBytes = maxSourceBytes;
     this.release = release;
+    this.faultInjector = faultInjector;
     this.runs = new RunStore({ path: statePath });
     this.closed = false;
   }
@@ -510,7 +513,7 @@ export class SpoolCommandService {
       ownsRunState = true;
       const target = await targetExecution.openTarget();
       const checkpointStore = this.runs.checkpointStore(request.migrationId);
-      const runner = new MigrationRunner({ target, checkpointStore });
+      const runner = new MigrationRunner({ target, checkpointStore, faultInjector: this.faultInjector });
       const accumulator = new MigrationEngine().createAccumulator(plan.mapping, plan.mappingRevision, plan.targetSchema);
       const batchSize = plan.writeStrategy.batchSize;
       const allRanges = [];

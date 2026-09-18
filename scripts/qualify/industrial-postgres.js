@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { resolveProfile, profileFromEnv, formatProfile } from './profiles.js';
+import { resolveProfile, formatProfile } from './profiles.js';
 import { captureEnvironment } from './environment.js';
 import { EvidenceWriter } from './evidence-writer.js';
 import { ResourceSampler } from './sampler.js';
@@ -33,7 +33,7 @@ function printHelp() {
 Usage: node scripts/qualify/industrial-postgres.js [options]
 
 Options:
-  --profile <name>        CI|SMALL|MEDIUM|LARGE|INDUSTRIAL|CUSTOM (default: CI)
+  --profile <name>        CI|SMALL|MEDIUM|LARGE|INDUSTRIAL (default: CI)
   --output <dir>          Output directory (default: qualification/<runId>)
   --rows <n>              Override row count
   --payload-bytes <n>     Override payload bytes
@@ -107,7 +107,6 @@ async function main() {
 
   const failures = [];
   const metrics = {};
-  const rawEvents = [];
   let overallResult = 'PASS';
   let configDigest = null;
 

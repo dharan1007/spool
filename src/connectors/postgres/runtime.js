@@ -84,7 +84,7 @@ function approvalEffects(plan) {
 }
 
 class PostgresTargetExecution {
-  constructor({ migrationId, targetRef, credentialBroker, leaseTtlMs }) {
+  constructor({ migrationId, targetRef, credentialBroker, leaseTtlMs, faultInjector = null }) {
     this.migrationId = requireMigrationId(migrationId);
     this.targetRef = Object.freeze(structuredClone(requirePostgresTargetRef(targetRef)));
     this.credentialBroker = credentialBroker;
@@ -94,6 +94,7 @@ class PostgresTargetExecution {
     this.lease = null;
     this.target = null;
     this.closed = false;
+    this.faultInjector = faultInjector;
   }
 
   #assertOpen() {
@@ -110,7 +111,7 @@ class PostgresTargetExecution {
     this.#assertOpen();
     if (!this.lease) fail('EXECUTION_LEASE_REQUIRED', 'PostgreSQL target execution requires a durable lease before opening the target');
     if (!this.target) {
-      this.target = new PostgresTarget({ targetRef: this.targetRef, credentialBroker: this.credentialBroker, requireFencing: true, fenceResource: this.leaseResource, fenceOwner: this.leaseOwner });
+      this.target = new PostgresTarget({ targetRef: this.targetRef, credentialBroker: this.credentialBroker, requireFencing: true, fenceResource: this.leaseResource, fenceOwner: this.leaseOwner, faultInjector: this.faultInjector });
     }
     return this.target;
   }
@@ -171,11 +172,12 @@ class PostgresTargetExecution {
 }
 
 class PostgresTargetRuntime {
-  constructor({ credentialBroker, leaseTtlMs }) {
+  constructor({ credentialBroker, leaseTtlMs, faultInjector = null }) {
     if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_POSTGRES_RUNTIME_CONFIG', 'credentialBroker.withSecret() is required');
     this.descriptor = POSTGRES_TARGET_DESCRIPTOR;
     this.credentialBroker = credentialBroker;
     this.leaseTtlMs = requireLeaseTtlMs(leaseTtlMs);
+    this.faultInjector = faultInjector;
   }
 
   async normalizePlanInput(input = {}) {
@@ -209,10 +211,10 @@ class PostgresTargetRuntime {
   }
 
   createExecution({ migrationId, targetRef } = {}) {
-    return new PostgresTargetExecution({ migrationId, targetRef, credentialBroker: this.credentialBroker, leaseTtlMs: this.leaseTtlMs });
+    return new PostgresTargetExecution({ migrationId, targetRef, credentialBroker: this.credentialBroker, leaseTtlMs: this.leaseTtlMs, faultInjector: this.faultInjector });
   }
 }
 
-export function createPostgresTargetRuntime({ credentialBroker, leaseTtlMs = DEFAULT_LEASE_TTL_MS } = {}) {
-  return new PostgresTargetRuntime({ credentialBroker, leaseTtlMs: requireLeaseTtlMs(leaseTtlMs) });
+export function createPostgresTargetRuntime({ credentialBroker, leaseTtlMs = DEFAULT_LEASE_TTL_MS, faultInjector = null } = {}) {
+  return new PostgresTargetRuntime({ credentialBroker, leaseTtlMs: requireLeaseTtlMs(leaseTtlMs), faultInjector });
 }

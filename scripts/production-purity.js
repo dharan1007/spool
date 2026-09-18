@@ -30,6 +30,8 @@ const ALLOWLIST = Object.freeze([
   { pattern: 'sleep-sync', file: 'scripts/qualify/postgres/cdc-soak.js', justification: 'Predicate-driven writer pacing (10ms yield between transactions); workload pacing, never evidence synchronization.' },
   { pattern: 'sleep-sync', file: 'scripts/qualify/postgres/repair-load.js', justification: 'Predicate-driven tamper poll (5ms) waiting for target ledger rows before fault injection; readiness is ledger-observed, not time-assumed.' },
   { pattern: 'sleep-sync', file: 'src/connectors/postgres/reference.js', justification: 'Bounded WAL LSN-advance wait with an explicit deadline for CDC recovery tests; wait loop only, never evidence.' },
+  { pattern: 'sleep-sync', file: 'scripts/qualify/postgres/crash-child.js', justification: 'Paced COPY batch yield (30ms) to create a kill window; workload pacing, never evidence synchronization.' },
+  { pattern: 'sleep-sync', file: 'scripts/qualify/postgres/crash-recovery.js', justification: 'Predicate-driven kill poll (5ms) waiting for ledger-observed batch commit before SIGKILL; readiness is ledger-observed, not time-assumed.' },
   { pattern: 'not-implemented', file: 'scripts/production-purity.js', justification: 'Pattern vocabulary defining this gate itself, not an unimplemented path.' },
   { pattern: 'dummy-data', file: 'scripts/production-purity.js', justification: 'Pattern vocabulary defining this gate itself, not dummy data.' },
   { pattern: 'faker', file: 'scripts/production-purity.js', justification: 'Pattern vocabulary defining this gate itself, not fabricated data.' },

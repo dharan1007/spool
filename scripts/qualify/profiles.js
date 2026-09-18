@@ -91,29 +91,6 @@ export function resolveProfile(name, overrides = {}) {
   return Object.freeze(resolved);
 }
 
-export function profileFromEnv() {
-  const name = process.env.SPOOL_QUALIFY_PROFILE ?? 'CI';
-  const overrides = {};
-  for (const key of OVERRIDE_KEYS) {
-    const envKey = `SPOOL_QUALIFY_${key.toUpperCase()}`;
-    // also support SQUALIFY_ etc? just use upper snake
-    // Map camelCase to env: rows -> ROWS, payloadBytes -> PAYLOAD_BYTES
-    const mapped = {
-      rows: 'ROWS',
-      payloadBytes: 'PAYLOAD_BYTES',
-      batchSize: 'BATCH_SIZE',
-      writers: 'WRITERS',
-      workers: 'WORKERS',
-      cdcDurationSeconds: 'CDC_DURATION_SECONDS',
-      largeTransactionRows: 'LARGE_TRANSACTION_ROWS',
-      maxRssBytes: 'MAX_RSS_BYTES'
-    }[key];
-    const envVal = process.env[`SPOOL_QUALIFY_${mapped}`] ?? process.env[envKey];
-    if (envVal != null && envVal !== '') overrides[key] = Number(envVal);
-  }
-  return resolveProfile(name, overrides);
-}
-
 export function formatProfile(profile) {
   return `${profile.name} rows=${profile.rows} payload=${profile.payloadBytes}B batch=${profile.batchSize} writers=${profile.writers} workers=${profile.workers} cdc=${profile.cdcDurationSeconds}s`;
 }

@@ -449,14 +449,24 @@ async function insertRows(client, targetRef, columns, rows) {
 }
 
 export class PostgresTarget {
-  constructor({ targetRef, credentialBroker, requireFencing = false, fenceResource = null, fenceOwner = null } = {}) {
+  constructor({ targetRef, credentialBroker, requireFencing = false, fenceResource = null, fenceOwner = null, faultInjector = null } = {}) {
     if (!targetRef || typeof targetRef !== 'object') fail('INVALID_POSTGRES_CONFIG', 'targetRef is required');
     this.targetRef = Object.freeze(structuredClone(targetRef));
     this.credentialBroker = credentialBroker;
     this.requireFencing = requireFencing;
     this.fenceResource = fenceResource;
     this.fenceOwner = fenceOwner;
+    this.faultInjector = faultInjector;
     this.closed = false;
+  }
+
+  async _hitFault(point, context) {
+    if (!this.faultInjector || typeof this.faultInjector.hit !== 'function') return false;
+    try {
+      return await this.faultInjector.hit(point, context);
+    } catch {
+      return false;
+    }
   }
 
   #assertOpen() {
@@ -503,11 +513,18 @@ export class PostgresTarget {
     const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
     if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
 
+    if (await this._hitFault('TARGET_BEFORE_TRANSACTION', { batchIdentity: evidence.batchIdentity })) {
+      fail('FAULT_TARGET_BEFORE_TRANSACTION', 'Injected fault before transaction', { batchIdentity: evidence.batchIdentity });
+    }
     const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
       await client.query('BEGIN');
       try {
         if (this.requireFencing) {
           await checkRepairFence(client, this, input.fencingToken, 'mutation');
+        }
+        if (await this._hitFault('TARGET_AFTER_FENCE_CHECK', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_FENCE_CHECK', 'Injected fault after fence check', { batchIdentity: evidence.batchIdentity });
         }
 
         await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
@@ -523,8 +540,19 @@ export class PostgresTarget {
         }
 
         await insertRows(client, this.targetRef, columns, rows);
+        if (await this._hitFault('TARGET_AFTER_ROWS_BEFORE_LEDGER', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_ROWS_BEFORE_LEDGER', 'Injected fault after rows before ledger', { batchIdentity: evidence.batchIdentity });
+        }
         await insertLedgerEntry(client, this.targetRef, evidence);
+        if (await this._hitFault('TARGET_AFTER_LEDGER_BEFORE_COMMIT', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_LEDGER_BEFORE_COMMIT', 'Injected fault after ledger before commit', { batchIdentity: evidence.batchIdentity });
+        }
         await client.query('COMMIT');
+        if (await this._hitFault('TARGET_AFTER_COMMIT_BEFORE_CHECKPOINT', { batchIdentity: evidence.batchIdentity })) {
+          fail('FAULT_TARGET_AFTER_COMMIT_BEFORE_CHECKPOINT', 'Injected fault after commit before checkpoint', { batchIdentity: evidence.batchIdentity });
+        }
         return { kind: 'COMMITTED_EXACT', alreadyCommitted: false };
       } catch (error) {
         try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
@@ -547,11 +575,18 @@ export class PostgresTarget {
     const described = postgresPayloadEvidence(rows);
     const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
 
+    if (await this._hitFault('TARGET_BEFORE_TRANSACTION', { batchIdentity: evidence.batchIdentity })) {
+      fail('FAULT_TARGET_BEFORE_TRANSACTION', 'Injected fault before transaction', { batchIdentity: evidence.batchIdentity });
+    }
     const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
       await client.query('BEGIN');
       try {
         if (this.requireFencing) {
           await checkRepairFence(client, this, input.fencingToken, 'bulk copy');
+        }
+        if (await this._hitFault('TARGET_AFTER_FENCE_CHECK', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_FENCE_CHECK', 'Injected fault after fence check', { batchIdentity: evidence.batchIdentity });
         }
 
         await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
@@ -567,8 +602,19 @@ export class PostgresTarget {
         }
 
         await copyRows(client, this.targetRef, columns, rows);
+        if (await this._hitFault('TARGET_AFTER_ROWS_BEFORE_LEDGER', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_ROWS_BEFORE_LEDGER', 'Injected fault after rows before ledger', { batchIdentity: evidence.batchIdentity });
+        }
         await insertLedgerEntry(client, this.targetRef, evidence);
+        if (await this._hitFault('TARGET_AFTER_LEDGER_BEFORE_COMMIT', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_LEDGER_BEFORE_COMMIT', 'Injected fault after ledger before commit', { batchIdentity: evidence.batchIdentity });
+        }
         await client.query('COMMIT');
+        if (await this._hitFault('TARGET_AFTER_COMMIT_BEFORE_CHECKPOINT', { batchIdentity: evidence.batchIdentity })) {
+          fail('FAULT_TARGET_AFTER_COMMIT_BEFORE_CHECKPOINT', 'Injected fault after commit before checkpoint', { batchIdentity: evidence.batchIdentity });
+        }
         return { kind: 'COMMITTED_EXACT', alreadyCommitted: false };
       } catch (error) {
         try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
