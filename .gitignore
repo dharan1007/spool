@@ -6,3 +6,4 @@ coverage/
 dist/
 benchmarks/results/
 release/reproducibility-evidence.json
+qualification/spool-qualify-*/
