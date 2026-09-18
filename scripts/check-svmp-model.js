@@ -23,7 +23,13 @@ const requiredInvariants = [
   'drift_cannot_reach_verified',
   'unknown_commit_requires_reconciliation',
   'conflicting_reconciliation_cannot_advance',
-  'cutover_requires_verified_evidence'
+  'cutover_requires_verified_evidence',
+  'no_repair_with_migration_approval',
+  'no_two_committed_owners',
+  'cdc_ack_not_beyond_applied',
+  'no_plan_drift',
+  'no_backwards_after_cutover',
+  'no_completed_after_failed'
 ];
 const proved = new Set(safe.invariantsProved);
 for (const invariant of requiredInvariants) {
@@ -65,6 +71,31 @@ if (!cutoverMutation.violations.some(item => Array.isArray(item.trace) && item.t
   fail('cutover mutation failure did not produce a counterexample trace', cutoverMutation);
 }
 
+const repairMutation = checkSvmpExecutionModel({ mutation: UNSAFE_MODEL_MUTATIONS.ALLOW_REPAIR_WITH_MIGRATION_APPROVAL });
+if (repairMutation.ok || !repairMutation.violations.some(item => item.invariant === 'no_repair_with_migration_approval')) {
+  fail('mutation test failed to detect repair with migration approval', repairMutation);
+}
+const secondOwnerMutation = checkSvmpExecutionModel({ mutation: UNSAFE_MODEL_MUTATIONS.ALLOW_SECOND_COMMITTED_OWNER });
+if (secondOwnerMutation.ok || !secondOwnerMutation.violations.some(item => item.invariant === 'no_two_committed_owners')) {
+  fail('mutation test failed to detect second committed owner', secondOwnerMutation);
+}
+const cdcAckMutation = checkSvmpExecutionModel({ mutation: UNSAFE_MODEL_MUTATIONS.ALLOW_CDC_ACK_BEYOND_APPLIED });
+if (cdcAckMutation.ok || !cdcAckMutation.violations.some(item => item.invariant === 'cdc_ack_not_beyond_applied')) {
+  fail('mutation test failed to detect CDC ack beyond applied', cdcAckMutation);
+}
+const planDriftMutation = checkSvmpExecutionModel({ mutation: UNSAFE_MODEL_MUTATIONS.ALLOW_PLAN_DRIFT });
+if (planDriftMutation.ok || !planDriftMutation.violations.some(item => item.invariant === 'no_plan_drift')) {
+  fail('mutation test failed to detect plan drift', planDriftMutation);
+}
+const backwardsMutation = checkSvmpExecutionModel({ mutation: UNSAFE_MODEL_MUTATIONS.ALLOW_BACKWARDS_AFTER_CUTOVER });
+if (backwardsMutation.ok || !backwardsMutation.violations.some(item => item.invariant === 'no_backwards_after_cutover')) {
+  fail('mutation test failed to detect backwards after cutover', backwardsMutation);
+}
+const completedAfterFailedMutation = checkSvmpExecutionModel({ mutation: UNSAFE_MODEL_MUTATIONS.ALLOW_COMPLETED_AFTER_FAILED });
+if (completedAfterFailedMutation.ok || !completedAfterFailedMutation.violations.some(item => item.invariant === 'no_completed_after_failed')) {
+  fail('mutation test failed to detect completed after failed verification', completedAfterFailedMutation);
+}
+
 console.log(JSON.stringify({
   ok: true,
   protocol: 'SVMP',
@@ -75,6 +106,12 @@ console.log(JSON.stringify({
   mutationTests: {
     checkpointWithoutEvidence: 'counterexample detected',
     staleFenceWrite: 'counterexample detected',
-    cutoverWithoutVerification: 'counterexample detected'
+    cutoverWithoutVerification: 'counterexample detected',
+    repairWithMigrationApproval: 'counterexample detected',
+    secondOwner: 'counterexample detected',
+    cdcAckBeyond: 'counterexample detected',
+    planDrift: 'counterexample detected',
+    backwardsAfterCutover: 'counterexample detected',
+    completedAfterFailed: 'counterexample detected'
   }
 }, null, 2));
