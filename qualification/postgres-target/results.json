@@ -1,0 +1,31 @@
+{
+  "commit": "5b60af26b64390e454c116338694f6ca5220cc21",
+  "startedAt": "2026-09-17T20:49:54.260Z",
+  "finishedAt": "2026-09-17T20:50:45.434Z",
+  "benchmarks": [
+    {
+      "tier": "100K",
+      "rows": 100000,
+      "elapsedMs": 906,
+      "rowsPerSec": 110375,
+      "miB": 9.54
+    },
+    {
+      "tier": "1M",
+      "rows": 1000000,
+      "elapsedMs": 7626,
+      "rowsPerSec": 131130
+    },
+    {
+      "tier": "5M",
+      "rows": 5000000,
+      "elapsedMs": 42267,
+      "rowsPerSec": 118296
+    },
+    {
+      "tier": "10M",
+      "skipped": true,
+      "reason": "excluded via SPOOL_BENCHMARK_SKIP_10M=1; the 10M write exceeds local host disk headroom (see qualification/postgres-target/failure-10m.json)"
+    }
+  ]
+}

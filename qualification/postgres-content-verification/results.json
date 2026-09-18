@@ -1,0 +1,45 @@
+{
+  "commit": "5b60af26b64390e454c116338694f6ca5220cc21",
+  "rows": 1000000,
+  "batchSize": 25000,
+  "startedAt": "2026-09-18T00:00:31.372Z",
+  "finishedAt": "2026-09-18T00:06:42.772Z",
+  "commitMs": 40728,
+  "commitRowsPerSec": 24553,
+  "verifyMs": 329853,
+  "verifyRowsPerSec": 3032,
+  "verified": {
+    "status": "VERIFIED",
+    "expectedRowCount": 1000000,
+    "actualRowCount": 1000000,
+    "diffTotal": 0
+  },
+  "tamper": {
+    "status": "DIFF",
+    "counts": {
+      "missing": 0,
+      "mismatch": 1,
+      "unexpected": 0
+    }
+  },
+  "missing": {
+    "status": "DIFF",
+    "counts": {
+      "missing": 1,
+      "mismatch": 1,
+      "unexpected": 0
+    }
+  },
+  "repair": {
+    "effects": [
+      "INSERT",
+      "UPDATE"
+    ]
+  },
+  "assertions": {
+    "verifiedExact": true,
+    "tamperDetected": true,
+    "missingDetected": true,
+    "repairPlanHashBound": true
+  }
+}

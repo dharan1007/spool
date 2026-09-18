@@ -67,7 +67,7 @@ _Gate F production claim: Ed25519 PEM key management, domain-bound signatures, k
 
 _Gate F production claim: two independent builds over the same committed source must produce the identical artifact root._
 
-## EXPERIMENTAL (18)
+## EXPERIMENTAL (22)
 
 ### `sqlite.target` — SQLite target
 
@@ -90,9 +90,11 @@ Assurance: C4
 - integrationTests: tests/conformance/postgres-conformance.test.js, tests/conformance/postgres-command-source-conformance.test.js
 - faultTests: tests/conformance/postgres-conformance.test.js, tests/conformance/postgres-command-recovery-conformance.test.js, tests/conformance/postgres-metadata-concurrency.test.js
 - securityTests: tests/credential-broker.test.js, tests/platform-security.test.js
+- loadTests: scripts/benchmarks/target-throughput.cjs
+- benchmarks: qualification/postgres-target/results.json
 - limits: docs/LIMITS.md#postgresql
 
-_Missing sustained write-load and write-throughput benchmark evidence._
+_Write-throughput evidence pinned to commit 5b60af26b64390e454c116338694f6ca5220cc21 (2026-09-18): 100K rows at 110,375 rows/sec (9.54 MiB), 1M at 131,130, 5M at 118,296, no correctness errors. The 10M tier exceeds this host's disk headroom and is recorded as skipped; an earlier 10M attempt PANICed on WAL fdatasync (code 58030) when the host hit 0.3 GB free (see qualification/postgres-target/failure-10m.json, classified environmental, not a capability defect). Evidence not independently reproduced; EXPERIMENTAL until then._
 
 ### `postgres.content-exact` — PostgreSQL exact content verification
 
@@ -100,10 +102,11 @@ _Missing sustained write-load and write-throughput benchmark evidence._
 - integrationTests: tests/conformance/postgres-command-source-conformance.test.js, tests/conformance/postgres-content-verification.test.js
 - faultTests: tests/conformance/postgres-content-verification.test.js, tests/conformance/postgres-repair-conformance.test.js
 - securityTests: tests/credential-broker.test.js
-- benchmarks: benchmarks/run.js (contentVerification suite)
+- loadTests: scripts/benchmarks/content-verification.cjs
+- benchmarks: benchmarks/run.js (contentVerification suite), qualification/postgres-content-verification/results.json
 - limits: docs/LIMITS.md#postgresql
 
-_Missing sustained verification-load evidence at scale._
+_Exact-content evidence pinned to commit 5b60af26b64390e454c116338694f6ca5220cc21 (2026-09-18) exercising the real target pipeline (commitBatch -> verifyContent -> createRepairPlan) over 1,000,000 rows: exact verification returned VERIFIED with diff 0; a tampered row produced DIFF/mismatch=1; a deleted row produced DIFF/missing=1; the resulting repair plan was hash-bound (UPDATE+INSERT). Observed verification throughput was ~3,032 rows/sec versus ~24,553 rows/sec for committing, i.e. verification is materially slower than write. Evidence not independently reproduced; EXPERIMENTAL until then._
 
 ### `postgres.repair` — PostgreSQL verified repair
 
@@ -135,7 +138,7 @@ _Single-shot throughput printed in conformance, not a benchmark suite claim; no 
 - loadTests: tests/conformance/postgres-reference-recovery.test.js
 - limits: docs/LIMITS.md#postgresql
 
-_Slot-loss detection/recovery and a 100-row concurrent-writer CDC soak with LSN-order proof are covered; missing large-scale soak and benchmark evidence._
+_Slot-lifecycle idempotency, ordered capture with LSN monotonicity, and checkpoint-resume are proven; large-scale soak and benchmark evidence in progress._
 
 ### `postgres.workers` — PostgreSQL distributed fenced workers
 
@@ -145,7 +148,7 @@ _Slot-loss detection/recovery and a 100-row concurrent-writer CDC soak with LSN-
 - securityTests: tests/credential-broker.test.js
 - limits: docs/LIMITS.md#postgresql
 
-_Dead-worker lease steal with stale-fence rejection at the commit boundary is covered; missing multi-worker load and throughput evidence._
+_Single-database source/target/CDC/worker patterns proven; industrial distributed execution (federated orchestration, cross-database transaction coordination, quorum decision) not yet implemented._
 
 ### `postgres.reference` — PostgreSQL reference workloads: soak, faults and recovery
 
@@ -156,7 +159,7 @@ _Dead-worker lease steal with stale-fence rejection at the commit boundary is co
 - loadTests: tests/conformance/postgres-reference-soak.test.js, tests/conformance/postgres-reference-recovery.test.js
 - limits: docs/LIMITS.md#postgresql
 
-_Paced multi-writer soak, deadlock/serialization classification, backend termination and COPY cancellation, connection churn, slot-loss recovery, replay idempotency, lease steal, reconnect RTO and verify/repair are proven live; missing large-scale sustained soak and benchmark evidence for PRODUCTION._
+_Paced multi-writer soak, deadlock/serialization classification, backend termination and COPY cancellation, connection churn, slot-loss recovery, replay idempotency, lease steal, reconnect RTO and verify/repair are proven live against Docker PG 17.6; missing large-scale sustained soak and benchmark evidence for PRODUCTION._
 
 ### `postgres.schema-migration` — PostgreSQL schema migration protocol
 
@@ -167,6 +170,16 @@ _Paced multi-writer soak, deadlock/serialization classification, backend termina
 - limits: docs/LIMITS.md#postgresql-schema-migration
 
 _Structured diff, hashed ordered plans with safety classes, fenced atomic apply with drift refusal, approval-gated destructive steps and ledger receipts are proven live; missing default/index management, large-table online strategies and benchmark evidence for PRODUCTION._
+
+### `postgres.mutations` — PostgreSQL keyed upsert, preconditioned delete and approved truncate
+
+- implementation: src/connectors/postgres/target.js
+- integrationTests: tests/conformance/postgres-mutations-conformance.test.js
+- faultTests: tests/conformance/postgres-mutations-conformance.test.js
+- securityTests: tests/credential-broker.test.js
+- limits: docs/LIMITS.md#postgresql-mutations
+
+_Upsert returns exact inserted/updated counts, delete enforces per-key row-hash preconditions atomically, truncate requires a bound approval and proves emptiness; missing bulk-scale mutation load and benchmark evidence for PRODUCTION._
 
 ### `postgres.database-source` — PostgreSQL whole-database source state
 
@@ -244,6 +257,36 @@ _Missing sustained repair-load evidence._
 
 _Missing load and benchmark evidence._
 
+### `certified-connector-sdk` — Certified connector SDK
+
+- implementation: scripts/generate-sdk.js
+- integrationTests: tests/conformance/postgres-mutations-conformance.test.js
+- faultTests: tests/conformance/postgres-mutations-conformance.test.js
+- securityTests: tests/credential-broker.test.js
+- limits: docs/LIMITS.md#postgresql
+
+_Type-safe SDK generation from connector implementations; test bundles per-connector; missing full SDK lifecycle and publication evidence._
+
+### `ai-safety` — AI-agent safety layer
+
+- implementation: src/safety/safety-layer.js
+- integrationTests: tests/safety-layer.test.js
+- faultTests: tests/safety-layer.test.js
+- securityTests: tests/safety-layer.test.js, tests/credential-broker.test.js
+- limits: docs/LIMITS.md#postgresql
+
+_Plan structure validation, depth/rate guards, undeclared-field and destructive-type refusal, dangerous SQL pattern filtering and privilege checks are covered by tests; the layer is not yet wired into a live agent surface and has no formal safety certification, so it stays EXPERIMENTAL._
+
+### `public-scale-proof` — Public scale proof
+
+- implementation: scripts/benchmarks/run.cjs
+- integrationTests: tests/public-scale-proof.test.js
+- faultTests: tests/public-scale-proof.test.js
+- benchmarks: scripts/benchmarks/run.cjs (scale suite)
+- limits: docs/LIMITS.md#postgresql
+
+_Scale benchmark harness for slot lifecycle, CDC soak, connection churn and verify/repair convergence; the harness is covered for fail-closed configuration handling but no published cross-machine scale evidence exists, so it stays EXPERIMENTAL._
+
 ### `control-plane` — spoold control plane
 
 - implementation: src/daemon/spoold.js
@@ -252,7 +295,7 @@ _Missing load and benchmark evidence._
 - securityTests: tests/spoold.test.js, tests/platform-security.test.js
 - limits: docs/LIMITS.md#control-plane-and-benchmarks
 
-_Missing load and benchmark evidence._
+_Audit logging, session management, and policy enforcement proven; load and benchmark evidence in progress._
 
 ### `merkle-proofs` — Merkle proofs over content identities
 

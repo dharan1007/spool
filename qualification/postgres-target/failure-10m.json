@@ -1,0 +1,41 @@
+{
+  "artifact": "postgres-target write-throughput qualification",
+  "commit": "5b60af2",
+  "recordedAt": "2026-09-18",
+  "host": {
+    "platform": "win32",
+    "dockerEngine": "Docker Desktop",
+    "postgres": "17.6",
+    "endpoint": "127.0.0.1:54322",
+    "freeDiskAtTimeOfFailureGB": 0.3
+  },
+  "tiers": [
+    { "tier": "100K", "rows": 100000, "status": "passed", "rowsPerSec": 81367, "miB": 9.54 },
+    { "tier": "1M", "rows": 1000000, "status": "passed", "rowsPerSec": 92490 },
+    { "tier": "5M", "rows": 5000000, "status": "passed", "rowsPerSec": 96993 },
+    { "tier": "10M", "rows": 10000000, "status": "failed_environment" }
+  ],
+  "failure": {
+    "tier": "10M",
+    "severity": "PANIC",
+    "code": "58030",
+    "error": "could not fdatasync file \"0000000100000000000000C3\": Input/output error",
+    "rootCause": "Host C: volume reached 0.3 GB free during the 10M-row write; PostgreSQL issued a PANIC on WAL fsync failure and the Docker engine subsequently became unresponsive.",
+    "classification": "environmental",
+    "notACapabilityDefect": true,
+    "remediation": "Re-run the 10M tier on a host with sufficient free disk (or an external/CI PostgreSQL instance), then pin the regenerated evidence to a real commit SHA."
+  },
+  "pinnedRerun": {
+    "commit": "5b60af26b64390e454c116338694f6ca5220cc21",
+    "recordedAt": "2026-09-18",
+    "command": "SPOOL_BENCHMARK_SKIP_10M=1 node scripts/benchmarks/target-throughput.cjs",
+    "tiers": [
+      { "tier": "100K", "rows": 100000, "status": "passed", "rowsPerSec": 110375, "miB": 9.54 },
+      { "tier": "1M", "rows": 1000000, "status": "passed", "rowsPerSec": 131130 },
+      { "tier": "5M", "rows": 5000000, "status": "passed", "rowsPerSec": 118296 },
+      { "tier": "10M", "rows": 10000000, "status": "skipped", "reason": "excluded on this host because the 10M write exceeds local disk headroom" }
+    ]
+  },
+  "conclusion": "The target write path performed reproducibly at 100K-5M rows with no correctness errors, and that evidence is now pinned to commit 5b60af26b64390e454c116338694f6ca5220cc21. The 10M tier remains unrun on this host (earlier attempt PANICed on disk exhaustion). Sustained 10M write-load evidence is not independently reproduced, so postgres.target remains EXPERIMENTAL.",
+  "doNotFabricate": "The 10M tier was NOT completed and must not be reported as passing."
+}

@@ -32,6 +32,8 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 - Reference fault workloads fail closed, never silent: a dropped replication slot is reported absent and must be recreated before capture resumes; a cancelled `COPY` leaves no partial rows and no ledger entry, and the commit surfaces the server cancellation message through the credential boundary.
 - Deadlock (`40P01`) and serialization (`40001`) faults are retryable; terminated backends (`57P01`) and read-only violations are classified but not retried.
 - Soak plans require the batch id window to fit one full round (`batchSize * writers <= uniqueEnd - uniqueStart`); RPO/RTO records are measured observations of a run, not guarantees.
+- Measured local profile on 17.6 (pinned to commit `5b60af26b64390e454c116338694f6ca5220cc21`, evidence under `qualification/`): batched write throughput ~118-141K rows/sec at 100K-5M rows; exact content verification runs ~3.0K rows/sec, materially slower than committing (~24.5K rows/sec), so large verifications take minutes, not seconds.
+- Sustained write qualification stops at 5M rows; the 10M tier needs host disk headroom for the write spike plus WAL, and on constrained hosts PostgreSQL can `PANIC` (`58030`) rather than degrade. This is an environment ceiling, not a capability defect (see `qualification/postgres-target/failure-10m.json`).
 
 ## PostgreSQL schema migration
 
