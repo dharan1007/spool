@@ -28,15 +28,22 @@ export const MIGRATION_STATES = Object.freeze({
   POST_CUTOVER_VERIFY: 'POST_CUTOVER_VERIFY',
   COMPLETED: 'COMPLETED',
   FAILED_RECOVERABLE: 'FAILED_RECOVERABLE',
+  RECOVERY_PENDING: 'RECOVERY_PENDING',
   FAILED_OPERATOR_REQUIRED: 'FAILED_OPERATOR_REQUIRED',
   ABORTED: 'ABORTED'
 });
 
 const ALL_STATES = new Set(Object.values(MIGRATION_STATES));
 
+// Terminal states: no automatic onward progress is possible from these states.
+// FAILED_RECOVERABLE is intentionally NOT terminal: it has an explicit
+// operator-initiated recovery path (FAILED_RECOVERABLE -> RECOVERY_PENDING).
+// ABORTED remains listed as terminal because return to the lifecycle requires
+// an explicit rearm operation with a fresh cutover attempt identity; the
+// ABORTED -> CUTOVER_ARMED graph edge exists solely for that operation and
+// its preconditions reject any implicit traversal.
 export const MIGRATION_TERMINAL_STATES = Object.freeze([
   MIGRATION_STATES.COMPLETED,
-  MIGRATION_STATES.FAILED_RECOVERABLE,
   MIGRATION_STATES.FAILED_OPERATOR_REQUIRED,
   MIGRATION_STATES.ABORTED
 ]);
@@ -69,19 +76,25 @@ allow(MIGRATION_STATES.REPAIR_PLANNED, MIGRATION_STATES.REPAIR_APPROVED, MIGRATI
 allow(MIGRATION_STATES.REPAIR_APPROVED, MIGRATION_STATES.REPAIRING, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED, MIGRATION_STATES.ABORTED);
 allow(MIGRATION_STATES.REPAIRING, MIGRATION_STATES.REVERIFYING, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED, MIGRATION_STATES.ABORTED);
 allow(MIGRATION_STATES.REVERIFYING, MIGRATION_STATES.READY_FOR_CUTOVER, MIGRATION_STATES.VERIFICATION_FAILED, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED, MIGRATION_STATES.ABORTED);
-allow(MIGRATION_STATES.READY_FOR_CUTOVER, MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.COMPLETED, MIGRATION_STATES.ABORTED, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED);
-allow(MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN, MIGRATION_STATES.FINAL_VERIFY, MIGRATION_STATES.CUTOVER_COMMITTED, MIGRATION_STATES.ABORTED, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED);
-// FINAL_DRAIN must go through FINAL_VERIFY before commit for correctness
-allow(MIGRATION_STATES.FINAL_DRAIN, MIGRATION_STATES.FINAL_VERIFY, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED, MIGRATION_STATES.ABORTED);
-allow(MIGRATION_STATES.FINAL_VERIFY, MIGRATION_STATES.CUTOVER_COMMITTED, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED, MIGRATION_STATES.ABORTED);
+allow(MIGRATION_STATES.READY_FOR_CUTOVER, MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.ABORTED, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED);
+allow(MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN, MIGRATION_STATES.FINAL_VERIFY, MIGRATION_STATES.ABORTED, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED);
+// FINAL_DRAIN and FINAL_VERIFY must go through FINAL_VERIFY before commit for correctness.
+// There is intentionally NO direct CUTOVER_ARMED -> CUTOVER_COMMITTED edge:
+// commit is only reachable from FINAL_VERIFY with a bound finalVerificationId.
+allow(MIGRATION_STATES.FINAL_DRAIN, MIGRATION_STATES.FINAL_VERIFY, MIGRATION_STATES.ABORTED, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED);
+allow(MIGRATION_STATES.FINAL_VERIFY, MIGRATION_STATES.CUTOVER_COMMITTED, MIGRATION_STATES.ABORTED, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED);
 allow(MIGRATION_STATES.CUTOVER_COMMITTED, MIGRATION_STATES.POST_CUTOVER_VERIFY, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED);
 allow(MIGRATION_STATES.POST_CUTOVER_VERIFY, MIGRATION_STATES.COMPLETED, MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED);
 
-// Re-arm after abort: ABORTED can go back to READY_FOR_CUTOVER or CUTOVER_ARMED (new arming)
-allow(MIGRATION_STATES.ABORTED, MIGRATION_STATES.READY_FOR_CUTOVER, MIGRATION_STATES.CUTOVER_ARMED);
-
-// Also allow FAILED_RECOVERABLE to be retried from several points? For now make it terminal unless operator resets.
-// But spec says FAILED_RECOVERABLE requires operator; we keep terminal.
+// Re-arm after abort: ABORTED can return to CUTOVER_ARMED ONLY through an explicit
+// rearm operation carrying a fresh cutoverAttemptId (see rearm preconditions below).
+// There is intentionally NO ABORTED -> READY_FOR_CUTOVER edge: re-arm re-validates
+// and arms directly with a new attempt identity.
+// FAILED_RECOVERABLE is recoverable through an explicit operator-initiated recovery:
+// FAILED_RECOVERABLE -> RECOVERY_PENDING -> safe resume state.
+allow(MIGRATION_STATES.ABORTED, MIGRATION_STATES.CUTOVER_ARMED);
+allow(MIGRATION_STATES.FAILED_RECOVERABLE, MIGRATION_STATES.RECOVERY_PENDING, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED);
+allow(MIGRATION_STATES.RECOVERY_PENDING, MIGRATION_STATES.SNAPSHOT_ARMED, MIGRATION_STATES.FULL_LOAD_RUNNING, MIGRATION_STATES.FAILED_OPERATOR_REQUIRED);
 
 // Ensure every non-terminal has at least FAILED escapes
 for (const state of Object.values(MIGRATION_STATES)) {
@@ -308,6 +321,24 @@ export function assertTransitionPreconditions({ from, to, context = {} } = {}) {
       const cutoverEvidence = context.cutoverEvidence ?? context.receipt ?? null;
       const planId = context.planId ?? null;
       const targetContractId = context.targetContractId ?? null;
+      // Re-arm after abort is explicit only: ABORTED -> CUTOVER_ARMED through the
+      // generic transition path is rejected unless the caller supplies a fresh
+      // rearm context (minted by the explicit rearm operation with a new attempt id).
+      if (from === MIGRATION_STATES.ABORTED) {
+        const rearm = context.rearm ?? null;
+        if (!rearm || typeof rearm !== 'object' || Array.isArray(rearm)) {
+          fail('CUTOVER_REARM_REQUIRED', 'Re-arming a cutover after abort requires an explicit rearm operation with a fresh cutover attempt identity');
+        }
+        if (typeof rearm.cutoverAttemptId !== 'string' || !HASH_ID.test(rearm.cutoverAttemptId)) {
+          fail('CUTOVER_REARM_REQUIRED', 'Re-arm requires a fresh cutoverAttemptId');
+        }
+        if (typeof rearm.principal !== 'string' || !rearm.principal.trim()) {
+          fail('CUTOVER_REARM_REQUIRED', 'Re-arm requires the re-arming principal');
+        }
+        if (typeof rearm.reason !== 'string' || !rearm.reason.trim()) {
+          fail('CUTOVER_REARM_REQUIRED', 'Re-arm requires a reason');
+        }
+      }
       // Must be armed with valid receipt / approval showing verified evidence
       if (!cutoverEvidence && !context.approval) {
         fail('CUTOVER_APPROVAL_REQUIRED', 'CUTOVER_ARMED requires a valid cutover approval/receipt with verified evidence');
@@ -324,23 +355,28 @@ export function assertTransitionPreconditions({ from, to, context = {} } = {}) {
     }
     case MIGRATION_STATES.CUTOVER_COMMITTED: {
       const fenceToken = context.fenceToken ?? null;
-      const finalVerification = context.finalVerification ?? context.verification ?? null;
+      const finalVerificationId = context.finalVerificationId ?? null;
       if (!fenceToken || !Number.isSafeInteger(fenceToken) || fenceToken <= 0) {
         fail('FENCE_REQUIRED', 'CUTOVER_COMMITTED requires a fresh fence token');
       }
-      if (from !== MIGRATION_STATES.FINAL_VERIFY && from !== MIGRATION_STATES.CUTOVER_ARMED) {
-        // enforce must have drained/verified
-        fail('ILLEGAL_STATE_TRANSITION', 'CUTOVER_COMMITTED requires prior FINAL_DRAIN/FINAL_VERIFY');
+      if (from !== MIGRATION_STATES.FINAL_VERIFY) {
+        // No bypass: commit is reachable only from FINAL_VERIFY. The direct
+        // CUTOVER_ARMED -> CUTOVER_COMMITTED graph edge was deliberately removed.
+        fail('ILLEGAL_STATE_TRANSITION', 'CUTOVER_COMMITTED requires prior FINAL_VERIFY in the same cutover attempt');
       }
-      if (finalVerification && finalVerification.status !== 'VERIFIED') {
-        fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires successful final verification');
+      // Identity-bound proof is mandatory. Object presence is never sufficient:
+      // the RunStore validates the persisted verification record (existence,
+      // mode, status, plan/source/contract bindings, cutover attempt, recency)
+      // before this transition is allowed to commit.
+      if (typeof finalVerificationId !== 'string' || !HASH_ID.test(finalVerificationId)) {
+        fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires the exact persisted finalVerificationId of a FINAL_PRE_CUTOVER verification');
       }
       break;
     }
     case MIGRATION_STATES.COMPLETED: {
-      const postVerification = context.postCutoverVerification ?? context.finalVerification ?? context.verification ?? null;
-      if (!postVerification || postVerification.status !== 'VERIFIED') {
-        fail('VERIFICATION_REQUIRED', 'COMPLETED must be impossible without valid final post-cutover verification');
+      const postCutoverVerificationId = context.postCutoverVerificationId ?? null;
+      if (typeof postCutoverVerificationId !== 'string' || !HASH_ID.test(postCutoverVerificationId)) {
+        fail('VERIFICATION_REQUIRED', 'COMPLETED requires the exact persisted postCutoverVerificationId of a POST_CUTOVER verification');
       }
       break;
     }
@@ -370,6 +406,24 @@ export function assertTransitionPreconditions({ from, to, context = {} } = {}) {
       // Once cutover committed, these pre-cutover paths must not be re-entered unless explicitly allowed
       if (context.cutoverCommitted === true) {
         fail('CUTOVER_ALREADY_COMMITTED', 'Pre-cutover execution/repair paths are frozen after CUTOVER_COMMITTED');
+      }
+      // Draining and final verification perform fenced work; the fence that
+      // authorizes the attempt must be presented when entering these states.
+      if (!Number.isSafeInteger(context.fenceToken) || context.fenceToken <= 0) {
+        fail('FENCE_REQUIRED', `${to} requires a fresh fence token`);
+      }
+      break;
+    }
+    case MIGRATION_STATES.RECOVERY_PENDING: {
+      const recovery = context.recovery ?? null;
+      if (!recovery || typeof recovery !== 'object' || Array.isArray(recovery)) {
+        fail('RECOVERY_EVIDENCE_REQUIRED', 'RECOVERY_PENDING requires explicit recovery evidence (targetState, reason, principal)');
+      }
+      if (![MIGRATION_STATES.SNAPSHOT_ARMED, MIGRATION_STATES.FULL_LOAD_RUNNING].includes(recovery.targetState)) {
+        fail('RECOVERY_TARGET_INVALID', 'Recovery target must be a safe resume point (SNAPSHOT_ARMED or FULL_LOAD_RUNNING)', { targetState: recovery.targetState ?? null });
+      }
+      if (typeof recovery.reason !== 'string' || !recovery.reason.trim()) {
+        fail('RECOVERY_EVIDENCE_REQUIRED', 'Recovery requires a non-empty reason describing the resolved failure cause');
       }
       break;
     }
@@ -467,6 +521,34 @@ export function snapshotCdcBindingId(binding) {
   return sha256Canonical(SNAPSHOT_CDC_DOMAIN, binding);
 }
 
+const CUTOVER_ATTEMPT_DOMAIN = 'spool-cutover-attempt-v1';
+
+// Cutover attempt identity: deterministic over the arming inputs so that a
+// retried arming (same receipt, same plan/source/contract, same armedAt)
+// yields the same attempt id (idempotent re-arm recognition), while any new
+// arming after abort carries a new armedAt and therefore a new attempt id.
+// The attempt id binds every later cutover-phase transition and verification
+// of that attempt, so evidence from a superseded attempt can never authorize
+// the current one.
+export function buildCutoverAttemptId(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) fail('INVALID_CUTOVER_ATTEMPT', 'Cutover attempt input must be an object');
+  const migrationId = requireMigrationId(input.migrationId);
+  const receiptId = typeof input.receiptId === 'string' && input.receiptId ? input.receiptId : fail('INVALID_CUTOVER_ATTEMPT', 'receiptId is required');
+  const receiptKind = input.receiptKind === 'migration' || input.receiptKind === 'repair' ? input.receiptKind : fail('INVALID_CUTOVER_ATTEMPT', 'receiptKind must be migration or repair');
+  const planId = typeof input.planId === 'string' && HASH_ID.test(input.planId) ? input.planId : fail('INVALID_CUTOVER_ATTEMPT', 'planId must be canonical sha256');
+  const sourceStateId = typeof input.sourceStateId === 'string' && HASH_ID.test(input.sourceStateId) ? input.sourceStateId : fail('INVALID_CUTOVER_ATTEMPT', 'sourceStateId must be canonical sha256');
+  const targetContractId = typeof input.targetContractId === 'string' && HASH_ID.test(input.targetContractId) ? input.targetContractId : fail('INVALID_CUTOVER_ATTEMPT', 'targetContractId must be canonical sha256');
+  const armedAt = typeof input.armedAt === 'string' && Number.isFinite(Date.parse(input.armedAt)) ? new Date(input.armedAt).toISOString() : fail('INVALID_CUTOVER_ATTEMPT', 'armedAt must be an ISO timestamp');
+  return sha256Canonical(CUTOVER_ATTEMPT_DOMAIN, {
+    migrationId, receiptId, receiptKind, planId, sourceStateId, targetContractId, armedAt
+  });
+}
+
+export function requireCutoverAttemptId(value) {
+  if (typeof value !== 'string' || !HASH_ID.test(value)) fail('INVALID_CUTOVER_ATTEMPT', 'cutoverAttemptId must be a canonical sha256 identity');
+  return value;
+}
+
 export function validateSnapshotCdcBinding(value) {
   if (!value || typeof value !== 'object') fail('INVALID_SNAPSHOT_CDC_BINDING', 'Snapshot/CDC binding is required');
   // rebuild to validate
@@ -479,6 +561,7 @@ export function decideRecoveryAction({ currentState, lastTransition, snapshotCdc
   // Returns one of: RESUME, RECONCILE, WAIT_OPERATOR, REFUSE
   if (!currentState) return 'REFUSE';
   if ([MIGRATION_STATES.FAILED_OPERATOR_REQUIRED, MIGRATION_STATES.FAILED_RECOVERABLE].includes(currentState)) return 'WAIT_OPERATOR';
+  if (currentState === MIGRATION_STATES.RECOVERY_PENDING) return 'RECONCILE';
   if (currentState === MIGRATION_STATES.CUTOVER_COMMITTED) return 'RECONCILE'; // ensure post-cutover verify
   if (currentState === MIGRATION_STATES.COMPLETED || currentState === MIGRATION_STATES.ABORTED) return 'REFUSE';
   // If during execution, need to reconcile before resume

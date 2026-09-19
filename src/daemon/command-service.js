@@ -43,6 +43,7 @@ import {
   isAllowedTransition,
   assertTransitionPreconditions,
   buildSnapshotCdcBinding,
+  buildCutoverAttemptId,
   decideRecoveryAction
 } from '../protocol/migration-state-machine.js';
 import { createVerificationCoordinator, VERIFICATION_MODE } from '../protocol/verification-coordinator.js';
@@ -316,8 +317,10 @@ export class SpoolCommandService {
       approvalBinding(request, prepared.plan, prepared.snapshot, prepared.targetPreflight.targetContractId, effects, expiresAt, nonce),
       { signingKey: this.approvalSigningKey }
     );
-    // Durable state-machine progression: CREATED -> DISCOVERING -> PREFLIGHTED -> PLANNED -> AWAITING_APPROVAL -> APPROVED
-    try {
+    // Durable state-machine progression: CREATED -> DISCOVERING -> PREFLIGHTED -> PLANNED -> AWAITING_APPROVAL -> APPROVED.
+    // Every protocol error propagates: the path walk tolerates only
+    // idempotent-duplicate noise, everything else fails the approval closed.
+    {
       this.#ensureDurableState(request.migrationId, request.principal, 'approve');
       const planId = prepared.plan.planId;
       const sourceStateId = prepared.snapshot.snapshotId;
@@ -352,24 +355,21 @@ export class SpoolCommandService {
         evidence: { approvalId: approval.approvalId },
         context: { approval, planId, sourceStateId, targetContractId }
       });
-      // Attempt to persist snapshot/CDC binding if postgres source provides LSN info
-      try {
-        if (prepared.snapshot?.sourceStateId && prepared.source?.sourceState?.state?.walLsn) {
-          const binding = buildSnapshotCdcBinding({
-            sourceStateId: prepared.snapshot.snapshotId,
-            databaseSnapshotIdentity: String(prepared.source.sourceState.state.systemIdentifier ?? prepared.snapshot.snapshotId),
-            exportedSnapshotId: prepared.source.sourceState.state.snapshot?.exportedSnapshotId ?? null,
-            snapshotLsn: prepared.source.sourceState.state.walLsn,
-            cdcStartLsn: prepared.source.sourceState.state.walLsn,
-            catalogId: prepared.source.sourceState.state.contractId ?? null
-          });
-          this.runs.setSnapshotCdcBinding(request.migrationId, binding);
-        }
-      } catch {}
-    } catch (error) {
-      if (error?.code === 'RUN_STATE_CORRUPT') throw error;
-      // For legacy callers, don't fail approve on state machine non-critical errors? But spec says preconditions must be enforced — so propagate APPROVAL_* errors
-      if (['ILLEGAL_STATE_TRANSITION','APPROVAL_REQUIRED','APPROVAL_BINDING_MISMATCH','APPROVAL_EXPIRED','REPAIR_APPROVAL_MISUSE'].includes(error?.code)) throw error;
+      // Persist snapshot/CDC binding if postgres source provides LSN info.
+      // Binding validation failures (including CDC_GAP) fail the approval
+      // closed: proceeding without a proven snapshot/CDC boundary would allow
+      // an unobserved source interval.
+      if (prepared.snapshot?.sourceStateId && prepared.source?.sourceState?.state?.walLsn) {
+        const binding = buildSnapshotCdcBinding({
+          sourceStateId: prepared.snapshot.snapshotId,
+          databaseSnapshotIdentity: String(prepared.source.sourceState.state.systemIdentifier ?? prepared.snapshot.snapshotId),
+          exportedSnapshotId: prepared.source.sourceState.state.snapshot?.exportedSnapshotId ?? null,
+          snapshotLsn: prepared.source.sourceState.state.walLsn,
+          cdcStartLsn: prepared.source.sourceState.state.walLsn,
+          catalogId: prepared.source.sourceState.state.contractId ?? null
+        });
+        this.runs.setSnapshotCdcBinding(request.migrationId, binding);
+      }
     }
     return approval;
   }
@@ -420,8 +420,10 @@ export class SpoolCommandService {
       approvalBinding(request, plan, snapshot, targetPreflight.targetContractId, effects, approval.record?.expiresAt, approval.record?.nonce),
       { signingKey: this.approvalSigningKey }
     );
-    // Durable progression through discovery/planning to APPROVED (idempotent)
-    try {
+    // Durable progression through discovery/planning to APPROVED (idempotent).
+    // Every protocol error propagates: the guards skip completed steps, so
+    // any throw is a genuine violation, never idempotent noise.
+    {
       const cur = this.#durableState(request.migrationId);
       const planId = plan.planId;
       const sourceStateId = snapshot.snapshotId;
@@ -447,14 +449,11 @@ export class SpoolCommandService {
         evidence: { approvalId: approval.approvalId },
         context: { approval, planId, sourceStateId, targetContractId }
       });
-    } catch (error) {
-      if (['ILLEGAL_STATE_TRANSITION','APPROVAL_REQUIRED','APPROVAL_BINDING_MISMATCH','APPROVAL_EXPIRED','RUN_STATE_CORRUPT','STALE_TRANSITION_VERSION','STALE_COORDINATOR_EPOCH','TRANSITION_CONFLICT'].includes(error?.code)) throw error;
-      // otherwise propagate
-      if (error?.code) throw error;
     }
     await source.verify();
-    // Durable: APPROVED -> SNAPSHOT_ARMED -> SNAPSHOT_RUNNING
-    try {
+    // Durable: APPROVED -> SNAPSHOT_ARMED -> SNAPSHOT_RUNNING.
+    // Every protocol error propagates: guards skip completed steps.
+    {
       const planId = plan.planId;
       const sourceStateId = snapshot.snapshotId;
       const targetContractId = targetPreflight.targetContractId;
@@ -466,22 +465,19 @@ export class SpoolCommandService {
       if (cur2 && cur2.currentState === MIGRATION_STATES.SNAPSHOT_ARMED) {
         this.#durableTransition(request.migrationId, MIGRATION_STATES.SNAPSHOT_RUNNING, { principal: request.principal, reason: 'snapshot running', planId, sourceStateId, targetContractId });
       }
-      // Persist snapshot/CDC binding if postgres source provides LSN (real protocol sequence: snapshot and LSN captured atomically inside source snapshot)
-      try {
-        if (snapshot?.snapshotId && source?.sourceState?.state?.walLsn) {
-          const binding = buildSnapshotCdcBinding({
-            sourceStateId: snapshot.snapshotId,
-            databaseSnapshotIdentity: String(source.sourceState.state.systemIdentifier ?? snapshot.snapshotId),
-            exportedSnapshotId: source.sourceState.state.snapshot?.exportedSnapshotId ?? null,
-            snapshotLsn: source.sourceState.state.walLsn,
-            cdcStartLsn: source.sourceState.state.walLsn,
-            catalogId: source.sourceState.state.contractId ?? null
-          });
-          this.runs.setSnapshotCdcBinding(request.migrationId, binding);
-        }
-      } catch {}
-    } catch (error) {
-      if (['RUN_STATE_CORRUPT','ILLEGAL_STATE_TRANSITION','STALE_TRANSITION_VERSION'].includes(error?.code)) throw error;
+      // Persist snapshot/CDC binding if postgres source provides LSN (real protocol sequence: snapshot and LSN captured atomically inside source snapshot).
+      // Binding validation failures (including CDC_GAP) fail closed.
+      if (snapshot?.snapshotId && source?.sourceState?.state?.walLsn) {
+        const binding = buildSnapshotCdcBinding({
+          sourceStateId: snapshot.snapshotId,
+          databaseSnapshotIdentity: String(source.sourceState.state.systemIdentifier ?? snapshot.snapshotId),
+          exportedSnapshotId: source.sourceState.state.snapshot?.exportedSnapshotId ?? null,
+          snapshotLsn: source.sourceState.state.walLsn,
+          cdcStartLsn: source.sourceState.state.walLsn,
+          catalogId: source.sourceState.state.contractId ?? null
+        });
+        this.runs.setSnapshotCdcBinding(request.migrationId, binding);
+      }
     }
 
     const startedAt = current?.startedAt ?? new Date().toISOString();
@@ -492,8 +488,9 @@ export class SpoolCommandService {
 
     try {
       await renewLease();
-      // Durable: SNAPSHOT_RUNNING -> FULL_LOAD_RUNNING with fence token
-      try {
+      // Durable: SNAPSHOT_RUNNING -> FULL_LOAD_RUNNING with fence token.
+      // Every protocol error propagates; the guards skip completed steps.
+      {
         const cur = this.#durableState(request.migrationId);
         if (cur && [MIGRATION_STATES.SNAPSHOT_RUNNING, MIGRATION_STATES.APPROVED, MIGRATION_STATES.SNAPSHOT_ARMED].includes(cur.currentState)) {
           const to = MIGRATION_STATES.FULL_LOAD_RUNNING;
@@ -507,8 +504,6 @@ export class SpoolCommandService {
           // Already running — update fence in evidence but don't re-transition; just ensure lease is fresh
           // We can record a no-op or keep current; spec says fencing must be validated inside TX, not here
         }
-      } catch (error) {
-        if (['RUN_STATE_CORRUPT','STALE_TRANSITION_VERSION','TRANSITION_CONFLICT','ILLEGAL_STATE_TRANSITION'].includes(error?.code)) throw error;
       }
       this.runs.start({ migrationId: request.migrationId, planId: plan.planId, sourceSnapshotId: snapshot.snapshotId, targetIdentity, startedAt });
       ownsRunState = true;
@@ -556,8 +551,9 @@ export class SpoolCommandService {
       if (lastSeenRow + 1 !== sourceRows) fail('SOURCE_ROW_COUNT_CHANGED', 'Durable snapshot row count changed between preparation and execution');
       if (batchRows.length !== 0) fail('INTERNAL_BATCH_STATE', 'Streaming execution ended with an uncommitted batch');
 
-      // Durable: FULL_LOAD_RUNNING (or CDC_RUNNING/CATCHING_UP) -> VERIFYING
-      try {
+      // Durable: FULL_LOAD_RUNNING (or CDC_RUNNING/CATCHING_UP) -> VERIFYING.
+      // Every protocol error propagates; guards skip completed steps.
+      {
         const cur = this.#durableState(request.migrationId);
         const planId = plan.planId;
         const sourceStateId = snapshot.snapshotId;
@@ -566,11 +562,9 @@ export class SpoolCommandService {
           this.#durableTransition(request.migrationId, MIGRATION_STATES.VERIFYING, { principal: request.principal, reason: 'verifying', planId, sourceStateId, targetContractId });
         } else if (cur && cur.currentState === MIGRATION_STATES.SNAPSHOT_RUNNING) {
           // Edge case: small migration that skipped FULL_LOAD_RUNNING due to checkpoint resume; go via FULL_LOAD then VERIFYING
-          try { this.#durableTransition(request.migrationId, MIGRATION_STATES.FULL_LOAD_RUNNING, { principal: request.principal, reason: 'full load running (verify)', planId, sourceStateId, targetContractId, fenceToken: lease.fencingToken }); } catch {}
+          this.#durableTransition(request.migrationId, MIGRATION_STATES.FULL_LOAD_RUNNING, { principal: request.principal, reason: 'full load running (verify)', planId, sourceStateId, targetContractId, fenceToken: lease.fencingToken });
           this.#durableTransition(request.migrationId, MIGRATION_STATES.VERIFYING, { principal: request.principal, reason: 'verifying', planId, sourceStateId, targetContractId });
         }
-      } catch (error) {
-        if (['RUN_STATE_CORRUPT','ILLEGAL_STATE_TRANSITION','STALE_TRANSITION_VERSION'].includes(error?.code)) throw error;
       }
 
       const summary = accumulator.summary();
@@ -643,8 +637,9 @@ export class SpoolCommandService {
         }
         verification = Object.freeze({ ...basicVerification, content });
         if (content.status !== 'VERIFIED') {
-          // Durable: VERIFYING -> VERIFICATION_FAILED
-          try {
+          // Durable: VERIFYING -> VERIFICATION_FAILED. Every protocol error
+          // propagates; the guard skips already-transitioned retries.
+          {
             const cur = this.#durableState(request.migrationId);
             if (cur && cur.currentState === MIGRATION_STATES.VERIFYING) {
               this.#durableTransition(request.migrationId, MIGRATION_STATES.VERIFICATION_FAILED, {
@@ -657,7 +652,7 @@ export class SpoolCommandService {
                 context: { verification: content }
               });
             }
-          } catch (e) { if (['RUN_STATE_CORRUPT','STALE_TRANSITION_VERSION','TRANSITION_CONFLICT'].includes(e?.code)) throw e; }
+          }
           this.runs.verificationFailed({ migrationId: request.migrationId, verification });
           fail('VERIFICATION_FAILED', 'Exact target-content verification found deterministic differences', {
             rootHash: content.rootHash,
@@ -669,8 +664,9 @@ export class SpoolCommandService {
         verification = basicVerification;
       }
 
-      // Durable: VERIFYING -> READY_FOR_CUTOVER (if not already failed)
-      try {
+      // Durable: VERIFYING -> READY_FOR_CUTOVER (if not already failed).
+      // Every protocol error propagates; the guard skips completed retries.
+      {
         const cur = this.#durableState(request.migrationId);
         if (cur && cur.currentState === MIGRATION_STATES.VERIFYING) {
           this.#durableTransition(request.migrationId, MIGRATION_STATES.READY_FOR_CUTOVER, {
@@ -683,8 +679,6 @@ export class SpoolCommandService {
             context: { verification }
           });
         }
-      } catch (error) {
-        if (['RUN_STATE_CORRUPT','ILLEGAL_STATE_TRANSITION','STALE_TRANSITION_VERSION','VERIFICATION_REQUIRED'].includes(error?.code)) throw error;
       }
 
       const completedAt = new Date().toISOString();
@@ -743,49 +737,6 @@ export class SpoolCommandService {
     return Object.freeze(plans);
   }
 
-  async #reverifyContentExact({ migrationId, source, plan, sourceRows, targetExecution, targetPreflight, renewLease }) {
-    const batchSize = plan.writeStrategy.batchSize;
-    const replayAccumulator = new MigrationEngine().createAccumulator(plan.mapping, plan.mappingRevision, plan.targetSchema);
-    const content = await targetExecution.withContentVerifier({
-      targetSchema: plan.targetSchema,
-      targetContractId: targetPreflight.targetContractId
-    }, async verifier => {
-      const evidence = createContentVerificationAccumulator({ targetReadState: verifier.targetReadState });
-      let expectedRows = [];
-      let replayLastSeen = -1;
-      for await (const { rowIndex, row } of source.streamRows()) {
-        replayLastSeen = rowIndex;
-        const transformed = replayAccumulator.process(row, rowIndex);
-        if (transformed.ok) expectedRows.push(transformed.row);
-        const sourceRangeStart = Math.floor(rowIndex / batchSize) * batchSize;
-        const sourceRangeEnd = Math.min(sourceRows, sourceRangeStart + batchSize);
-        if (rowIndex + 1 === sourceRangeEnd) {
-          await renewLease();
-          evidence.add({
-            sourceRange: { start: sourceRangeStart, endExclusive: sourceRangeEnd },
-            verification: await verifier.verifyBatch(expectedRows)
-          });
-          expectedRows = [];
-        }
-      }
-      if (replayLastSeen + 1 !== sourceRows) fail('SOURCE_ROW_COUNT_CHANGED', 'Durable snapshot row count changed during repair re-verification');
-      if (expectedRows.length !== 0) fail('INTERNAL_BATCH_STATE', 'Repair re-verification ended with an incomplete batch');
-      return evidence.summary();
-    });
-    const expectedValidRows = this.runs.verificationBatches(migrationId)
-      .reduce((total, item) => total + (item.verification?.expected?.rowCount ?? 0), 0);
-    const replaySummary = replayAccumulator.summary();
-    if (replaySummary.processedRows !== sourceRows || replaySummary.validRows !== expectedValidRows || replaySummary.invalidRows !== sourceRows - expectedValidRows) {
-      fail('TRANSFORM_REPLAY_DIVERGED', 'Deterministic transform replay produced different row accounting during repair re-verification');
-    }
-    if (content.sourceRowsCovered !== sourceRows || content.rowCount !== expectedValidRows) {
-      fail('CONTENT_VERIFICATION_ACCOUNTING_MISMATCH', 'Repair re-verification evidence does not cover the executed output exactly', {
-        sourceRows, sourceRowsCovered: content.sourceRowsCovered, verifiedRows: content.rowCount
-      });
-    }
-    return content;
-  }
-
   async approveRepair(request, { repairPlanIds, expiresAt, nonce } = {}) {
     this.#open(); requireRequest(request); this.#requireCutoverOpen(request.migrationId);
     if (!Array.isArray(repairPlanIds) || repairPlanIds.length === 0) fail('INVALID_REPAIR_REQUEST', 'repairPlanIds must be a non-empty array');
@@ -813,8 +764,9 @@ export class SpoolCommandService {
       }),
       { signingKey: this.approvalSigningKey }
     );
-    // Durable: VERIFICATION_FAILED -> REPAIR_PLANNED -> REPAIR_APPROVED
-    try {
+    // Durable: VERIFICATION_FAILED -> REPAIR_PLANNED -> REPAIR_APPROVED.
+    // Every protocol error propagates; guards skip completed steps.
+    {
       const cur = this.#durableState(request.migrationId);
       if (cur && cur.currentState === MIGRATION_STATES.VERIFICATION_FAILED) {
         this.#durableTransition(request.migrationId, MIGRATION_STATES.REPAIR_PLANNED, {
@@ -838,8 +790,6 @@ export class SpoolCommandService {
           context: { repairApproval, planId: prepared.plan.planId, sourceStateId: prepared.snapshot.snapshotId, targetContractId: prepared.targetPreflight.targetContractId }
         });
       }
-    } catch (error) {
-      if (['RUN_STATE_CORRUPT','REPAIR_APPROVAL_REQUIRED','ILLEGAL_STATE_TRANSITION','STALE_TRANSITION_VERSION'].includes(error?.code)) throw error;
     }
     return repairApproval;
   }
@@ -875,17 +825,13 @@ export class SpoolCommandService {
 
     const { plan, snapshot, source, sourceRows, targetRuntime, targetPreflight } = prepared;
     assertRepairCapability(targetRuntime);
-    // Durable: REPAIR_APPROVED -> REPAIRING (requires RepairApproval)
-    try {
+    // Durable: REPAIR_APPROVED -> REPAIRING (requires RepairApproval).
+    // The fence token is minted below via renewLease before transitioning.
+    {
       const cur = this.#durableState(request.migrationId);
-      if (cur && cur.currentState === MIGRATION_STATES.REPAIR_APPROVED) {
-        // We need fence token for transition; get provisional lease? We'll defer fence to after renewLease, but transition must have fence
-        // So we will transition after renewLease below
-      } else if (cur && cur.currentState !== MIGRATION_STATES.REPAIR_APPROVED) {
+      if (cur && cur.currentState !== MIGRATION_STATES.REPAIR_APPROVED) {
         fail('REPAIR_NOT_REQUIRED', `Repair execution requires durable state REPAIR_APPROVED, not ${cur?.currentState}`);
       }
-    } catch (error) {
-      if (['RUN_STATE_CORRUPT','REPAIR_NOT_REQUIRED','ILLEGAL_STATE_TRANSITION'].includes(error?.code)) throw error;
     }
     const targetExecution = await targetRuntime.createExecution({ migrationId: request.migrationId, targetRef: plan.targetRef });
     let lease;
@@ -894,8 +840,9 @@ export class SpoolCommandService {
     try {
       assertRepairCapability(targetRuntime, targetExecution);
       await renewLease();
-      // Now transition REPAIR_APPROVED -> REPAIRING with fence
-      try {
+      // Now transition REPAIR_APPROVED -> REPAIRING with fence. The guard
+      // skips already-advanced retries; any throw is a genuine violation.
+      {
         const cur = this.#durableState(request.migrationId);
         if (cur && cur.currentState === MIGRATION_STATES.REPAIR_APPROVED) {
           this.#durableTransition(request.migrationId, MIGRATION_STATES.REPAIRING, {
@@ -909,8 +856,6 @@ export class SpoolCommandService {
             context: { repairApproval, fenceToken: lease.fencingToken }
           });
         }
-      } catch (error) {
-        if (['RUN_STATE_CORRUPT','REPAIR_APPROVAL_REQUIRED','ILLEGAL_STATE_TRANSITION','STALE_TRANSITION_VERSION'].includes(error?.code)) throw error;
       }
       await targetExecution.openTarget();
       const storedOps = new Map(this.runs.repairOperations(request.migrationId).map(item => [`${item.repairPlanId}\0${item.keyId}`, item]));
@@ -930,7 +875,7 @@ export class SpoolCommandService {
         progress
       });
       // Durable: REPAIRING -> REVERIFYING
-      try {
+      {
         const cur = this.#durableState(request.migrationId);
         if (cur && cur.currentState === MIGRATION_STATES.REPAIRING) {
           this.#durableTransition(request.migrationId, MIGRATION_STATES.REVERIFYING, {
@@ -942,35 +887,46 @@ export class SpoolCommandService {
             fenceToken: lease.fencingToken
           });
         }
-      } catch (error) {
-        if (['RUN_STATE_CORRUPT','STALE_TRANSITION_VERSION','ILLEGAL_STATE_TRANSITION'].includes(error?.code)) throw error;
       }
-      const content = await this.#reverifyContentExact({
-        migrationId: request.migrationId, source, plan, sourceRows, targetExecution, targetPreflight, renewLease
+      // Re-verify through the shared VerificationCoordinator (REPAIR_REVERIFY
+      // mode): same engine as final/post-cutover verification, bound to the
+      // approved verification batches for exact coverage accounting.
+      const expectedValidRows = this.runs.verificationBatches(request.migrationId)
+        .reduce((total, item) => total + (item.verification?.expected?.rowCount ?? 0), 0);
+      const repairVerifier = createVerificationCoordinator();
+      const reverify = await repairVerifier.verify({
+        migrationId: request.migrationId,
+        mode: VERIFICATION_MODE.REPAIR_REVERIFY,
+        plan,
+        sourceState: { sourceStateId: snapshot.snapshotId },
+        targetContract: targetPreflight,
+        targetExecution,
+        sourceRuntime: source,
+        expectedValidRows,
+        release: this.release
       });
-      if (content.status !== 'VERIFIED') {
+      const content = reverify.contentProof;
+      if (!reverify || reverify.status !== 'VERIFIED') {
         // Remains in REVERIFYING but need to decide: stay or go back to VERIFICATION_FAILED?
         // Spec says REVERIFYING -> VERIFICATION_FAILED on failure, so transition back
-        try {
-          const cur = this.#durableState(request.migrationId);
-          if (cur && cur.currentState === MIGRATION_STATES.REVERIFYING) {
-            this.#durableTransition(request.migrationId, MIGRATION_STATES.VERIFICATION_FAILED, {
-              principal: request.principal,
-              reason: 'reverification failed',
-              planId: plan.planId,
-              sourceStateId: snapshot.snapshotId,
-              targetContractId: targetPreflight.targetContractId,
-              evidence: { verification: content }
-            });
-          }
-        } catch (e) { if (['RUN_STATE_CORRUPT','STALE_TRANSITION_VERSION'].includes(e?.code)) throw e; }
+        const cur = this.#durableState(request.migrationId);
+        if (cur && cur.currentState === MIGRATION_STATES.REVERIFYING) {
+          this.#durableTransition(request.migrationId, MIGRATION_STATES.VERIFICATION_FAILED, {
+            principal: request.principal,
+            reason: 'reverification failed',
+            planId: plan.planId,
+            sourceStateId: snapshot.snapshotId,
+            targetContractId: targetPreflight.targetContractId,
+            evidence: { verification: content }
+          });
+        }
         fail('REPAIR_REVERIFICATION_FAILED', 'Target content still differs after repair execution', {
-          rootHash: content.rootHash,
-          diffCounts: content.diffCounts
+          rootHash: content?.rootHash ?? reverify?.contentRoot ?? null,
+          diffCounts: content?.diffCounts ?? null
         });
       }
       // Durable: REVERIFYING -> READY_FOR_CUTOVER
-      try {
+      {
         const cur = this.#durableState(request.migrationId);
         if (cur && cur.currentState === MIGRATION_STATES.REVERIFYING) {
           this.#durableTransition(request.migrationId, MIGRATION_STATES.READY_FOR_CUTOVER, {
@@ -983,8 +939,6 @@ export class SpoolCommandService {
             context: { verification: content }
           });
         }
-      } catch (error) {
-        if (['RUN_STATE_CORRUPT','STALE_TRANSITION_VERSION','VERIFICATION_REQUIRED'].includes(error?.code)) throw error;
       }
       const completedAt = new Date().toISOString();
       const receipt = createRepairReceipt({
@@ -1055,7 +1009,7 @@ export class SpoolCommandService {
     return state;
   }
 
-  #durableTransition(migrationId, nextState, { principal, reason = '', planId = null, sourceStateId = null, targetContractId = null, fenceToken = null, evidence = null, context = {}, expectedSequence = null } = {}) {
+  #durableTransition(migrationId, nextState, { principal, reason = '', planId = null, sourceStateId = null, targetContractId = null, fenceToken = null, evidence = null, context = {}, expectedSequence = null, commandId = null } = {}) {
     const current = this.#durableState(migrationId);
     if (current && current.currentState === nextState) return current;
     // If no state and nextState is CREATED, initialize directly
@@ -1079,36 +1033,38 @@ export class SpoolCommandService {
       targetContractId,
       fenceToken,
       evidence,
-      context: enrichedContext
+      context: enrichedContext,
+      commandId
     });
     return this.#durableState(migrationId);
   }
 
-  #advanceDurablePath(migrationId, path, { principal, reasonBase = 'advance', planId = null, sourceStateId = null, targetContractId = null, evidence = null, context = {} } = {}) {
-    for (const next of path) {
-      const cur = this.#durableState(migrationId);
-      if (!cur) throw new Error('Durable state missing during path advance');
-      if (cur.currentState === next) continue;
-      if (!isAllowedTransition(cur.currentState, next)) {
-        // Skip if not allowed — don't force illegal transition; break
-        break;
-      }
-      try {
-        this.#durableTransition(migrationId, next, { principal, reason: `${reasonBase} -> ${next}`, planId, sourceStateId, targetContractId, evidence, context });
-      } catch (error) {
-        // Idempotent duplicate is okay; illegal/precondition failures should propagate unless it's auto-advance best-effort
-        if (error?.code === 'ILLEGAL_STATE_TRANSITION' || error?.code === 'APPROVAL_REQUIRED' || error?.code === 'CDC_BINDING_REQUIRED') {
-          // For auto-advance we swallow precondition failures and stop
-          if (reasonBase.startsWith('auto')) break;
-          throw error;
-        }
-        throw error;
-      }
+  // Sequence of the CUTOVER_COMMITTED transition, for post-commit auditing.
+  #cutoverCommitSequence(migrationId) {
+    const transitions = this.runs.listTransitions(migrationId);
+    const commit = [...transitions].reverse().find(t => t.nextState === MIGRATION_STATES.CUTOVER_COMMITTED);
+    if (!commit) fail('CUTOVER_NOT_ARMED', 'No durable cutover commit found for post-cutover auditing');
+    return commit.sequence;
+  }
+
+  // Fail closed if any SPOOL mutation transitioned after the cutover commit
+  // outside the post-verification path: the post-cutover proof would otherwise
+  // certify a target state the cutover decision never saw.
+  #assertNoPostCommitMutation(migrationId, commitSequence) {
+    const allowed = new Set([MIGRATION_STATES.POST_CUTOVER_VERIFY, MIGRATION_STATES.COMPLETED]);
+    const drifted = this.runs.listTransitions(migrationId)
+      .filter(t => Number(t.sequence) > Number(commitSequence) && !allowed.has(t.nextState));
+    if (drifted.length > 0) {
+      fail('CUTOVER_DRIFT', 'SPOOL state mutated after the cutover commit outside the post-verification path; operator review required', {
+        afterSequence: commitSequence,
+        unexpected: drifted.map(t => ({ sequence: t.sequence, nextState: t.nextState, transitionId: t.transitionId }))
+      });
     }
   }
 
-  async beginCutover(request, { receipt } = {}) {
-    this.#open(); requireRequest(request);
+  // Shared receipt/plan/contract validation for cutover arming and re-arming.
+  // Returns the receipt kind and the canonically recorded receipt payload.
+  async #validateCutoverArming(request, receipt) {
     if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) fail('INVALID_CUTOVER_REQUEST', 'Cutover arming requires the recorded migration or repair receipt');
     const run = this.runs.get(request.migrationId);
     if (!run || (run.status !== 'COMPLETE' && run.status !== 'REPAIR_COMPLETE')) fail('CUTOVER_NOT_ALLOWED', 'Cutover requires a completed verified run');
@@ -1127,38 +1083,31 @@ export class SpoolCommandService {
     if (canonicalJson(receipt.record) !== canonicalJson(recorded)) {
       fail('CUTOVER_RECEIPT_MISMATCH', 'Cutover receipt content does not match the recorded run outcome');
     }
+    return { receiptKind, recorded };
+  }
+
+  async beginCutover(request, { receipt } = {}) {
+    this.#open(); requireRequest(request);
+    const { receiptKind, recorded } = await this.#validateCutoverArming(request, receipt);
     const existing = this.runs.cutover(request.migrationId);
     if (existing?.status === 'COMMITTED') fail('CUTOVER_ALREADY_COMMITTED', 'Cutover is already committed');
-    // Durable: READY_FOR_CUTOVER (or REPAIR-derived READY) -> CUTOVER_ARMED
-    const durableBefore = this.#durableState(request.migrationId);
-    const legacyCutoverOk = run && (run.status === 'COMPLETE' || run.status === 'REPAIR_COMPLETE');
-    if (durableBefore && ![MIGRATION_STATES.READY_FOR_CUTOVER, MIGRATION_STATES.ABORTED, MIGRATION_STATES.COMPLETED].includes(durableBefore.currentState)) {
-      // For synthetic direct-RunStore tests, legacy may be READY but durable is behind — allow for backward compat
-      if (!legacyCutoverOk) {
-        fail('CUTOVER_NOT_ALLOWED', `Cutover arming requires durable state READY_FOR_CUTOVER or ABORTED, not ${durableBefore.currentState}`);
-      }
+    // Canonical state is authoritative: arming requires READY_FOR_CUTOVER.
+    // An aborted attempt never resumes implicitly; it requires rearmCutover.
+    const durable = this.#durableState(request.migrationId);
+    if (!durable) fail('CUTOVER_NOT_ALLOWED', 'Cutover arming requires durable migration state');
+    if (durable.currentState === MIGRATION_STATES.ABORTED) {
+      fail('CUTOVER_REARM_REQUIRED', 'This cutover attempt was aborted; call rearmCutover with a reason to start a new attempt');
     }
-    try {
-      const cur = this.#durableState(request.migrationId);
-      if (cur && [MIGRATION_STATES.READY_FOR_CUTOVER, MIGRATION_STATES.ABORTED].includes(cur.currentState)) {
-        this.#durableTransition(request.migrationId, MIGRATION_STATES.CUTOVER_ARMED, {
-          principal: request.principal,
-          reason: 'cutover armed',
-          planId: recorded.planId,
-          sourceStateId: recorded.sourceSnapshotId,
-          targetContractId: recorded.targetContractId,
-          evidence: { receiptId: receipt.receiptId, receiptKind },
-          context: { receipt, verification: this.runs.get(request.migrationId)?.verification, planId: recorded.planId, targetContractId: recorded.targetContractId }
-        });
-      } else if (cur && cur.currentState === MIGRATION_STATES.COMPLETED) {
-        // Legacy COMPLETED treated as READY for re-arm after synthetic direct manipulation; no durable transition needed
-      } else if (!cur && legacyCutoverOk) {
-        // No durable state but legacy indicates ready (synthetic) — allow legacy path without durable
-      }
-    } catch (error) {
-      if (['ILLEGAL_STATE_TRANSITION','CUTOVER_NOT_ALLOWED','VERIFICATION_REQUIRED','RUN_STATE_CORRUPT'].includes(error?.code)) throw error;
+    if (durable.currentState !== MIGRATION_STATES.READY_FOR_CUTOVER) {
+      fail('CUTOVER_NOT_ALLOWED', `Cutover arming requires durable state READY_FOR_CUTOVER, not ${durable.currentState}`);
     }
-    return this.runs.beginCutover({
+    const armedAt = new Date().toISOString();
+    const cutoverAttemptId = buildCutoverAttemptId({
+      migrationId: request.migrationId, receiptId: receipt.receiptId, receiptKind,
+      planId: recorded.planId, sourceStateId: recorded.sourceSnapshotId,
+      targetContractId: recorded.targetContractId, armedAt
+    });
+    return this.runs.armCutoverAtomic({
       migrationId: request.migrationId,
       receiptId: receipt.receiptId,
       receiptKind,
@@ -1166,16 +1115,68 @@ export class SpoolCommandService {
       sourceSnapshotId: recorded.sourceSnapshotId,
       targetIdentity: recorded.targetIdentity,
       targetContractId: recorded.targetContractId,
-      armedAt: new Date().toISOString()
+      armedAt,
+      cutoverAttemptId,
+      principal: request.principal
     });
   }
 
+  // Explicit re-arm after abort. Re-validates the receipt against the recorded
+  // run AND the live plan/target contract (freshness proof), then opens a new
+  // attempt. The aborted attempt identity is never reused.
+  async rearmCutover(request, { receipt, reason } = {}) {
+    this.#open(); requireRequest(request);
+    if (typeof reason !== 'string' || !reason.trim() || reason.length > 256) fail('INVALID_CUTOVER_REQUEST', 're-arm reason must be a non-empty bounded string');
+    const { receiptKind, recorded } = await this.#validateCutoverArming(request, receipt);
+    const existing = this.runs.cutover(request.migrationId);
+    if (!existing) fail('CUTOVER_STATE_CONFLICT', 'Re-arm requires a previously aborted cutover attempt');
+    if (existing.status === 'COMMITTED') fail('CUTOVER_ALREADY_COMMITTED', 'A committed cutover cannot be re-armed');
+    // Freshness: the live plan and target contract must still match the receipt.
+    const prepared = await this.#prepare(request);
+    if (prepared.plan.planId !== recorded.planId) fail('CUTOVER_PLAN_CHANGED', 'Migration plan changed since the aborted attempt; re-plan before re-arming');
+    if (prepared.targetPreflight.targetContractId !== recorded.targetContractId) {
+      fail('CUTOVER_CONTRACT_CHANGED', 'Target contract changed since the aborted attempt; re-verify before re-arming', {
+        recordedTargetContractId: recorded.targetContractId,
+        actualTargetContractId: prepared.targetPreflight.targetContractId
+      });
+    }
+    const armedAt = new Date().toISOString();
+    const cutoverAttemptId = buildCutoverAttemptId({
+      migrationId: request.migrationId, receiptId: receipt.receiptId, receiptKind,
+      planId: recorded.planId, sourceStateId: recorded.sourceSnapshotId,
+      targetContractId: recorded.targetContractId, armedAt
+    });
+    return this.runs.rearmCutoverAtomic({
+      migrationId: request.migrationId,
+      principal: request.principal,
+      reason: reason.trim(),
+      receiptId: receipt.receiptId,
+      receiptKind,
+      planId: recorded.planId,
+      sourceSnapshotId: recorded.sourceSnapshotId,
+      targetIdentity: recorded.targetIdentity,
+      targetContractId: recorded.targetContractId,
+      armedAt,
+      cutoverAttemptId
+    });
+  }
+
+  // Recovery-aware cutover commit. The canonical state decides which phase
+  // executes, so killing the process at any cutover crash window and retrying
+  // deterministically resumes instead of duplicating or skipping proof:
+  // - COMPLETED -> return the committed record (idempotent success)
+  // - POST_CUTOVER_VERIFY -> resume completion with the bound post evidence
+  // - CUTOVER_COMMITTED -> run post-cutover verification, then complete
+  // - FINAL_VERIFY -> validate persisted final evidence, then commit
+  // - CUTOVER_ARMED/FINAL_DRAIN -> run final verification, then commit
+  // Anything else -> CUTOVER_NOT_ARMED. No protocol error is swallowed: every
+  // SpoolError propagates to the caller.
   async commitCutover(request) {
     this.#open(); requireRequest(request);
     const armed = this.runs.cutover(request.migrationId);
     if (!armed) fail('CUTOVER_NOT_ARMED', 'Cutover commit requires an armed cutover');
-    if (armed.status === 'COMMITTED') fail('CUTOVER_ALREADY_COMMITTED', 'Cutover is already committed');
-    if (armed.status !== 'ARMED') fail('CUTOVER_NOT_ARMED', 'Cutover commit requires an armed cutover');
+    if (armed.status === 'ABORTED') fail('CUTOVER_NOT_ARMED', 'Cutover attempt was aborted; call rearmCutover for a new attempt');
+    if (armed.status !== 'ARMED' && armed.status !== 'COMMITTED') fail('CUTOVER_NOT_ARMED', 'Cutover commit requires an armed cutover');
     const run = this.runs.get(request.migrationId);
     if (!run || (run.status !== 'COMPLETE' && run.status !== 'REPAIR_COMPLETE')) fail('CUTOVER_NOT_ALLOWED', 'Cutover requires a completed verified run');
     const prepared = await this.#prepare(request);
@@ -1186,145 +1187,136 @@ export class SpoolCommandService {
         actualTargetContractId: prepared.targetPreflight.targetContractId
       });
     }
+    if (!armed.cutoverAttemptId) fail('CUTOVER_ATTEMPT_MISMATCH', 'Armed cutover has no attempt identity; re-arm before committing');
     const targetExecution = await prepared.targetRuntime.createExecution({ migrationId: request.migrationId, targetRef: prepared.plan.targetRef });
     try {
       const lease = await targetExecution.renewLease();
-      // Durable pre-cutover validation: ensure durable state is CUTOVER_ARMED and move through FINAL_DRAIN/FINAL_VERIFY
-      const durableBefore = this.#durableState(request.migrationId);
-      if (durableBefore && durableBefore.currentState !== MIGRATION_STATES.CUTOVER_ARMED && durableBefore.currentState !== MIGRATION_STATES.FINAL_DRAIN && durableBefore.currentState !== MIGRATION_STATES.FINAL_VERIFY) {
-        if (durableBefore.currentState !== MIGRATION_STATES.READY_FOR_CUTOVER) {
-          fail('CUTOVER_NOT_ARMED', `Durable state ${durableBefore.currentState} is not CUTOVER_ARMED`);
+      // Open the shared execution: the coordinator verifies through it
+      // (ledger reads and content sessions require an opened target).
+      await targetExecution.openTarget();
+      const attemptId = armed.cutoverAttemptId;
+      const commandIdFor = step => `cutover:${attemptId}:${step}`;
+      let state = this.#durableState(request.migrationId);
+      if (!state) fail('CUTOVER_NOT_ALLOWED', 'Cutover commit requires durable migration state');
+      if (state.currentState === MIGRATION_STATES.COMPLETED) return this.runs.cutover(request.migrationId);
+
+      const verifier = createVerificationCoordinator();
+      const snapshotCdcBinding = this.runs.getSnapshotCdcBinding(request.migrationId);
+      const hasCdcSlot = Boolean(snapshotCdcBinding?.cdcSlot);
+      // Verification shares this commit's leased target execution: minting a
+      // second execution would trip single-writer lease ownership, and the
+      // commit fence must cover the proof it relies on.
+      const verifyInput = {
+        migrationId: request.migrationId,
+        plan: prepared.plan,
+        sourceState: prepared.snapshot ? { sourceStateId: prepared.snapshot.snapshotId } : null,
+        targetContract: prepared.targetPreflight,
+        targetExecution,
+        sourceRuntime: prepared.source,
+        snapshotCdcBinding,
+        cutoverAttemptId: attemptId,
+        release: this.release
+      };
+
+      // Phase 1: reach CUTOVER_COMMITTED with bound final evidence.
+      state = this.#durableState(request.migrationId);
+      if ([MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN, MIGRATION_STATES.FINAL_VERIFY].includes(state.currentState)) {
+        if (state.currentState === MIGRATION_STATES.CUTOVER_ARMED && hasCdcSlot) {
+          this.#durableTransition(request.migrationId, MIGRATION_STATES.FINAL_DRAIN, {
+            principal: request.principal, reason: 'final drain',
+            planId: prepared.plan.planId, sourceStateId: prepared.snapshot?.snapshotId ?? null,
+            targetContractId: prepared.targetPreflight.targetContractId, fenceToken: lease.fencingToken,
+            context: { fenceToken: lease.fencingToken, cutoverAttemptId: attemptId },
+            commandId: commandIdFor('final-drain')
+          });
+          state = this.#durableState(request.migrationId);
         }
-      }
-      // Advance durable states stepwise toward commit (idempotent)
-      try {
-        const cur = this.#durableState(request.migrationId);
-        if (cur && cur.currentState === MIGRATION_STATES.CUTOVER_ARMED) {
-          // For CDC, advance to FINAL_DRAIN first
-          const hasCdcBinding = this.runs.getSnapshotCdcBinding(request.migrationId);
-          if (hasCdcBinding && hasCdcBinding.cdcSlot) {
-            try { this.#durableTransition(request.migrationId, MIGRATION_STATES.FINAL_DRAIN, { principal: request.principal, reason: 'final drain', fenceToken: lease.fencingToken }); } catch {}
-          }
-          const cur2 = this.#durableState(request.migrationId);
-          if (cur2 && [MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN].includes(cur2.currentState)) {
-            // Execute FINAL_PRE_CUTOVER verification using VerificationCoordinator
-            const verifier = createVerificationCoordinator();
-            const snapshotCdcBinding = this.runs.getSnapshotCdcBinding(request.migrationId);
-            const finalVerification = await verifier.verify({
-              migrationId: request.migrationId,
-              mode: VERIFICATION_MODE.FINAL_PRE_CUTOVER,
-              plan: prepared.plan,
-              sourceState: prepared.snapshot ? { sourceStateId: prepared.snapshot.snapshotId } : null,
-              targetContract: prepared.targetPreflight,
-              targetRuntime: prepared.targetRuntime,
-              sourceRuntime: prepared.source,
-              snapshotCdcBinding,
-              expectedCdcPosition: hasCdcBinding?.cdcSlot ? (this.runs.getSnapshotCdcBinding(request.migrationId)?.appliedLsn ?? hasCdcBinding.cdcStartLsn) : null,
-              fenceToken: lease.fencingToken
-            });
-            if (!finalVerification || finalVerification.status !== 'VERIFIED') {
-              fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful final verification');
-            }
-            // Persist final verification evidence
-            this.runs.saveVerification(request.migrationId, finalVerification);
-            this.#durableTransition(request.migrationId, MIGRATION_STATES.FINAL_VERIFY, {
-              principal: request.principal,
-              reason: 'final verify',
-              planId: prepared.plan.planId,
-              sourceStateId: prepared.snapshot?.snapshotId ?? null,
-              targetContractId: prepared.targetPreflight.targetContractId,
-              fenceToken: lease.fencingToken,
-              evidence: { fencingToken: lease.fencingToken, finalVerificationId: finalVerification.verificationId },
-              context: { verificationId: finalVerification.verificationId }
-            });
-          }
-          const cur3 = this.#durableState(request.migrationId);
-          if (cur3 && cur3.currentState === MIGRATION_STATES.FINAL_VERIFY) {
-            const finalVerification = this.runs.getVerification(request.migrationId);
-            if (!finalVerification || finalVerification.status !== 'VERIFIED') {
-              fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful final verification');
-            }
-            this.#durableTransition(request.migrationId, MIGRATION_STATES.CUTOVER_COMMITTED, {
-              principal: request.principal,
-              reason: 'cutover committed',
-              planId: prepared.plan.planId,
-              sourceStateId: prepared.snapshot?.snapshotId ?? null,
-              targetContractId: prepared.targetPreflight.targetContractId,
-              fenceToken: lease.fencingToken,
-              evidence: { fencingToken: lease.fencingToken, targetContractId: prepared.targetPreflight.targetContractId, finalVerificationId: finalVerification.verificationId },
-              context: { fenceToken: lease.fencingToken, finalVerificationId: finalVerification.verificationId }
-            });
-          }
-        } else if (cur && cur.currentState === MIGRATION_STATES.FINAL_VERIFY) {
-          const finalVerification = this.runs.getVerification(request.migrationId);
+        if ([MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN].includes(state.currentState)) {
+          // Fresh FINAL_PRE_CUTOVER proof: executed now, never reused.
+          const finalVerification = await verifier.verify({
+            ...verifyInput,
+            mode: VERIFICATION_MODE.FINAL_PRE_CUTOVER,
+            expectedCdcPosition: hasCdcSlot ? (snapshotCdcBinding?.appliedLsn ?? snapshotCdcBinding?.cdcStartLsn ?? null) : null
+          });
           if (!finalVerification || finalVerification.status !== 'VERIFIED') {
-            fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful final verification');
+            fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful fresh final verification');
           }
-          this.#durableTransition(request.migrationId, MIGRATION_STATES.CUTOVER_COMMITTED, {
-            principal: request.principal,
-            reason: 'cutover committed',
+          this.runs.recordFinalVerificationAtomic({
+            migrationId: request.migrationId, principal: request.principal, verification: finalVerification,
+            fenceToken: lease.fencingToken, planId: prepared.plan.planId,
+            sourceStateId: prepared.snapshot?.snapshotId ?? null,
+            targetContractId: prepared.targetPreflight.targetContractId,
+            commandId: commandIdFor('final-verify')
+          });
+          state = this.#durableState(request.migrationId);
+        }
+        if (state.currentState === MIGRATION_STATES.FINAL_VERIFY) {
+          const decidedAt = new Date().toISOString();
+          const persisted = this.runs.findVerification({
+            migrationId: request.migrationId, mode: VERIFICATION_MODE.FINAL_PRE_CUTOVER, cutoverAttemptId: attemptId
+          });
+          if (!persisted) fail('VERIFICATION_REQUIRED', 'FINAL_VERIFY has no persisted final verification for this attempt; re-run final verification');
+          this.runs.commitCutoverAtomic({
+            migrationId: request.migrationId, principal: request.principal,
+            commitEvidence: {
+              targetContractId: prepared.targetPreflight.targetContractId,
+              leaseResource: targetExecution.leaseResource ?? null,
+              fencingToken: lease.fencingToken,
+              fenced: true,
+              committedAt: decidedAt
+            },
+            decidedAt,
+            finalVerificationId: persisted.verificationId,
+            fenceToken: lease.fencingToken,
             planId: prepared.plan.planId,
             sourceStateId: prepared.snapshot?.snapshotId ?? null,
             targetContractId: prepared.targetPreflight.targetContractId,
-            fenceToken: lease.fencingToken,
-            evidence: { fencingToken: lease.fencingToken, targetContractId: prepared.targetPreflight.targetContractId, finalVerificationId: finalVerification.verificationId },
-            context: { fenceToken: lease.fencingToken, finalVerificationId: finalVerification.verificationId }
+            commandId: commandIdFor('commit')
+          });
+          state = this.#durableState(request.migrationId);
+        }
+      }
+      if (state.currentState !== MIGRATION_STATES.CUTOVER_COMMITTED) {
+        fail('CUTOVER_NOT_ARMED', `Cutover commit requires durable state CUTOVER_ARMED/FINAL_DRAIN/FINAL_VERIFY, not ${state.currentState}`);
+      }
+
+      // Phase 2: fresh POST_CUTOVER proof, then COMPLETED. The atomic
+      // record operation owns the CUTOVER_COMMITTED -> POST_CUTOVER_VERIFY
+      // transition together with the evidence save.
+      const commitSeq = this.#cutoverCommitSequence(request.migrationId);
+      state = this.#durableState(request.migrationId);
+      if (state.currentState === MIGRATION_STATES.POST_CUTOVER_VERIFY) {
+        let post = this.runs.findVerification({
+          migrationId: request.migrationId, mode: VERIFICATION_MODE.POST_CUTOVER, cutoverAttemptId: attemptId
+        });
+        if (!post) {
+          post = await verifier.verify({
+            ...verifyInput,
+            mode: VERIFICATION_MODE.POST_CUTOVER,
+            expectedCdcPosition: snapshotCdcBinding?.appliedLsn ?? null
+          });
+          if (!post || post.status !== 'VERIFIED') {
+            fail('VERIFICATION_REQUIRED', 'COMPLETED requires a successful fresh post-cutover verification');
+          }
+          this.runs.recordPostCutoverVerificationAtomic({
+            migrationId: request.migrationId, principal: request.principal, verification: post,
+            commandId: commandIdFor('post-verify')
           });
         }
-      } catch (error) {
-        if (['RUN_STATE_CORRUPT','ILLEGAL_STATE_TRANSITION','FENCE_REQUIRED','VERIFICATION_REQUIRED','STALE_TRANSITION_VERSION'].includes(error?.code)) throw error;
-      }
-      const decidedAt = new Date().toISOString();
-      const result = this.runs.commitCutover({
-        migrationId: request.migrationId,
-        commitEvidence: {
+        // No unauthorized SPOOL mutation may have occurred between the cutover
+        // decision and this check: only the post-verification path transitions
+        // are legal after the commit sequence.
+        this.#assertNoPostCommitMutation(request.migrationId, commitSeq);
+        this.runs.completeMigrationAtomic({
+          migrationId: request.migrationId, principal: request.principal,
+          postCutoverVerificationId: post.verificationId,
+          planId: prepared.plan.planId,
+          sourceStateId: prepared.snapshot?.snapshotId ?? null,
           targetContractId: prepared.targetPreflight.targetContractId,
-          leaseResource: targetExecution.leaseResource ?? null,
-          fencingToken: lease.fencingToken,
-          fenced: true,
-          committedAt: decidedAt
-        },
-        decidedAt
-      });
-      // Post-commit durable: CUTOVER_COMMITTED -> POST_CUTOVER_VERIFY -> COMPLETED
-      try {
-        const cur = this.#durableState(request.migrationId);
-        if (cur && cur.currentState === MIGRATION_STATES.CUTOVER_COMMITTED) {
-          this.#durableTransition(request.migrationId, MIGRATION_STATES.POST_CUTOVER_VERIFY, { principal: request.principal, reason: 'post cutover verify', planId: prepared.plan.planId, targetContractId: prepared.targetPreflight.targetContractId });
-          const cur2 = this.#durableState(request.migrationId);
-          if (cur2 && cur2.currentState === MIGRATION_STATES.POST_CUTOVER_VERIFY) {
-            // Execute POST_CUTOVER verification using VerificationCoordinator
-            const verifier = createVerificationCoordinator();
-            const postCutoverVerification = await verifier.verify({
-              migrationId: request.migrationId,
-              mode: VERIFICATION_MODE.POST_CUTOVER,
-              plan: prepared.plan,
-              sourceState: prepared.snapshot ? { sourceStateId: prepared.snapshot.snapshotId } : null,
-              targetContract: prepared.targetPreflight,
-              targetRuntime: prepared.targetRuntime,
-              sourceRuntime: prepared.source,
-              snapshotCdcBinding: this.runs.getSnapshotCdcBinding(request.migrationId),
-              expectedCdcPosition: this.runs.getSnapshotCdcBinding(request.migrationId)?.appliedLsn ?? null,
-              fenceToken: lease.fencingToken
-            });
-            if (!postCutoverVerification || postCutoverVerification.status !== 'VERIFIED') {
-              fail('VERIFICATION_REQUIRED', 'COMPLETED requires a successful post-cutover verification');
-            }
-            this.runs.saveVerification(request.migrationId, postCutoverVerification);
-            this.#durableTransition(request.migrationId, MIGRATION_STATES.COMPLETED, {
-              principal: request.principal,
-              reason: 'completed',
-              planId: prepared.plan.planId,
-              targetContractId: prepared.targetPreflight.targetContractId,
-              evidence: { verification: postCutoverVerification },
-              context: { verification: postCutoverVerification, postCutoverVerification }
-            });
-          }
-        }
-      } catch (error) {
-        if (['RUN_STATE_CORRUPT','STALE_TRANSITION_VERSION'].includes(error?.code)) throw error;
+          commandId: commandIdFor('complete')
+        });
       }
-      return result;
+      return this.runs.cutover(request.migrationId);
     } finally {
       await targetExecution.close();
     }
@@ -1338,16 +1330,20 @@ export class SpoolCommandService {
     if (!armed) fail('CUTOVER_NOT_ARMED', 'Cutover abort requires an armed cutover');
     if (armed.status === 'COMMITTED') fail('CUTOVER_ALREADY_COMMITTED', 'A committed cutover cannot be aborted');
     if (armed.status !== 'ARMED') fail('CUTOVER_NOT_ARMED', 'Cutover abort requires an armed cutover');
-    // Durable: CUTOVER_ARMED -> ABORTED
-    try {
-      const cur = this.#durableState(migrationId);
-      if (cur && cur.currentState === MIGRATION_STATES.CUTOVER_ARMED) {
-        this.#durableTransition(migrationId, MIGRATION_STATES.ABORTED, { principal: 'system', reason: reason.trim() });
-      }
-    } catch (error) {
-      if (['RUN_STATE_CORRUPT','ILLEGAL_STATE_TRANSITION','STALE_TRANSITION_VERSION'].includes(error?.code)) throw error;
-    }
-    return this.runs.abortCutover({ migrationId, reason: reason.trim(), decidedAt: new Date().toISOString() });
+    // Atomic: cutover row + canonical transition commit together. Abort is
+    // legal from CUTOVER_ARMED, FINAL_DRAIN and FINAL_VERIFY.
+    return this.runs.abortCutoverAtomic({
+      migrationId, principal: 'system', reason: reason.trim(), decidedAt: new Date().toISOString()
+    });
+  }
+
+  // Operator-initiated recovery from FAILED_RECOVERABLE toward a safe resume
+  // point, backed by durable evidence (checkpoint for FULL_LOAD_RUNNING).
+  async beginRecovery(request, { targetState, reason } = {}) {
+    this.#open(); requireRequest(request);
+    return this.runs.beginRecovery({
+      migrationId: request.migrationId, principal: request.principal, reason, targetState
+    });
   }
 
   cutover(migrationId) { this.#open(); return this.runs.cutover(migrationId); }
