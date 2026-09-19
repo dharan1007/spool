@@ -164,6 +164,10 @@ class MssqlTargetRuntime {
   createExecution({ migrationId, targetRef } = {}) {
     return new MssqlTargetExecution({ migrationId, targetRef, credentialBroker: this.credentialBroker, leaseTtlMs: this.leaseTtlMs });
   }
+
+  async close() {
+    // No persistent connections at runtime level; executions manage their own connections
+  }
 }
 
 export function createMssqlTargetRuntime({ credentialBroker, leaseTtlMs = DEFAULT_LEASE_TTL_MS } = {}) {

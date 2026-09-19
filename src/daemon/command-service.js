@@ -45,6 +45,7 @@ import {
   buildSnapshotCdcBinding,
   decideRecoveryAction
 } from '../protocol/migration-state-machine.js';
+import { createVerificationCoordinator, VERIFICATION_MODE } from '../protocol/verification-coordinator.js';
 
 export { migrationRequestSemanticId } from './request-semantics.js';
 
@@ -1199,68 +1200,33 @@ export class SpoolCommandService {
       try {
         const cur = this.#durableState(request.migrationId);
         if (cur && cur.currentState === MIGRATION_STATES.CUTOVER_ARMED) {
-          // For non-CDC, we can go directly to FINAL_VERIFY
+          // For CDC, advance to FINAL_DRAIN first
           const hasCdcBinding = this.runs.getSnapshotCdcBinding(request.migrationId);
           if (hasCdcBinding && hasCdcBinding.cdcSlot) {
             try { this.#durableTransition(request.migrationId, MIGRATION_STATES.FINAL_DRAIN, { principal: request.principal, reason: 'final drain', fenceToken: lease.fencingToken }); } catch {}
           }
           const cur2 = this.#durableState(request.migrationId);
           if (cur2 && [MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN].includes(cur2.currentState)) {
-            // Execute a real final verification before FINAL_VERIFY transition
-            let finalVerification = this.runs.get(request.migrationId)?.verification;
+            // Execute FINAL_PRE_CUTOVER verification using VerificationCoordinator
+            const verifier = createVerificationCoordinator();
+            const snapshotCdcBinding = this.runs.getSnapshotCdcBinding(request.migrationId);
+            const finalVerification = await verifier.verify({
+              migrationId: request.migrationId,
+              mode: VERIFICATION_MODE.FINAL_PRE_CUTOVER,
+              plan: prepared.plan,
+              sourceState: prepared.snapshot ? { sourceStateId: prepared.snapshot.snapshotId } : null,
+              targetContract: prepared.targetPreflight,
+              targetRuntime: prepared.targetRuntime,
+              sourceRuntime: prepared.source,
+              snapshotCdcBinding,
+              expectedCdcPosition: hasCdcBinding?.cdcSlot ? (this.runs.getSnapshotCdcBinding(request.migrationId)?.appliedLsn ?? hasCdcBinding.cdcStartLsn) : null,
+              fenceToken: lease.fencingToken
+            });
             if (!finalVerification || finalVerification.status !== 'VERIFIED') {
               fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful final verification');
             }
-            // Re-execute content verification against current target state to produce fresh evidence
-            if (prepared.targetRuntime && typeof prepared.targetRuntime.createExecution === 'function') {
-              const verifyExecution = await prepared.targetRuntime.createExecution({ migrationId: request.migrationId, targetRef: prepared.plan.targetRef });
-              try {
-                const verifyLease = await verifyExecution.renewLease();
-                const hasContentVerify = typeof verifyExecution.withContentVerifier === 'function';
-                if (hasContentVerify) {
-                  const contentVerify = await verifyExecution.withContentVerifier(
-                    { targetSchema: prepared.plan.targetSchema, targetContractId: prepared.targetPreflight.targetContractId },
-                    async verifier => {
-                      const { MigrationEngine } = await import('../../core/migration.js');
-                      const replayAccumulator = new MigrationEngine().createAccumulator(prepared.plan.mapping, prepared.plan.mappingRevision, prepared.plan.targetSchema);
-                      let expectedRows = [];
-                      let replayLastSeen = -1;
-                      let ordinal = 0;
-                      for await (const { rowIndex, row } of prepared.source.streamRows()) {
-                        replayLastSeen = rowIndex;
-                        const transformed = replayAccumulator.process(row, rowIndex);
-                        if (transformed.ok) expectedRows.push(transformed.row);
-                        const sourceRangeStart = Math.floor(rowIndex / prepared.plan.writeStrategy.batchSize) * prepared.plan.writeStrategy.batchSize;
-                        const sourceRangeEnd = Math.min(prepared.sourceRows, sourceRangeStart + prepared.plan.writeStrategy.batchSize);
-                        if (rowIndex + 1 === sourceRangeEnd) {
-                          await verifyLease.renewLease();
-                          const contentProof = await verifier.verifyBatch(expectedRows);
-                          ordinal += 1;
-                          expectedRows = [];
-                        }
-                      }
-                      return contentProof;
-                    }
-                  );
-                  finalVerification = Object.freeze({ ...finalVerification, content: contentVerify });
-                } else {
-                  // Basic verification re-execution
-                  const basicVerify = await verifyExecution.verifyContent({
-                    expectedRows: [], // Would need full replay - skip for now
-                    targetSchema: prepared.plan.targetSchema,
-                    targetContractId: prepared.targetPreflight.targetContractId
-                  });
-                  finalVerification = Object.freeze({ ...finalVerification, content: basicVerify });
-                }
-                await verifyExecution.close();
-              } catch (e) {
-                // If re-verification fails, keep original but log
-                await verifyExecution.close().catch(() => {});
-              }
-            }
-            if (!finalVerification || finalVerification.status !== 'VERIFIED') {
-              fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful final verification');
-            }
+            // Persist final verification evidence
+            this.runs.saveVerification(request.migrationId, finalVerification);
             this.#durableTransition(request.migrationId, MIGRATION_STATES.FINAL_VERIFY, {
               principal: request.principal,
               reason: 'final verify',
@@ -1268,13 +1234,13 @@ export class SpoolCommandService {
               sourceStateId: prepared.snapshot?.snapshotId ?? null,
               targetContractId: prepared.targetPreflight.targetContractId,
               fenceToken: lease.fencingToken,
-              evidence: { fencingToken: lease.fencingToken },
-              context: { verification: finalVerification }
+              evidence: { fencingToken: lease.fencingToken, finalVerificationId: finalVerification.verificationId },
+              context: { verificationId: finalVerification.verificationId }
             });
           }
           const cur3 = this.#durableState(request.migrationId);
           if (cur3 && cur3.currentState === MIGRATION_STATES.FINAL_VERIFY) {
-            const finalVerification = this.runs.get(request.migrationId)?.verification;
+            const finalVerification = this.runs.getVerification(request.migrationId);
             if (!finalVerification || finalVerification.status !== 'VERIFIED') {
               fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful final verification');
             }
@@ -1285,12 +1251,12 @@ export class SpoolCommandService {
               sourceStateId: prepared.snapshot?.snapshotId ?? null,
               targetContractId: prepared.targetPreflight.targetContractId,
               fenceToken: lease.fencingToken,
-              evidence: { fencingToken: lease.fencingToken, targetContractId: prepared.targetPreflight.targetContractId },
-              context: { fenceToken: lease.fencingToken, finalVerification }
+              evidence: { fencingToken: lease.fencingToken, targetContractId: prepared.targetPreflight.targetContractId, finalVerificationId: finalVerification.verificationId },
+              context: { fenceToken: lease.fencingToken, finalVerificationId: finalVerification.verificationId }
             });
           }
         } else if (cur && cur.currentState === MIGRATION_STATES.FINAL_VERIFY) {
-          const finalVerification = this.runs.get(request.migrationId)?.verification;
+          const finalVerification = this.runs.getVerification(request.migrationId);
           if (!finalVerification || finalVerification.status !== 'VERIFIED') {
             fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful final verification');
           }
@@ -1301,8 +1267,8 @@ export class SpoolCommandService {
             sourceStateId: prepared.snapshot?.snapshotId ?? null,
             targetContractId: prepared.targetPreflight.targetContractId,
             fenceToken: lease.fencingToken,
-            evidence: { fencingToken: lease.fencingToken, targetContractId: prepared.targetPreflight.targetContractId },
-            context: { fenceToken: lease.fencingToken, finalVerification }
+            evidence: { fencingToken: lease.fencingToken, targetContractId: prepared.targetPreflight.targetContractId, finalVerificationId: finalVerification.verificationId },
+            context: { fenceToken: lease.fencingToken, finalVerificationId: finalVerification.verificationId }
           });
         }
       } catch (error) {
@@ -1327,10 +1293,24 @@ export class SpoolCommandService {
           this.#durableTransition(request.migrationId, MIGRATION_STATES.POST_CUTOVER_VERIFY, { principal: request.principal, reason: 'post cutover verify', planId: prepared.plan.planId, targetContractId: prepared.targetPreflight.targetContractId });
           const cur2 = this.#durableState(request.migrationId);
           if (cur2 && cur2.currentState === MIGRATION_STATES.POST_CUTOVER_VERIFY) {
-            const postCutoverVerification = this.runs.get(request.migrationId)?.verification;
+            // Execute POST_CUTOVER verification using VerificationCoordinator
+            const verifier = createVerificationCoordinator();
+            const postCutoverVerification = await verifier.verify({
+              migrationId: request.migrationId,
+              mode: VERIFICATION_MODE.POST_CUTOVER,
+              plan: prepared.plan,
+              sourceState: prepared.snapshot ? { sourceStateId: prepared.snapshot.snapshotId } : null,
+              targetContract: prepared.targetPreflight,
+              targetRuntime: prepared.targetRuntime,
+              sourceRuntime: prepared.source,
+              snapshotCdcBinding: this.runs.getSnapshotCdcBinding(request.migrationId),
+              expectedCdcPosition: this.runs.getSnapshotCdcBinding(request.migrationId)?.appliedLsn ?? null,
+              fenceToken: lease.fencingToken
+            });
             if (!postCutoverVerification || postCutoverVerification.status !== 'VERIFIED') {
               fail('VERIFICATION_REQUIRED', 'COMPLETED requires a successful post-cutover verification');
             }
+            this.runs.saveVerification(request.migrationId, postCutoverVerification);
             this.#durableTransition(request.migrationId, MIGRATION_STATES.COMPLETED, {
               principal: request.principal,
               reason: 'completed',
@@ -1391,5 +1371,17 @@ export class SpoolCommandService {
     return decideRecoveryAction({ currentState: state.currentState, lastTransition: state, snapshotCdcBinding: binding, checkpoint, verification, cutover });
   }
 
-  close() { if (!this.closed) { this.runs.close(); this.closed = true; } }
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    // Close all target runtimes
+    if (this.targetConnectors && this.targetConnectors.instances) {
+      for (const runtime of this.targetConnectors.instances.values()) {
+        if (runtime && typeof runtime.close === 'function') {
+          try { runtime.close(); } catch {}
+        }
+      }
+    }
+    this.runs.close();
+  }
 }

@@ -277,5 +277,7 @@ export class SqliteTarget {
     if (this.closed) return;
     this.db.close();
     this.closed = true;
+    // Small delay to allow OS to release file locks on Windows
+    const start = Date.now(); while (Date.now() - start < 50) {}
   }
 }

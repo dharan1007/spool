@@ -100,6 +100,15 @@ export class RunStore {
         armed_at TEXT NOT NULL,
         decided_at TEXT
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS spool_verifications (
+        migration_id TEXT NOT NULL,
+        verification_id TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        verification_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (migration_id, verification_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS spool_verifications_migration_mode ON spool_verifications(migration_id, mode);
       CREATE TABLE IF NOT EXISTS spool_migration_state (
         migration_id TEXT PRIMARY KEY NOT NULL,
         run_id TEXT NOT NULL,
@@ -927,11 +936,41 @@ export class RunStore {
   clearCheckpoint(migrationId) {
     this.#open(); this.db.prepare('DELETE FROM spool_checkpoints WHERE migration_id=?').run(text(migrationId, 'migrationId'));
   }
+
+  saveVerification(migrationId, verification) {
+    this.#open(); text(migrationId, 'migrationId');
+    if (!verification || typeof verification !== 'object') fail('INVALID_VERIFICATION', 'Verification record is required');
+    if (!verification.verificationId) fail('INVALID_VERIFICATION', 'Verification ID is required');
+    const verificationJson = canonicalJson(verification);
+    this.db.prepare(`
+      INSERT INTO spool_verifications (migration_id, verification_id, mode, verification_json, created_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(migration_id, verification_id) DO UPDATE SET
+        mode=excluded.mode, verification_json=excluded.verification_json
+    `).run(text(migrationId, 'migrationId'), text(verification.verificationId, 'verificationId'), text(verification.mode, 'mode'), verificationJson, text(new Date().toISOString(), 'createdAt'));
+  }
+
+  getVerification(migrationId) {
+    this.#open(); text(migrationId, 'migrationId');
+    const row = this.db.prepare('SELECT verification_json FROM spool_verifications WHERE migration_id = ? ORDER BY created_at DESC LIMIT 1').get(migrationId);
+    if (!row) return null;
+    return Object.freeze(JSON.parse(row.verification_json));
+  }
+
+  getVerificationById(migrationId, verificationId) {
+    this.#open(); text(migrationId, 'migrationId'); text(verificationId, 'verificationId');
+    const row = this.db.prepare('SELECT verification_json FROM spool_verifications WHERE migration_id = ? AND verification_id = ?').get(migrationId, verificationId);
+    if (!row) return null;
+    return Object.freeze(JSON.parse(row.verification_json));
+  }
+
   close() {
     if (!this.closed) {
       try { this.db.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
       this.db.close();
       this.closed = true;
+      // Small delay to allow OS to release file locks on Windows
+      const start = Date.now(); while (Date.now() - start < 50) {}
     }
   }
 }

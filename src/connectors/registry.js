@@ -32,6 +32,7 @@ function enforceRequirements(descriptor, requirements = {}) {
 export class ConnectorRegistry {
   constructor() {
     this.registrations = new Map();
+    this.instances = new Map();
   }
 
   register(descriptorInput, factory) {
@@ -69,6 +70,14 @@ export class ConnectorRegistry {
 
     const opened = await registration.factory({ descriptor: registration.descriptor, config, context });
     if (!opened || typeof opened !== 'object') fail('INVALID_CONNECTOR_RUNTIME', `Connector ${name} factory did not return a runtime object`);
+
+    // Track opened instances for cleanup
+    const instanceKey = `${role}:${name}`;
+    if (!this.instances.has(instanceKey)) {
+      this.instances.set(instanceKey, new Set());
+    }
+    this.instances.get(instanceKey).add(opened);
+
     return opened;
   }
 }

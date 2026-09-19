@@ -165,6 +165,10 @@ class MysqlTargetRuntime {
   createExecution({ migrationId, targetRef } = {}) {
     return new MysqlTargetExecution({ migrationId, targetRef, credentialBroker: this.credentialBroker, leaseTtlMs: this.leaseTtlMs });
   }
+
+  async close() {
+    // No persistent connections at runtime level; executions manage their own connections
+  }
 }
 
 export function createMysqlTargetRuntime({ credentialBroker, leaseTtlMs = DEFAULT_LEASE_TTL_MS } = {}) {
