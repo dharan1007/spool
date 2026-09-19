@@ -1290,6 +1290,10 @@ export class SpoolCommandService {
             });
           }
         } else if (cur && cur.currentState === MIGRATION_STATES.FINAL_VERIFY) {
+          const finalVerification = this.runs.get(request.migrationId)?.verification;
+          if (!finalVerification || finalVerification.status !== 'VERIFIED') {
+            fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful final verification');
+          }
           this.#durableTransition(request.migrationId, MIGRATION_STATES.CUTOVER_COMMITTED, {
             principal: request.principal,
             reason: 'cutover committed',
@@ -1297,7 +1301,8 @@ export class SpoolCommandService {
             sourceStateId: prepared.snapshot?.snapshotId ?? null,
             targetContractId: prepared.targetPreflight.targetContractId,
             fenceToken: lease.fencingToken,
-            context: { fenceToken: lease.fencingToken, finalVerification: this.runs.get(request.migrationId)?.verification ?? { status: 'VERIFIED' } }
+            evidence: { fencingToken: lease.fencingToken, targetContractId: prepared.targetPreflight.targetContractId },
+            context: { fenceToken: lease.fencingToken, finalVerification }
           });
         }
       } catch (error) {

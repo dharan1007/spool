@@ -803,15 +803,16 @@ export class RunStore {
       if (state) {
         // REPAIRING -> REVERIFYING
         if (state.currentState === MIGRATION_STATES.REPAIRING) {
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.REVERIFYING, principal: 'system', reason: 'repair complete' }); } catch {}
+          this.transition(migrationId, { nextState: MIGRATION_STATES.REVERIFYING, principal: 'system', reason: 'repair complete' });
         }
         const cur = this.getMigrationState(migrationId);
         if (cur && cur.currentState === MIGRATION_STATES.REVERIFYING) {
           // reverify succeeded implies READY_FOR_CUTOVER
-          try {
-            const verification = repair.verification ?? repair?.receipt?.record?.verification ?? null;
-            this.transition(migrationId, { nextState: MIGRATION_STATES.READY_FOR_CUTOVER, principal: 'system', reason: 'reverified', context: { verification: verification ?? { status: 'VERIFIED' } } });
-          } catch {}
+          const verification = repair.verification ?? repair?.receipt?.record?.verification ?? null;
+          if (!verification || verification.status !== 'VERIFIED') {
+            fail('VERIFICATION_REQUIRED', 'READY_FOR_CUTOVER requires a successful reverification');
+          }
+          this.transition(migrationId, { nextState: MIGRATION_STATES.READY_FOR_CUTOVER, principal: 'system', reason: 'reverified', context: { verification } });
         }
       }
     } catch (e) { if (e?.code === 'RUN_STATE_CORRUPT') throw e; }
@@ -841,13 +842,9 @@ export class RunStore {
     try {
       const state = this.getMigrationState(migrationId);
       if (state && state.currentState === MIGRATION_STATES.READY_FOR_CUTOVER) {
-        try { this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_ARMED, principal: 'system', reason: 'cutover armed', planId, sourceStateId: sourceSnapshotId, targetContractId, evidence: { receiptId, receiptKind } }); } catch {}
+        this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_ARMED, principal: 'system', reason: 'cutover armed', planId, sourceStateId: sourceSnapshotId, targetContractId, evidence: { receiptId, receiptKind } });
       } else if (state && state.currentState === MIGRATION_STATES.ABORTED) {
-        try { this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_ARMED, principal: 'system', reason: 'cutover re-armed', planId, sourceStateId: sourceSnapshotId, targetContractId, evidence: { receiptId, receiptKind } }); } catch {
-          // fallback to READY_FOR_CUTOVER then ARMED
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.READY_FOR_CUTOVER, principal: 'system', reason: 're-arm via ready', context: { verification: { status: 'VERIFIED' } } }); } catch {}
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_ARMED, principal: 'system', reason: 'cutover re-armed', planId, sourceStateId: sourceSnapshotId, targetContractId }); } catch {}
-        }
+        this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_ARMED, principal: 'system', reason: 'cutover re-armed', planId, sourceStateId: sourceSnapshotId, targetContractId, evidence: { receiptId, receiptKind } });
       }
     } catch (e) { if (e?.code === 'RUN_STATE_CORRUPT') throw e; }
     return this.cutover(migrationId);
@@ -862,26 +859,18 @@ export class RunStore {
     try {
       const state = this.getMigrationState(migrationId);
       if (state) {
-        // CUTOVER_ARMED -> FINAL_DRAIN -> FINAL_VERIFY -> CUTOVER_COMMITTED  (or direct if not using drain)
+        // CUTOVER_ARMED -> FINAL_VERIFY -> CUTOVER_COMMITTED
+        // Require that FINAL_VERIFY transition includes real verification evidence in context
         if (state.currentState === MIGRATION_STATES.CUTOVER_ARMED) {
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.FINAL_VERIFY, principal: 'system', reason: 'cutover commit', fenceToken: commitEvidence.fencingToken, context: { fenceToken: commitEvidence.fencingToken, finalVerification: { status: 'VERIFIED' } } }); } catch {
-            try { this.transition(migrationId, { nextState: MIGRATION_STATES.FINAL_DRAIN, principal: 'system', reason: 'cutover final drain' }); } catch {}
-            const cur = this.getMigrationState(migrationId);
-            if (cur && cur.currentState === MIGRATION_STATES.FINAL_DRAIN) {
-              try { this.transition(migrationId, { nextState: MIGRATION_STATES.FINAL_VERIFY, principal: 'system', reason: 'final verify' }); } catch {}
-            }
-          }
+          this.transition(migrationId, { nextState: MIGRATION_STATES.FINAL_VERIFY, principal: 'system', reason: 'cutover commit', fenceToken: commitEvidence.fencingToken });
         }
-        if (state.currentState === MIGRATION_STATES.FINAL_VERIFY || state.currentState === MIGRATION_STATES.FINAL_DRAIN) {
-          // advance to FINAL_VERIFY if needed
-          const cur = this.getMigrationState(migrationId);
-          if (cur && cur.currentState === MIGRATION_STATES.FINAL_DRAIN) {
-            try { this.transition(migrationId, { nextState: MIGRATION_STATES.FINAL_VERIFY, principal: 'system', reason: 'final verify' }); } catch {}
-          }
+        const cur = this.getMigrationState(migrationId);
+        if (cur && cur.currentState === MIGRATION_STATES.FINAL_DRAIN) {
+          this.transition(migrationId, { nextState: MIGRATION_STATES.FINAL_VERIFY, principal: 'system', reason: 'final verify' });
         }
         const cur2 = this.getMigrationState(migrationId);
         if (cur2 && [MIGRATION_STATES.FINAL_VERIFY, MIGRATION_STATES.CUTOVER_ARMED].includes(cur2.currentState)) {
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_COMMITTED, principal: 'system', reason: 'cutover committed', fenceToken: commitEvidence.fencingToken, context: { fenceToken: commitEvidence.fencingToken, finalVerification: { status: 'VERIFIED' } } }); } catch {}
+          this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_COMMITTED, principal: 'system', reason: 'cutover committed', fenceToken: commitEvidence.fencingToken });
         }
       }
     } catch (e) { if (e?.code === 'RUN_STATE_CORRUPT') throw e; }
@@ -896,7 +885,7 @@ export class RunStore {
     try {
       const state = this.getMigrationState(migrationId);
       if (state && state.currentState === MIGRATION_STATES.CUTOVER_ARMED) {
-        try { this.transition(migrationId, { nextState: MIGRATION_STATES.ABORTED, principal: 'system', reason }); } catch {}
+        this.transition(migrationId, { nextState: MIGRATION_STATES.ABORTED, principal: 'system', reason });
       }
     } catch (e) { if (e?.code === 'RUN_STATE_CORRUPT') throw e; }
     return this.cutover(migrationId);

@@ -280,12 +280,10 @@ export function assertTransitionPreconditions({ from, to, context = {} } = {}) {
       if (!binding.snapshotLsn || !LSN.test(binding.snapshotLsn)) fail('CDC_BINDING_REQUIRED', 'CDC binding requires a valid snapshotLsn');
       // snapshot LSN must be <= start LSN (CDC covers after S)
       // We compare by bigint; if start < snapshot, it's an unobserved window
-      try {
-        const toBig = v => { const [hi, lo] = v.split('/'); return (BigInt(`0x${hi}`) << 32n) | BigInt(`0x${lo}`); };
-        if (toBig(binding.cdcStartLsn) < toBig(binding.snapshotLsn)) {
-          fail('CDC_GAP', 'CDC start LSN is before snapshot LSN — unobserved window');
-        }
-      } catch { /* already validated */ }
+      const toBig = v => { const [hi, lo] = v.split('/'); return (BigInt(`0x${hi}`) << 32n) | BigInt(`0x${lo}`); };
+      if (toBig(binding.cdcStartLsn) < toBig(binding.snapshotLsn)) {
+        fail('CDC_GAP', 'CDC start LSN is before snapshot LSN — unobserved window');
+      }
       // exported snapshot token if present must be valid
       if (binding.exportedSnapshotId != null && binding.exportedSnapshotId !== '' && !SNAPSHOT_TOKEN.test(binding.exportedSnapshotId)) {
         fail('INVALID_SNAPSHOT_TOKEN', 'exportedSnapshotId is invalid');
