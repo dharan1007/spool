@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
+import { statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { resolveProfile, formatProfile } from './profiles.js';
 import { captureEnvironment } from './environment.js';
 import { EvidenceWriter } from './evidence-writer.js';
 import { ResourceSampler } from './sampler.js';
 import { datasetId } from './dataset.js';
-import { writeSha256Sums, verifySha256Sums } from './checksums.js';
+import { writeSha256Sums } from './checksums.js';
+import { REQUIRED_SCENARIOS, requiredScenarioNames, foldScenarioFailures } from './scenarios.js';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -124,7 +125,9 @@ async function main() {
   await evidenceWriter.writeJson('config.json', config);
   await evidenceWriter.writeJson('environment.json', env);
 
-  // Preflight: check PG replication settings, disk space, etc.
+  // Preflight: PG replication settings and real disk headroom. Any preflight
+  // failure fails the run: an unmeasured environment cannot produce a
+  // trustworthy qualification verdict.
   const preflightFailures = [];
   try {
     const { Client } = await import('pg');
@@ -135,27 +138,37 @@ async function main() {
       preflightFailures.push({ scenario: 'preflight', code: 'WAL_LEVEL_NOT_LOGICAL', message: `wal_level=${walRes.rows[0].wal_level}, CDC requires logical`, expected: false, classification: 'ENVIRONMENT', timestamp: new Date().toISOString() });
     }
     await c.end();
-    // Disk check: try to estimate needed space
-    const neededBytes = profile.rows * (profile.payloadBytes + 200) * 2; // source + target + WAL headroom
-    const freeBytes = os.freemem(); // approximate, not disk but memory; we check disk via statfs if available
-    // We don't fail on disk for CI, just warn
-    if (neededBytes > 10 * 1024 * 1024 * 1024 && profile.name !== 'CI') {
-      // For LARGE, warn
-    }
   } catch (e) {
     preflightFailures.push({ scenario: 'preflight', code: 'PREFLIGHT_ERROR', message: e.message, expected: false, classification: 'ENVIRONMENT', timestamp: new Date().toISOString() });
   }
+  // Real disk measurement (statfs on the evidence directory): source
+  // materialization plus target-side staging plus WAL headroom. Memory free
+  // is not disk free; the old freemem approximation is gone.
+  try {
+    const stats = statfsSync(runDir);
+    const availableBytes = Number(stats.bavail) * Number(stats.bsize);
+    const neededBytes = Math.ceil(profile.rows * (profile.payloadBytes + 512) * 3);
+    if (!Number.isSafeInteger(availableBytes) || !Number.isSafeInteger(neededBytes)) {
+      throw new Error('statfs returned non-numeric capacity');
+    }
+    if (availableBytes < neededBytes) {
+      preflightFailures.push({ scenario: 'preflight', code: 'INSUFFICIENT_DISK', message: `available ${availableBytes} bytes < required ${neededBytes} bytes for profile ${profile.name}`, expected: false, classification: 'ENVIRONMENT', timestamp: new Date().toISOString() });
+    } else {
+      metrics.preflight = { status: 'PASS', availableBytes, neededBytes };
+    }
+  } catch (e) {
+    preflightFailures.push({ scenario: 'preflight', code: 'DISK_UNMEASURABLE', message: `Disk headroom cannot be measured: ${e.message}`, expected: false, classification: 'ENVIRONMENT', timestamp: new Date().toISOString() });
+  }
   if (preflightFailures.length) {
     failures.push(...preflightFailures);
-    // If wal_level not logical and CDC required, mark expected refusal? But for CI we require logical; if not, fail
-    const hasCritical = preflightFailures.some(f => f.code === 'WAL_LEVEL_NOT_LOGICAL');
-    if (hasCritical) {
-      overallResult = 'FAIL';
-      // Still continue? For CDC we would fail, but we can still run target load without CDC
-    }
+    overallResult = 'FAIL';
   }
 
-  // Helper to run scenario with timing and failure capture
+  // Helper to run scenario with timing and failure capture. Failures returned
+  // inside a result propagate exactly like thrown failures: any unexpected
+  // failure (not an expected refusal) fails the run. Recording a failure
+  // without failing was the old silent-PASS hole. The fold rule lives in
+  // scenarios.js (unit-tested) so the harness cannot drift from it.
   async function runScenario(name, fn) {
     const start = process.hrtime.bigint();
     const startWall = new Date().toISOString();
@@ -164,8 +177,10 @@ async function main() {
       const result = await fn();
       const ms = Number(process.hrtime.bigint() - start) / 1e6;
       evidenceWriter.appendRaw({ scenario: name, event: 'scenario_completed', durationMs: ms, timestamp: new Date().toISOString() });
-      metrics[name] = { ...result?.metrics, durationMs: ms, status: 'PASS' };
-      if (result?.failures?.length) failures.push(...result.failures);
+      const folded = foldScenarioFailures(result?.failures);
+      if (folded.failures.length) failures.push(...folded.failures);
+      metrics[name] = { ...result?.metrics, durationMs: ms, status: folded.status };
+      if (folded.status === 'FAIL') overallResult = 'FAIL';
       return result;
     } catch (e) {
       const ms = Number(process.hrtime.bigint() - start) / 1e6;
@@ -178,77 +193,11 @@ async function main() {
     }
   }
 
-  // Run scenarios sequentially (CI profile runs all but with reduced scale where needed)
-  // 1. Target load
-  const { runTargetLoad } = await import('./postgres/target-load.js');
-  await runScenario('postgres.target.load', () => runTargetLoad({ profile, seed, evidenceWriter, pgConfig, runId }));
-
-  // 2. Bulk COPY
-  const { runBulkLoad } = await import('./postgres/bulk-load.js');
-  await runScenario('postgres.bulk.load', () => runBulkLoad({ profile, seed, evidenceWriter, pgConfig, runId }));
-
-  // 3. Verification load
-  try {
-    const { runVerificationLoad } = await import('./postgres/verification-load.js');
-    await runScenario('postgres.content-exact.verification', () => runVerificationLoad({ profile, seed, evidenceWriter, pgConfig, runId }));
-  } catch (e) {
-    // If module not yet implemented, create stub
-    evidenceWriter.appendRaw({ scenario: 'postgres.content-exact.verification', event: 'stub', message: 'verification-load not yet implemented, using target verification as proxy' });
-    metrics['postgres.content-exact.verification'] = { status: 'PASS', note: 'stub, target verification already proved exact' };
-  }
-
-  // 4. Repair load
-  try {
-    const { runRepairLoad } = await import('./postgres/repair-load.js');
-    await runScenario('postgres.repair.load', () => runRepairLoad({ profile, seed, evidenceWriter, pgConfig, runId }));
-  } catch (e) {
-    evidenceWriter.appendRaw({ scenario: 'postgres.repair.load', event: 'stub', message: 'repair-load stub' });
-    metrics['postgres.repair.load'] = { status: 'PASS', note: 'stub' };
-  }
-
-  // 5. CDC soak (time-based)
-  try {
-    const { runCdcSoak } = await import('./postgres/cdc-soak.js');
-    await runScenario('postgres.cdc.soak', () => runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runId }));
-  } catch (e) {
-    evidenceWriter.appendRaw({ scenario: 'postgres.cdc.soak', event: 'stub', message: `cdc soak stub: ${e.message}` });
-    metrics['postgres.cdc.soak'] = { status: 'PASS', note: 'stub, CDC soak requires extended time' };
-  }
-
-  // 6. Worker load
-  try {
-    const { runWorkerLoad } = await import('./postgres/worker-load.js');
-    await runScenario('postgres.workers.load', () => runWorkerLoad({ profile, seed, evidenceWriter, pgConfig, runId }));
-  } catch (e) {
-    evidenceWriter.appendRaw({ scenario: 'postgres.workers.load', event: 'stub', message: 'worker stub' });
-    metrics['postgres.workers.load'] = { status: 'PASS', note: 'stub' };
-  }
-
-  // 7. Large transactions
-  try {
-    const { runLargeTransactions } = await import('./postgres/large-transactions.js');
-    await runScenario('postgres.largeTransactions', () => runLargeTransactions({ profile, seed, evidenceWriter, pgConfig, runId }));
-  } catch (e) {
-    evidenceWriter.appendRaw({ scenario: 'postgres.largeTransactions', event: 'stub', message: 'large tx stub' });
-    metrics['postgres.largeTransactions'] = { status: 'PASS', note: 'stub' };
-  }
-
-  // 8. Database source load
-  try {
-    const { runDatabaseSourceLoad } = await import('./postgres/database-source-load.js');
-    await runScenario('postgres.database-source.load', () => runDatabaseSourceLoad({ profile, seed, evidenceWriter, pgConfig, runId }));
-  } catch (e) {
-    evidenceWriter.appendRaw({ scenario: 'postgres.database-source.load', event: 'stub', message: 'db source stub' });
-    metrics['postgres.database-source.load'] = { status: 'PASS', note: 'stub' };
-  }
-
-  // 9. Crash recovery (real process fault)
-  try {
-    const { runCrashRecovery } = await import('./postgres/crash-recovery.js');
-    await runScenario('postgres.crashRecovery', () => runCrashRecovery({ profile, seed, evidenceWriter, pgConfig, runId }));
-  } catch (e) {
-    evidenceWriter.appendRaw({ scenario: 'postgres.crashRecovery', event: 'stub', message: 'crash recovery stub' });
-    metrics['postgres.crashRecovery'] = { status: 'PASS', note: 'stub' };
+  // Run every required scenario sequentially. The manifest (scenarios.js) is
+  // statically imported: no dynamic loading, no per-scenario try/catch, no
+  // stubs. A missing module crashes the harness instead of passing silently.
+  for (const entry of REQUIRED_SCENARIOS) {
+    await runScenario(entry.name, () => entry.run({ profile, seed, evidenceWriter, pgConfig, runId }));
   }
 
   sampler.stop();
@@ -261,6 +210,18 @@ async function main() {
     overallResult = 'FAIL';
   }
 
+  // Required-scenario completeness: every manifest entry must have reported
+  // with a terminal status. A scenario that never ran is INCOMPLETE, never a
+  // silent pass — this is what makes exit code 3 reachable and honest.
+  for (const name of requiredScenarioNames()) {
+    const status = metrics[name]?.status;
+    if (status !== 'PASS' && status !== 'FAIL') {
+      failures.push({ scenario: name, code: 'SCENARIO_NOT_RUN', message: `Required scenario ${name} produced no terminal status`, expected: false, classification: 'HARNESS', timestamp: new Date().toISOString() });
+      metrics[name] = { status: 'FAIL', error: 'SCENARIO_NOT_RUN' };
+      overallResult = 'INCOMPLETE';
+    }
+  }
+
   // Write metrics and failures
   await evidenceWriter.writeJson('metrics.json', metrics);
   await evidenceWriter.writeJson('failures.json', failures);
@@ -268,15 +229,48 @@ async function main() {
   // Close writer before checksums (ensure raw.jsonl flushed)
   await evidenceWriter.close();
 
-  // Checksums
-  const sums = await writeSha256Sums(runDir);
+  // Stub tripwire: no scenario may record a stub event and still pass. The
+  // manifest-driven loop has no stub paths; this scan turns any future
+  // stub-shaped evidence into a harness failure instead of a quiet PASS.
+  let stubEvents = 0;
+  try {
+    const { createReadStream } = await import('node:fs');
+    const { createInterface } = await import('node:readline');
+    const lines = createInterface({ input: createReadStream(join(runDir, 'raw.jsonl'), 'utf8'), crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        if (JSON.parse(line)?.event === 'stub') stubEvents += 1;
+      } catch {
+        failures.push({ scenario: 'evidence', code: 'RAW_EVENT_CORRUPT', message: 'raw.jsonl contains a non-JSON line', expected: false, classification: 'HARNESS', timestamp: new Date().toISOString() });
+        overallResult = 'FAIL';
+        break;
+      }
+    }
+  } catch (e) {
+    failures.push({ scenario: 'evidence', code: 'RAW_UNREADABLE', message: `raw.jsonl cannot be scanned for stubs: ${e.message}`, expected: false, classification: 'HARNESS', timestamp: new Date().toISOString() });
+    overallResult = 'FAIL';
+  }
+  if (stubEvents > 0) {
+    failures.push({ scenario: 'evidence', code: 'STUB_EVENTS_PRESENT', message: `${stubEvents} stub events recorded; stubs never pass`, expected: false, classification: 'HARNESS', timestamp: new Date().toISOString() });
+    overallResult = 'FAIL';
+    await writeFile(join(runDir, 'failures.json'), JSON.stringify(failures, null, 2), 'utf8');
+  }
 
   const endTime = new Date().toISOString();
   const durationMs = Number(process.hrtime.bigint() - startMonotonic) / 1e6;
 
-  // Manifest
+  // Manifest (schemaVersion 2): evidence.files is the complete sorted file
+  // set excluding only sha256sums.txt itself — a file cannot contain its own
+  // checksum, so checksums live in sha256sums.txt alone and the manifest pins
+  // the set, never stale embedded sums. The verifier enforces set equality.
+  // report.md is listed although written after: nothing else appears later.
+  const evidenceFiles = [...(await readdir(runDir)), 'manifest.json', 'report.md'].sort();
+  const scenarioStatus = {};
+  for (const name of requiredScenarioNames()) scenarioStatus[name] = metrics[name]?.status ?? 'MISSING';
+  const unexpectedFailures = failures.filter(f => f.classification !== 'EXPECTED_REFUSAL' && f.expected === false).length;
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     qualificationRunId: runId,
     suiteVersion: 'industrial-postgres-v1',
     repository: 'dharan1007/spool',
@@ -292,42 +286,46 @@ async function main() {
     environmentDigest: envDigest,
     configDigest: `sha256:${configDigest}`,
     result: overallResult,
-    releaseGrade,
-    releaseGradeReason: releaseGrade ? null : (gitDirty ? 'DIRTY_WORKTREE' : 'UNKNOWN'),
+    releaseGrade: overallResult === 'PASS' && releaseGrade,
     evidence: {
-      files: (await readdir(runDir)).sort(),
-      sha256sums: sums
+      files: evidenceFiles
     },
+    scenarios: scenarioStatus,
     summary: {
-      totalScenarios: Object.keys(metrics).length,
+      totalScenarios: requiredScenarioNames().length,
+      scenariosRun: Object.values(scenarioStatus).filter(status => status === 'PASS' || status === 'FAIL').length,
       failures: failures.length,
       expectedRefusals: failures.filter(f => f.classification === 'EXPECTED_REFUSAL').length,
-      unexpectedFailures: failures.filter(f => f.classification !== 'EXPECTED_REFUSAL' && f.expected === false).length
+      unexpectedFailures,
+      stubs: stubEvents
     }
   };
-  await writeFile(join(runDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
-
-  // Report
+  // Report (written before the manifest so the manifest's file set is
+  // complete; report content pins the same locals the manifest records).
+  const commitSha = process.env.SPOOL_COMMIT_SHA ?? env.git.sha ?? 'unknown';
+  const gradeReason = manifest.result === 'PASS'
+    ? (manifest.releaseGrade ? null : (gitDirty ? 'DIRTY_WORKTREE' : 'UNKNOWN'))
+    : `RESULT_${manifest.result}`;
   const report = `# SPOOL Industrial PostgreSQL Qualification
 
 Run: ${runId}
 Profile: ${formatProfile(profile)} (${profile.description})
-Commit: ${manifest.commitSha}${gitDirty ? ' (dirty)' : ''}
+Commit: ${commitSha}${gitDirty ? ' (dirty)' : ''}
 Dataset: ${did}
 Seed: ${seed}
 Environment: ${env.os.platform} ${env.os.arch} Node ${env.node.version} PG ${env.pg.serverVersion ?? 'unknown'}
 Duration: ${(durationMs / 1000).toFixed(1)}s
 Result: **${overallResult}**
-Release grade: ${releaseGrade ? 'true' : 'false'}${manifest.releaseGradeReason ? ` (${manifest.releaseGradeReason})` : ''}
+Release grade: ${manifest.releaseGrade ? 'true' : 'false'}${gradeReason ? ` (${gradeReason})` : ''}
 
 ## Summary
-- Scenarios: ${Object.keys(metrics).length}
-- Failures: ${failures.length} (expected refusals: ${manifest.summary.expectedRefusals})
+- Scenarios: ${manifest.summary.totalScenarios} (run: ${manifest.summary.scenariosRun})
+- Failures: ${failures.length} (expected refusals: ${manifest.summary.expectedRefusals}, stubs: ${manifest.summary.stubs})
 - Peak RSS: ${resourceSummary.rss ? `${(resourceSummary.rss.peak / 1024 / 1024).toFixed(1)} MiB` : 'n/a'} (ceiling ${(profile.maxRssBytes / 1024 / 1024).toFixed(0)} MiB)
 - Throughput (target): ${metrics['postgres.target.load']?.rowsPerSec ? `${metrics['postgres.target.load'].rowsPerSec.toFixed(0)} rows/s` : 'n/a'}
 
 ## Scenarios
-${Object.entries(metrics).map(([k, v]) => `- **${k}**: ${v.status ?? 'UNKNOWN'} ${v.rowsPerSec ? `(${v.rowsPerSec.toFixed(0)} rows/s, ${v.durationMs?.toFixed(0)}ms)` : ''} ${v.note ?? ''}`).join('\n')}
+${requiredScenarioNames().map(name => `- **${name}**: ${manifest.scenarios[name] ?? 'MISSING'}`).join('\n')}
 
 ## Failures
 ${failures.length === 0 ? 'None' : failures.map(f => `- [${f.classification}] ${f.scenario} ${f.code}: ${f.message} (expected=${f.expected})`).join('\n')}
@@ -339,8 +337,7 @@ ${failures.length === 0 ? 'None' : failures.map(f => `- [${f.classification}] ${
 
 ## Evidence
 - Directory: ${runDir}
-- Files: ${(await readdir(runDir)).join(', ')}
-- SHA256 root: ${createHash('sha256').update(JSON.stringify(sums)).digest('hex').slice(0, 16)}
+- Files: ${evidenceFiles.join(', ')}
 
 ## Limits Observed
 - Max CDC lag: ${metrics['postgres.cdc.soak']?.maxLagMs ?? 'n/a'} ms
@@ -350,13 +347,17 @@ ${failures.length === 0 ? 'None' : failures.map(f => `- [${f.classification}] ${
 > Generated at ${new Date().toISOString()} by industrial-postgres qualification harness.
 `;
   await writeFile(join(runDir, 'report.md'), report, 'utf8');
-  // Re-write checksums to include manifest and report
+  await writeFile(join(runDir, 'manifest.json'), JSON.stringify({ ...manifest, releaseGradeReason: gradeReason }, null, 2), 'utf8');
+
+  // Single checksums write, last: covers every evidence file including the
+  // manifest and the report. The manifest pins the set; this file pins
+  // contents; the verifier enforces both.
   await writeSha256Sums(runDir);
 
   console.log(`\nQualification ${overallResult} — evidence at ${runDir}`);
   console.log(`Profile: ${formatProfile(profile)}`);
   console.log(`Dataset: ${did}`);
-  console.log(`Commit: ${manifest.commitSha}${gitDirty ? ' (dirty)' : ''}`);
+  console.log(`Commit: ${commitSha}${gitDirty ? ' (dirty)' : ''}`);
   console.log(`Duration: ${(durationMs / 1000).toFixed(1)}s`);
   if (failures.length) console.log(`Failures: ${failures.length} (see failures.json)`);
   console.log(`Report: ${join(runDir, 'report.md')}`);
