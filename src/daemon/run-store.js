@@ -35,6 +35,7 @@ function parse(json) { return json == null ? null : JSON.parse(json); }
 
 const STATE_CHECKSUM_DOMAIN = 'spool-migration-state-v1';
 const BINDING_CHECKSUM_DOMAIN = 'spool-snapshot-cdc-binding-v1';
+const BOUNDARY_CHECKSUM_DOMAIN = 'spool-cdc-boundary-record-v1';
 
 function computeStateChecksum(stateWithoutChecksum) {
   return sha256Canonical(STATE_CHECKSUM_DOMAIN, stateWithoutChecksum);
@@ -166,6 +167,30 @@ export class RunStore {
         cdc_slot TEXT,
         cdc_publication TEXT,
         catalog_id TEXT,
+        updated_at TEXT NOT NULL,
+        checksum TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS spool_cdc_checkpoints (
+        migration_id TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        owner_epoch TEXT NOT NULL,
+        fence_token INTEGER NOT NULL,
+        version INTEGER NOT NULL,
+        received_lsn TEXT,
+        applied_lsn TEXT,
+        acknowledged_lsn TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (migration_id, slot)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS spool_cdc_boundaries (
+        migration_id TEXT PRIMARY KEY NOT NULL,
+        boundary_json TEXT NOT NULL,
+        boundary_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        slot_name TEXT NOT NULL,
+        publication_name TEXT NOT NULL,
+        consistent_point TEXT NOT NULL,
+        exported_snapshot_id TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         checksum TEXT NOT NULL
       ) STRICT;
@@ -719,8 +744,8 @@ export class RunStore {
       if (!state) fail('MIGRATION_NOT_FOUND', 'Snapshot/CDC binding requires an existing migration state');
       this._validateStateChecksum(state);
       // binding must be created in correct sequence: snapshot and CDC boundary must be set before CDC_RUNNING
-      // For now allow any state >= APPROVED
-      const allowedStates = new Set([MIGRATION_STATES.APPROVED, MIGRATION_STATES.SNAPSHOT_ARMED, MIGRATION_STATES.SNAPSHOT_RUNNING, MIGRATION_STATES.FULL_LOAD_RUNNING, MIGRATION_STATES.CDC_RUNNING, MIGRATION_STATES.CATCHING_UP, MIGRATION_STATES.VERIFYING, MIGRATION_STATES.READY_FOR_CUTOVER]);
+      // For now allow any state >= APPROVED, including FINAL_DRAIN (drain progress writes during cutover commit)
+      const allowedStates = new Set([MIGRATION_STATES.APPROVED, MIGRATION_STATES.SNAPSHOT_ARMED, MIGRATION_STATES.SNAPSHOT_RUNNING, MIGRATION_STATES.FULL_LOAD_RUNNING, MIGRATION_STATES.CDC_RUNNING, MIGRATION_STATES.CATCHING_UP, MIGRATION_STATES.VERIFYING, MIGRATION_STATES.READY_FOR_CUTOVER, MIGRATION_STATES.FINAL_DRAIN]);
       if (!allowedStates.has(state.current_state)) {
         fail('ILLEGAL_STATE_TRANSITION', `Snapshot/CDC binding can only be set from ${[...allowedStates].join(',')} not ${state.current_state}`);
       }
@@ -746,6 +771,213 @@ export class RunStore {
     if (expected !== row.checksum) fail('RUN_STATE_CORRUPT', 'Snapshot/CDC binding checksum mismatch');
     if (parsed.sourceStateId !== row.source_state_id) fail('RUN_STATE_CORRUPT', 'Snapshot/CDC binding row mismatch');
     return Object.freeze(parsed);
+  }
+
+  // ---------- CDC boundary records (pre-approval slot ownership) ----------
+  //
+  // A boundary record proves the migration owns a source replication slot
+  // created before the approved snapshot was read, with the slot's WAL
+  // reservation point, the exported snapshot token the full load must join,
+  // and the slot/publication ownership flags that authorize release.
+
+  setCdcBoundary(migrationId, record) {
+    this.#open(); text(migrationId, 'migrationId');
+    if (!record || typeof record !== 'object' || Array.isArray(record)) fail('INVALID_CDC_BOUNDARY_RECORD', 'CDC boundary record must be an object');
+    const boundaryId = typeof record.boundaryId === 'string' && /^sha256:[a-f0-9]{64}$/.test(record.boundaryId)
+      ? record.boundaryId : fail('INVALID_CDC_BOUNDARY_RECORD', 'boundaryId must be canonical sha256');
+    const snapshotId = typeof record.snapshotId === 'string' && /^sha256:[a-f0-9]{64}$/.test(record.snapshotId)
+      ? record.snapshotId : fail('INVALID_CDC_BOUNDARY_RECORD', 'snapshotId must be canonical sha256');
+    const slotName = typeof record.slotName === 'string' && /^[a-z0-9_]{1,63}$/.test(record.slotName)
+      ? record.slotName : fail('INVALID_CDC_BOUNDARY_RECORD', 'slotName is invalid');
+    const publicationName = typeof record.publicationName === 'string' && record.publicationName
+      ? record.publicationName : fail('INVALID_CDC_BOUNDARY_RECORD', 'publicationName is required');
+    const consistentPoint = typeof record.consistentPoint === 'string' && record.consistentPoint
+      ? record.consistentPoint.toUpperCase() : fail('INVALID_CDC_BOUNDARY_RECORD', 'consistentPoint is required');
+    const exportedSnapshotId = typeof record.exportedSnapshotId === 'string' && record.exportedSnapshotId
+      ? record.exportedSnapshotId : fail('INVALID_CDC_BOUNDARY_RECORD', 'exportedSnapshotId is required');
+    const sourceRef = record.sourceRef ?? null;
+    if (sourceRef != null) {
+      if (!sourceRef || typeof sourceRef !== 'object' || Array.isArray(sourceRef)) {
+        fail('INVALID_CDC_BOUNDARY_RECORD', 'sourceRef must be an object');
+      }
+      const secretRef = sourceRef.secretRef ?? null;
+      if (typeof sourceRef.endpoint !== 'string' || !sourceRef.endpoint
+        || typeof sourceRef.database !== 'string' || !sourceRef.database
+        || typeof sourceRef.identity?.user !== 'string' || !sourceRef.identity.user
+        || !secretRef || typeof secretRef !== 'object' || Array.isArray(secretRef)
+        || typeof secretRef.provider !== 'string' || !secretRef.provider
+        || typeof secretRef.key !== 'string' || !secretRef.key) {
+        fail('INVALID_CDC_BOUNDARY_RECORD', 'sourceRef must carry endpoint, database, identity.user and secretRef');
+      }
+    }
+    const normalized = Object.freeze({
+      boundaryId,
+      snapshotId,
+      slotName,
+      publicationName,
+      consistentPoint,
+      exportedSnapshotId,
+      publicationCreated: record.publicationCreated === true,
+      slotExisted: record.slotExisted === true,
+      snapshotXmin: record.snapshotXmin ?? null,
+      snapshotXmax: record.snapshotXmax ?? null,
+      snapshotXip: Array.isArray(record.snapshotXip) ? Object.freeze([...record.snapshotXip]) : [],
+      planningSourceStateId: typeof record.planningSourceStateId === 'string' ? record.planningSourceStateId : null,
+      sourceRef: sourceRef == null ? null : Object.freeze({
+        endpoint: sourceRef.endpoint,
+        database: sourceRef.database,
+        identity: Object.freeze({ user: sourceRef.identity.user }),
+        secretRef: Object.freeze({ provider: sourceRef.secretRef.provider, key: sourceRef.secretRef.key })
+      }),
+      createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString()
+    });
+    const boundaryJson = canonicalJson(normalized);
+    const checksum = sha256Canonical(BOUNDARY_CHECKSUM_DOMAIN, normalized);
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO spool_cdc_boundaries (migration_id, boundary_json, boundary_id, snapshot_id, slot_name, publication_name, consistent_point, exported_snapshot_id, updated_at, checksum)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(migration_id) DO UPDATE SET
+        boundary_json=excluded.boundary_json, boundary_id=excluded.boundary_id, snapshot_id=excluded.snapshot_id,
+        slot_name=excluded.slot_name, publication_name=excluded.publication_name, consistent_point=excluded.consistent_point,
+        exported_snapshot_id=excluded.exported_snapshot_id, updated_at=excluded.updated_at, checksum=excluded.checksum
+    `).run(migrationId, boundaryJson, boundaryId, snapshotId, slotName, publicationName, consistentPoint, exportedSnapshotId, now, checksum);
+    return this.getCdcBoundary(migrationId);
+  }
+
+  getCdcBoundary(migrationId) {
+    this.#open(); text(migrationId, 'migrationId');
+    const row = this.db.prepare('SELECT * FROM spool_cdc_boundaries WHERE migration_id = ?').get(migrationId);
+    if (!row) return null;
+    const parsed = JSON.parse(row.boundary_json);
+    const expected = sha256Canonical(BOUNDARY_CHECKSUM_DOMAIN, parsed);
+    if (expected !== row.checksum) fail('RUN_STATE_CORRUPT', 'CDC boundary record checksum mismatch');
+    if (parsed.boundaryId !== row.boundary_id || parsed.snapshotId !== row.snapshot_id) {
+      fail('RUN_STATE_CORRUPT', 'CDC boundary record row mismatch');
+    }
+    return Object.freeze(parsed);
+  }
+
+  deleteCdcBoundary(migrationId) {
+    this.#open(); text(migrationId, 'migrationId');
+    this.db.prepare('DELETE FROM spool_cdc_boundaries WHERE migration_id = ?').run(migrationId);
+    return true;
+  }
+
+  // ---------- Fenced CAS CDC checkpoints ----------
+  //
+  // Watermark movement is compare-and-swap on (ownerEpoch, version) with fence
+  // validation: a stale worker or coordinator can neither advance, regress,
+  // nor overwrite a newer checkpoint. Invariant enforced at storage:
+  //   acknowledged <= applied <= received   (LSN order)
+  //   version strictly increases per update
+  // Per-transaction outcome counts are NOT duplicated here: they ride in the
+  // target ledger row inside the same transaction as the mutation, so replay
+  // returns the original exact counts from the ledger itself.
+  getCdcCheckpoint(migrationId, slot) {
+    this.#open(); text(migrationId, 'migrationId'); text(slot, 'slot');
+    const row = this.db.prepare('SELECT * FROM spool_cdc_checkpoints WHERE migration_id = ? AND slot = ?').get(migrationId, slot);
+    if (!row) return null;
+    return Object.freeze({
+      migrationId: row.migration_id,
+      slot: row.slot,
+      ownerEpoch: row.owner_epoch,
+      fenceToken: Number(row.fence_token),
+      version: Number(row.version),
+      receivedLsn: row.received_lsn,
+      appliedLsn: row.applied_lsn,
+      acknowledgedLsn: row.acknowledged_lsn,
+      updatedAt: row.updated_at
+    });
+  }
+
+  saveCdcCheckpoint(migrationId, { slot, ownerEpoch, fenceToken, expectedVersion = null, receivedLsn = null, appliedLsn = null, acknowledgedLsn = null } = {}) {
+    this.#open(); text(migrationId, 'migrationId'); text(slot, 'slot');
+    if (typeof ownerEpoch !== 'string' || !ownerEpoch) fail('INVALID_CDC_CHECKPOINT', 'ownerEpoch is required');
+    if (!Number.isSafeInteger(fenceToken) || fenceToken < 1) fail('FENCE_REQUIRED', 'CDC checkpoint save requires a valid fence token');
+    for (const [label, value] of [['receivedLsn', receivedLsn], ['appliedLsn', appliedLsn], ['acknowledgedLsn', acknowledgedLsn]]) {
+      if (value != null && (typeof value !== 'string' || !/^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/.test(value))) {
+        fail('INVALID_CDC_POSITION', `${label} must be a valid PostgreSQL LSN`);
+      }
+    }
+    const tx = this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT * FROM spool_cdc_checkpoints WHERE migration_id = ? AND slot = ?').get(migrationId, slot);
+      if (existing) {
+        if (expectedVersion != null && Number(existing.version) !== Number(expectedVersion)) {
+          fail('CHECKPOINT_CONFLICT', 'CDC checkpoint version mismatch; another writer advanced the cursor', {
+            expectedVersion, actualVersion: Number(existing.version)
+          });
+        }
+        // Ownership rule: the same epoch may rewrite with its fence token;
+        // a NEW epoch is legitimate only with a strictly newer fence token
+        // (proving lease succession after takeover). Anything else is stale.
+        const storedFence = Number(existing.fence_token);
+        const sameEpoch = existing.owner_epoch === ownerEpoch;
+        if ((!sameEpoch && !(Number(fenceToken) > storedFence)) || Number(fenceToken) < storedFence) {
+          fail('STALE_FENCE', 'CDC checkpoint writer is stale: epoch mismatch without fence succession', {
+            storedOwner: existing.owner_epoch, storedFence, ownerEpoch, fenceToken
+          });
+        }
+      } else if (expectedVersion != null && Number(expectedVersion) !== 0) {
+        fail('CHECKPOINT_CONFLICT', 'CDC checkpoint does not exist; expected version must be 0 for creation', { expectedVersion });
+      }
+      const upper = value => (typeof value === 'string' ? value.toUpperCase() : value);
+      const next = {
+        receivedLsn: upper(receivedLsn ?? existing?.received_lsn ?? null),
+        appliedLsn: upper(appliedLsn ?? existing?.applied_lsn ?? null),
+        acknowledgedLsn: upper(acknowledgedLsn ?? existing?.acknowledged_lsn ?? null)
+      };
+      // No backward movement.
+      const atOrAfter = (candidate, baseline) => {
+        if (candidate == null || baseline == null) return true;
+        const [chi, clo] = candidate.split('/');
+        const [bhi, blo] = baseline.split('/');
+        const diff = ((BigInt(`0x${chi}`) << 32n) | BigInt(`0x${clo}`)) - ((BigInt(`0x${bhi}`) << 32n) | BigInt(`0x${blo}`));
+        return diff >= 0n;
+      };
+      if (existing) {
+        if (!atOrAfter(next.receivedLsn, existing.received_lsn)) fail('CHECKPOINT_BACKWARD_MOVE', 'CDC received watermark moved backwards', { previous: existing.received_lsn });
+        if (!atOrAfter(next.appliedLsn, existing.applied_lsn)) fail('CHECKPOINT_BACKWARD_MOVE', 'CDC applied watermark moved backwards', { previous: existing.applied_lsn });
+        if (!atOrAfter(next.acknowledgedLsn, existing.acknowledged_lsn)) fail('CHECKPOINT_BACKWARD_MOVE', 'CDC acknowledged watermark moved backwards', { previous: existing.acknowledged_lsn });
+      }
+      // acknowledged <= applied <= received.
+      const lte = (left, right) => {
+        if (left == null || right == null) return true;
+        const [lhi, llo] = left.split('/');
+        const [rhi, rlo] = right.split('/');
+        return (((BigInt(`0x${lhi}`) << 32n) | BigInt(`0x${llo}`)) - ((BigInt(`0x${rhi}`) << 32n) | BigInt(`0x${rlo}`))) <= 0n;
+      };
+      if (!lte(next.acknowledgedLsn, next.appliedLsn)) fail('CHECKPOINT_WATERMARK_VIOLATION', 'CDC acknowledged watermark exceeds applied watermark');
+      if (!lte(next.appliedLsn, next.receivedLsn)) fail('CHECKPOINT_WATERMARK_VIOLATION', 'CDC applied watermark exceeds received watermark');
+      const version = (existing ? Number(existing.version) : 0) + 1;
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        INSERT INTO spool_cdc_checkpoints (migration_id, slot, owner_epoch, fence_token, version, received_lsn, applied_lsn, acknowledged_lsn, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(migration_id, slot) DO UPDATE SET
+          owner_epoch=excluded.owner_epoch, fence_token=excluded.fence_token, version=excluded.version,
+          received_lsn=excluded.received_lsn, applied_lsn=excluded.applied_lsn, acknowledged_lsn=excluded.acknowledged_lsn,
+          updated_at=excluded.updated_at
+      `).run(migrationId, slot, ownerEpoch, fenceToken, version, next.receivedLsn, next.appliedLsn, next.acknowledgedLsn, now);
+      // Keep the coarse binding watermarks in the same transaction so the two
+      // progress views cannot diverge across a crash. Checksums are recomputed
+      // so binding reads keep validating.
+      const bindingRow = this.db.prepare('SELECT binding_json FROM spool_snapshot_cdc_bindings WHERE migration_id = ?').get(migrationId);
+      if (bindingRow) {
+        const binding = JSON.parse(bindingRow.binding_json);
+        const updated = { ...binding };
+        if (next.receivedLsn != null) updated.receivedLsn = next.receivedLsn;
+        if (next.appliedLsn != null) updated.appliedLsn = next.appliedLsn;
+        if (next.acknowledgedLsn != null) updated.acknowledgedLsn = next.acknowledgedLsn;
+        const updatedJson = canonicalJson(updated);
+        const updatedBindingId = sha256Canonical('spool-snapshot-cdc-binding-v1', updated);
+        const updatedChecksum = sha256Canonical(BINDING_CHECKSUM_DOMAIN, updated);
+        this.db.prepare('UPDATE spool_snapshot_cdc_bindings SET binding_json = ?, binding_id = ?, received_lsn = ?, applied_lsn = ?, acknowledged_lsn = ?, updated_at = ?, checksum = ? WHERE migration_id = ?')
+          .run(updatedJson, updatedBindingId, updated.receivedLsn ?? null, updated.appliedLsn ?? null, updated.acknowledgedLsn ?? null, now, updatedChecksum, migrationId);
+      }
+      return this.getCdcCheckpoint(migrationId, slot);
+    });
+    return tx();
   }
 
   updateCdcProgress(migrationId, { receivedLsn = null, appliedLsn = null, acknowledgedLsn = null } = {}) {

@@ -131,6 +131,19 @@ export async function withPostgresContentVerificationSession({ targetRef, creden
         primaryKey: Object.freeze([...contract.primaryKey]),
         columns: Object.freeze(schema.map(field => field.name)),
         targetReadState,
+        // Total row count under the session's MVCC snapshot: the batch
+        // reads are key-point lookups (extra target rows are invisible to
+        // them), so count equality against the replayed source rows is what
+        // proves no extras.
+        async countRows() {
+          const quotedTable = `${quoteIdentifier(targetRef.schema)}.${quoteIdentifier(targetRef.table)}`;
+          const result = await client.query(`SELECT COUNT(*)::text AS count FROM ${quotedTable}`);
+          const count = Number(result.rows[0]?.count ?? '');
+          if (!Number.isSafeInteger(count) || count < 0) {
+            fail('POSTGRES_VERIFICATION_COUNT_UNAVAILABLE', 'PostgreSQL verification row count is unavailable');
+          }
+          return count;
+        },
         async verifyBatch(expectedRows) {
           const normalizedExpectedRows = normalizeExpectedRows(expectedRows, schema);
           const rawActualRows = await readRows(client, targetRef, normalizedExpectedRows, contract.primaryKey, schema);

@@ -1,0 +1,823 @@
+import { createWriteStream, createReadStream } from 'node:fs';
+import { mkdir, rm, readdir } from 'node:fs/promises';
+import { join, basename } from 'node:path';
+import { createInterface } from 'node:readline';
+import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
+import { randomUUID } from 'node:crypto';
+import { fail } from '../../core/errors.js';
+import { sha256Canonical, canonicalJson } from '../../platform/canonical-json.js';
+import { parsePostgresEndpoint, withPostgresClient } from './connection.js';
+import { MigrationEngine } from '../../core/migration.js';
+import { compileMapping } from '../../core/transforms.js';
+import { connectorIdentity } from '../../platform/contracts.js';
+import {
+  comparePostgresLsn,
+  normalizeMessage,
+  classifyCdcStreamError,
+  describePostgresSlot,
+  assertSlotContractUsable
+} from './cdc.js';
+import { postgresContentRowHash } from './row-codec.js';
+
+const LSN = /^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/;
+// Bounded wait for replication start: the subscribe() promise never settles
+// while the stream is healthy, so a stream that never starts must fail
+// loudly rather than hang the pump (or the drain, or cutover).
+const SUBSCRIBE_START_TIMEOUT_MS = 30_000;
+const CDC_BATCH_DOMAIN = 'spool-cdc-batch-v1';
+
+function requireLsn(value, label) {
+  if (typeof value !== 'string' || !LSN.test(value)) fail('INVALID_CDC_POSITION', `${label} must be a valid PostgreSQL LSN`);
+  return value.toUpperCase();
+}
+
+// CDC batch identity: binds one source transaction application to the exact
+// migration/plan/snapshot/mapping/target/fence context plus the transaction
+// commit LSN and content hash. The same source transaction applied twice
+// yields the same identity, so the target ledger reconciles replays as
+// already-committed instead of duplicating rows.
+export function createCdcBatchIdentity({ migrationId, planId, sourceSnapshotId, mappingRevision, targetIdentity, xid, commitLsn, payloadHash, rowCount } = {}) {
+  if (typeof migrationId !== 'string' || !migrationId) fail('INVALID_CDC_BATCH', 'migrationId is required');
+  if (typeof planId !== 'string' || !planId) fail('INVALID_CDC_BATCH', 'planId is required');
+  if (typeof sourceSnapshotId !== 'string' || !sourceSnapshotId) fail('INVALID_CDC_BATCH', 'sourceSnapshotId is required');
+  if (!Number.isInteger(mappingRevision) || mappingRevision < 1) fail('INVALID_CDC_BATCH', 'mappingRevision must be >= 1');
+  if (!Number.isInteger(xid) || xid < 0) fail('INVALID_CDC_BATCH', 'xid must be a non-negative integer');
+  requireLsn(commitLsn, 'commitLsn');
+  if (!Number.isSafeInteger(rowCount) || rowCount < 0) fail('INVALID_CDC_BATCH', 'rowCount must be a non-negative safe integer');
+  return sha256Canonical(CDC_BATCH_DOMAIN, {
+    migrationId,
+    planId,
+    sourceSnapshotId,
+    mappingRevision,
+    targetIdentity: connectorIdentity(targetIdentity),
+    sourceTransaction: { xid, commitLsn: commitLsn.toUpperCase() },
+    payloadHash,
+    rowCount
+  });
+}
+
+function eventBytes(change) {
+  return Buffer.byteLength(canonicalJson(change), 'utf8');
+}
+
+// Bounded in-memory ring buffer for debug history. Production correctness
+// never depends on retained history; limit 0 retains nothing.
+export function createRingBuffer(limit = 1000) {
+  if (!Number.isSafeInteger(limit) || limit < 0) fail('INVALID_CDC_BUFFER', 'ring buffer limit must be a non-negative safe integer');
+  const buffer = [];
+  return Object.freeze({
+    limit,
+    push(item) {
+      if (limit === 0) return;
+      buffer.push(item);
+      while (buffer.length > limit) buffer.shift();
+    },
+    values() {
+      return Object.freeze([...buffer]);
+    },
+    size() {
+      return buffer.length;
+    }
+  });
+}
+
+// Serialized PostgreSQL transaction assembler. pgoutput emits complete
+// transactions in commit order; the assembler buffers one open transaction,
+// enforces commit-LSN monotonicity, and spills oversized transactions to
+// durable local staging so arbitrarily large source transactions cannot
+// exhaust process memory.
+export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 1024, maxInMemoryEvents = 10000, stagingDir = null } = {}) {
+  if (!Number.isSafeInteger(maxInMemoryBytes) || maxInMemoryBytes < 1024) fail('INVALID_CDC_ASSEMBLER', 'maxInMemoryBytes must be >= 1024');
+  if (!Number.isSafeInteger(maxInMemoryEvents) || maxInMemoryEvents < 1) fail('INVALID_CDC_ASSEMBLER', 'maxInMemoryEvents must be >= 1');
+  let current = null;
+  let lastCommitLsn = null;
+  let stagedCount = 0;
+
+  function spillPath(xid) {
+    if (!stagingDir) fail('CDC_TRANSACTION_TOO_LARGE', 'Source transaction exceeds in-memory assembly limits and no staging directory is configured', { xid });
+    return join(stagingDir, `cdc-tx-${xid}.jsonl`);
+  }
+
+  async function spillEvent(tx, change) {
+    await mkdir(stagingDir, { recursive: true });
+    const stream = createWriteStream(spillPath(tx.xid), { flags: 'a', encoding: 'utf8' });
+    await new Promise((resolve, reject) => {
+      stream.on('error', reject);
+      stream.write(`${canonicalJson(change)}\n`, 'utf8', error => {
+        if (error) reject(error);
+        else resolve();
+      });
+      stream.end();
+    });
+    tx.spilled = true;
+    tx.spillBytes = (tx.spillBytes ?? 0) + eventBytes(change);
+  }
+
+  async function readStaged(xid) {
+    const events = [];
+    const stream = createReadStream(spillPath(xid), { encoding: 'utf8' });
+    const lines = createInterface({ input: stream, crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      events.push(JSON.parse(line));
+    }
+    return events;
+  }
+
+  return Object.freeze({
+    async feed(change) {
+      if (!change || typeof change !== 'object') fail('CDC_PROTOCOL_VIOLATION', 'CDC change must be an object');
+      if (change.tag === 'begin') {
+        if (current) fail('CDC_PROTOCOL_VIOLATION', 'Nested BEGIN inside an open CDC transaction', { xid: current.xid });
+        current = { xid: change.xid ?? 0, beginLsn: change.lsn, events: [], bytes: 0, spilled: false, spillBytes: 0 };
+        stagedCount = 0;
+        return null;
+      }
+      if (change.tag === 'commit') {
+        if (!current) fail('CDC_PROTOCOL_VIOLATION', 'COMMIT without an open CDC transaction');
+        if (lastCommitLsn && comparePostgresLsn(change.lsn, lastCommitLsn) < 0) {
+          fail('CDC_ORDER_VIOLATION', 'CDC commit LSN moved backwards; transaction order is broken', {
+            previous: lastCommitLsn, current: change.lsn
+          });
+        }
+        let events = current.events;
+        if (current.spilled) {
+          // Memory holds the oldest events, the staging file the newest:
+          // concatenate in arrival order.
+          const staged = await readStaged(current.xid);
+          events = [...current.events, ...staged];
+        }
+        const completed = Object.freeze({
+          xid: current.xid,
+          beginLsn: current.beginLsn,
+          commitLsn: change.lsn,
+          commitEndLsn: change.commitEndLsn ?? null,
+          events: Object.freeze(events),
+          eventCount: events.length,
+          spilled: current.spilled,
+          stagedEvents: stagedCount
+        });
+        lastCommitLsn = change.lsn;
+        current = null;
+        stagedCount = 0;
+        return completed;
+      }
+      if (!['insert', 'update', 'delete', 'truncate'].includes(change.tag)) return null;
+      if (!current) fail('CDC_PROTOCOL_VIOLATION', `Row change outside a CDC transaction: ${change.tag}`);
+      const size = eventBytes(change);
+      current.bytes += size;
+      if (current.bytes > maxInMemoryBytes || current.events.length + stagedCount >= maxInMemoryEvents) {
+        // Spill OLDEST buffered events first to keep memory bounded, newest
+        // stay in memory for locality. Simplest correct scheme: spill the
+        // incoming event and keep counting; finalize merges staged+memory.
+        await spillEvent(current, change);
+        stagedCount += 1;
+      } else {
+        current.events.push(change);
+      }
+      return null;
+    },
+    async finish() {
+      if (current) {
+        fail('CDC_TRANSACTION_INCOMPLETE', 'CDC stream ended with an uncommitted open transaction; refusing to silently drop it', {
+          xid: current.xid, bufferedEvents: current.events.length + stagedCount
+        });
+      }
+      return null;
+    },
+    // Peek for waterline termination: the pump may stop on an idle stream
+    // only when no transaction is open, so an in-flight transaction is never
+    // abandoned at the waterline.
+    hasOpenTransaction() {
+      return current != null;
+    },
+    async discardStaged(xid) {
+      if (!stagingDir) return;
+      try { await rm(spillPath(xid), { force: true }); } catch {}
+    },
+    async listStaged() {
+      if (!stagingDir) return Object.freeze([]);
+      let files;
+      try {
+        files = await readdir(stagingDir);
+      } catch {
+        return Object.freeze([]);
+      }
+      const xids = [];
+      for (const file of files) {
+        const match = /^cdc-tx-(\d+)\.jsonl$/.exec(basename(file));
+        if (match) xids.push(Number(match[1]));
+      }
+      return Object.freeze(xids.sort((a, b) => a - b));
+    },
+    async recoverStaged(xid) {
+      // Re-materialize a staged transaction left behind by a crash. The
+      // caller re-applies it through the normal idempotent path (ledger
+      // reconciliation absorbs already-committed work) and then discards it.
+      const events = await readStaged(xid);
+      return Object.freeze({ xid, events: Object.freeze(events), eventCount: events.length, spilled: true });
+    }
+  });
+}
+
+// Map one assembled source transaction to target mutations through the
+// migration plan mapping. Transform is row-local (MigrationEngine carries no
+// cross-row transform state); a source row the mapping rejects fails the
+// transaction closed (CDC_TRANSFORM_REJECTED) rather than being silently
+// dropped — a dropped row would be undetectable data loss.
+function pickKey(row, primaryKey) {
+  const key = {};
+  for (const field of primaryKey) {
+    if (row[field] === null || row[field] === undefined) {
+      fail('CDC_ROW_UNMAPPABLE', `Mapped row is missing primary-key field ${field}`);
+    }
+    key[field] = row[field];
+  }
+  return key;
+}
+
+// Discover the live primary-key column list for CDC keying. The caller may
+// supply an expected key; a mismatch with the live primary key fails closed
+// (CDC_PRIMARY_KEY_MISMATCH) instead of applying by the wrong key.
+export async function discoverTargetPrimaryKey({ targetRef, credentialBroker, expected = null } = {}) {
+  if (!targetRef || typeof targetRef !== 'object') fail('INVALID_CDC_APPLY_TARGET', 'targetRef is required');
+  const live = await withPostgresClient({ targetRef, credentialBroker }, async client => {
+    const result = await client.query(
+      `SELECT a.attname AS "column"
+       FROM pg_catalog.pg_index i
+       JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
+       JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+       JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(i.indkey)
+       WHERE n.nspname = $1 AND t.relname = $2 AND i.indisprimary AND i.indisvalid AND i.indisready
+       ORDER BY array_position(i.indkey, a.attnum)`,
+      [targetRef.schema, targetRef.table]
+    );
+    return result.rows.map(row => row.column);
+  });
+  if (live.length === 0) fail('CDC_PRIMARY_KEY_UNKNOWN', 'Target table has no valid ready primary key for CDC keying', { table: `${targetRef.schema}.${targetRef.table}` });
+  if (expected != null) {
+    const same = Array.isArray(expected) && expected.length === live.length && expected.every((field, index) => field === live[index]);
+    if (!same) {
+      fail('CDC_PRIMARY_KEY_MISMATCH', 'Supplied CDC primary key does not match the live target primary key', {
+        expected: live, supplied: expected
+      });
+    }
+  }
+  return Object.freeze(live);
+}
+
+// Serialized CDC applier: replication messages arrive on an EventEmitter
+// (whose async listeners do NOT serialize), so the handler only enqueues
+// while a single pump loop assembles, applies, checkpoints, and acknowledges
+// strictly in order. The guaranteed per-transaction order is:
+//   receive -> validate/map -> fenced target commit (+ledger) ->
+//   durable checkpoint persist -> source acknowledgement.
+// Acknowledgement therefore always trails durability; a crash before ack
+// replays through ledger reconciliation, a crash after ack is already proven.
+function requireSourceTable(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('INVALID_CDC_APPLY_CONFIG', 'sourceTable is required');
+  if (typeof value.schema !== 'string' || !value.schema || typeof value.table !== 'string' || !value.table) {
+    fail('INVALID_CDC_APPLY_CONFIG', 'sourceTable.schema and sourceTable.table are required');
+  }
+  return Object.freeze({ schema: value.schema, table: value.table });
+}
+
+export function createCdcApplier({
+  ref, credentialBroker, slotName, publicationNames,
+  migration, plan, targetContractId, primaryKey, sourceTable,
+  target, checkpoint, renewFence, ownerEpoch,
+  startLsn = null, untilLsn = null, maxTransactions = null,
+  assemblerOptions = {}, stagingDir = null, debugHistoryLimit = 1000,
+  maxQueueMessages = 50000, maxReconnects = 5,
+  onTransaction = null
+} = {}) {
+  if (!ref || typeof ref !== 'object') fail('INVALID_CDC_APPLY_CONFIG', 'source ref is required');
+  if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_CDC_APPLY_CONFIG', 'credentialBroker.withSecret() is required');
+  if (typeof slotName !== 'string' || !slotName) fail('INVALID_CDC_APPLY_CONFIG', 'slotName is required');
+  if (!Array.isArray(publicationNames) || publicationNames.length === 0) fail('INVALID_CDC_APPLY_CONFIG', 'publicationNames must be a non-empty array');
+  if (!migration || typeof migration.migrationId !== 'string' || typeof migration.sourceSnapshotId !== 'string') {
+    fail('INVALID_CDC_APPLY_CONFIG', 'migration.migrationId and migration.sourceSnapshotId are required');
+  }
+  if (!plan || typeof plan.planId !== 'string' || !Number.isInteger(plan.mappingRevision) || plan.mappingRevision < 1) {
+    fail('INVALID_CDC_APPLY_CONFIG', 'plan.planId and plan.mappingRevision are required');
+  }
+  if (!Array.isArray(primaryKey) || primaryKey.length === 0) fail('INVALID_CDC_APPLY_CONFIG', 'primaryKey is required');
+  const source = requireSourceTable(sourceTable);
+  if (!target || typeof target.commitUpsertBatch !== 'function' || typeof target.commitDeleteBatch !== 'function') {
+    fail('INVALID_CDC_APPLY_CONFIG', 'an opened target with upsert/delete batch commits is required');
+  }
+  if (!checkpoint || typeof checkpoint.load !== 'function' || typeof checkpoint.save !== 'function') {
+    fail('INVALID_CDC_APPLY_CONFIG', 'checkpoint store with load/save is required');
+  }
+  if (typeof renewFence !== 'function') fail('INVALID_CDC_APPLY_CONFIG', 'renewFence callback is required');
+  if (typeof ownerEpoch !== 'string' || !ownerEpoch) fail('INVALID_CDC_APPLY_CONFIG', 'ownerEpoch is required');
+  if (startLsn != null) requireLsn(startLsn, 'startLsn');
+  if (untilLsn != null) requireLsn(untilLsn, 'untilLsn');
+  if (maxTransactions != null && (!Number.isSafeInteger(maxTransactions) || maxTransactions < 1)) {
+    fail('INVALID_CDC_APPLY_CONFIG', 'maxTransactions must be a positive safe integer');
+  }
+
+  const assembler = createCdcTransactionAssembler({ ...assemblerOptions, stagingDir });
+  const history = createRingBuffer(debugHistoryLimit);
+  const metrics = {
+    receivedMessages: 0, receivedTransactions: 0, appliedTransactions: 0,
+    recoveredTransactions: 0, spilledTransactions: 0, skippedMissingDeletes: 0,
+    reconnects: 0, lastCommitLsn: null
+  };
+
+  function isRetryableCdcTransportError(error) {
+    if (!error || typeof error !== 'object') return false;
+    const retryable = new Set(['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENOTFOUND', '57P01', '57P02', '57P03', '08000', '08003', '08006', '08001', '08004', '08007', '08P01', '40001', '40P01']);
+    if (error.code && retryable.has(String(error.code))) return true;
+    return /connection|timeout|terminat|closed|reset|broken pipe/i.test(String(error.message ?? ''));
+  }
+
+  return Object.freeze({
+    metrics: () => Object.freeze({ ...metrics }),
+    history: () => history.values(),
+    async run() {
+      // Validate the slot contract before consuming: same name with wrong
+      // plugin/database/type fails closed here, never silently reused.
+      const slotRecord = await describePostgresSlot({ ref, credentialBroker, slotName });
+      assertSlotContractUsable({ slot: slotRecord, database: ref.database, plugin: 'pgoutput', slotName });
+
+      // Fence + checkpoint snapshot for this run. The fence is renewed ahead
+      // of every apply; the checkpoint version is reloaded after reconnects.
+      let fenceToken = await renewFence();
+      if (!Number.isSafeInteger(fenceToken) || fenceToken < 1) fail('FENCE_REQUIRED', 'CDC apply requires a fresh fence token');
+      let stored = await checkpoint.load();
+      let expectedVersion = stored?.version ?? 0;
+
+      const applyOneTransaction = async tx => {
+        fenceToken = await renewFence();
+        if (!Number.isSafeInteger(fenceToken) || fenceToken < 1) fail('FENCE_REQUIRED', 'CDC apply requires a fresh fence token');
+        const result = await applyCdcTransaction({
+          target,
+          migration,
+          plan: { ...plan, targetRef: plan.targetRef },
+          targetContractId,
+          fencingToken: fenceToken,
+          transaction: tx,
+          primaryKey,
+          sourceTable: source
+        });
+        // Exact replay counts come from the target ledger row on recovery,
+        // so the checkpoint carries watermarks only.
+        const saved = await checkpoint.save({
+          slot: slotName,
+          expectedVersion,
+          ownerEpoch,
+          fenceToken,
+          receivedLsn: tx.commitLsn,
+          appliedLsn: tx.commitLsn,
+          acknowledgedLsn: tx.commitLsn
+        });
+        expectedVersion = saved.version;
+        metrics.appliedTransactions += 1;
+        if (result.recovered) metrics.recoveredTransactions += 1;
+        if (tx.spilled) metrics.spilledTransactions += 1;
+        metrics.skippedMissingDeletes += result.skippedMissingCount ?? result.skippedMissing.length;
+        metrics.lastCommitLsn = tx.commitLsn;
+        history.push({ commitLsn: tx.commitLsn, eventCount: tx.events?.length ?? 0, recovered: result.recovered, spilled: tx.spilled === true });
+        if (onTransaction) await onTransaction(result);
+        return { result, ackLsn: tx.commitLsn };
+      };
+
+      // Discard transactions staged (spilled) by a crashed predecessor. This is
+      // safe — never data loss — because watermarks advance only for COMPLETE
+      // transactions: anything staged-but-unapplied sits at or after the
+      // durable watermark and will be re-delivered by the live stream from
+      // the resume position below. Re-applying from staging instead would
+      // risk double-apply outside the watermark protocol.
+      for (const xid of await assembler.listStaged()) {
+        await assembler.discardStaged(xid);
+        metrics.spilledTransactions += 1;
+      }
+
+      // Resume position: durable applied watermark wins over the caller hint.
+      stored = await checkpoint.load();
+      expectedVersion = stored?.version ?? expectedVersion;
+      let resumeLsn = stored?.appliedLsn ?? stored?.acknowledgedLsn ?? startLsn;
+      let reconnectsLeft = maxReconnects;
+      let appliedCount = metrics.appliedTransactions;
+
+      // Bounded drains must terminate even when the resume position already
+      // reaches the waterline (drain retry, idle source): subscribing and
+      // waiting for a transaction that will never arrive would hang.
+      if (untilLsn != null && resumeLsn != null && comparePostgresLsn(resumeLsn, untilLsn) >= 0) {
+        const current = await checkpoint.load();
+        return Object.freeze({
+          ...metrics,
+          appliedCount,
+          resumeLsn,
+          receivedLsn: current?.receivedLsn ?? null,
+          appliedLsn: current?.appliedLsn ?? null,
+          acknowledgedLsn: current?.acknowledgedLsn ?? null
+        });
+      }
+
+      for (;;) {
+        try {
+          const outcome = await subscribeAndPump(resumeLsn, applyOneTransaction);
+          resumeLsn = outcome.resumeLsn;
+          appliedCount = metrics.appliedTransactions;
+          if (outcome.finished) break;
+        } catch (error) {
+          // Slot loss and WAL loss are operator decisions, never retried:
+          // silently recreating a slot would skip source history.
+          if (error?.code === 'CDC_SLOT_LOST' || error?.code === 'CDC_WAL_UNAVAILABLE') throw error;
+          if (isRetryableCdcTransportError(error) && reconnectsLeft > 0) {
+            reconnectsLeft -= 1;
+            metrics.reconnects += 1;
+            // Re-read the durable watermark: another owner may have advanced
+            // (or this process crashed and restarted) — never resume from
+            // volatile memory after a transport failure.
+            stored = await checkpoint.load();
+            expectedVersion = stored?.version ?? expectedVersion;
+            resumeLsn = stored?.appliedLsn ?? stored?.acknowledgedLsn ?? resumeLsn;
+            continue;
+          }
+          throw error;
+        }
+        break;
+      }
+      try { await assembler.finish(); } catch (error) {
+        // An uncommitted trailing transaction at stream end is data at risk,
+        // never a clean stop.
+        throw error;
+      }
+      // Watermarks for binding progress: reloaded from the durable checkpoint
+      // (null when nothing was ever applied), never reconstructed from memory.
+      stored = await checkpoint.load();
+      return Object.freeze({
+        ...metrics,
+        appliedCount,
+        resumeLsn,
+        receivedLsn: stored?.receivedLsn ?? null,
+        appliedLsn: stored?.appliedLsn ?? null,
+        acknowledgedLsn: stored?.acknowledgedLsn ?? null
+      });
+    }
+  });
+
+  // Subscribe from a durable position and pump exactly one transaction at a
+  // time through apply -> checkpoint -> ack. The replication secret never
+  // leaves the broker callback scope: the whole subscription lives inside it.
+  async function subscribeAndPump(fromLsn, applyOneTransaction) {
+    return credentialBroker.withSecret(ref.secretRef, async password => {
+      if (typeof password !== 'string' || !password) fail('SECRET_NOT_FOUND', 'PostgreSQL password is required');
+      const parsed = parsePostgresEndpoint(ref.endpoint);
+      const service = new LogicalReplicationService(
+        {
+          host: parsed.host,
+          port: parsed.port,
+          database: ref.database,
+          user: ref.identity.user,
+          password,
+          ssl: parsed.sslMode === 'disable' ? false : { rejectUnauthorized: parsed.sslMode === 'verify-full' },
+          application_name: 'spool-cdc-apply'
+        },
+        { acknowledge: { auto: false, timeoutSeconds: 10 }, flowControl: { enabled: true } }
+      );
+      const queue = [];
+      let streamError = null;
+      let notify;
+      let notified = new Promise(resolve => { notify = resolve; });
+      const wake = () => { const n = notify; notified = new Promise(resolve => { notify = resolve; }); n(); };
+      // Waterline tracking across every stream position, including primary
+      // keepalive heartbeats (which carry the server WAL position but no
+      // change; they arrive as 'heartbeat' events, never as 'data'). A
+      // quiesced source sends no further transactions after the backlog, so
+      // without heartbeats the drain would wait forever for a commit that
+      // never comes. Stopping here is safe only with an empty local queue
+      // AND no open transaction: emission order guarantees every message at
+      // or below the heartbeat position was already dequeued, and an empty
+      // queue plus a closed assembler means every dequeued transaction is
+      // applied, checkpointed, and acked. Never stop over unapplied work.
+      let maxSeenLsn = null;
+      const trackPosition = raw => {
+        const text = typeof raw === 'string' ? raw : String(raw ?? '');
+        if (!LSN.test(text)) return;
+        if (maxSeenLsn == null || comparePostgresLsn(text, maxSeenLsn) > 0) maxSeenLsn = text.toUpperCase();
+      };
+      const idleStopReached = () => untilLsn != null
+        && maxSeenLsn != null
+        && queue.length === 0
+        && comparePostgresLsn(maxSeenLsn, untilLsn) >= 0
+        && !assembler.hasOpenTransaction();
+      service.on('error', error => {
+        streamError = error;
+        wake();
+      });
+      service.on('heartbeat', lsn => {
+        // Server WAL position with no change attached: the only termination
+        // signal on a quiesced source. Tracked for the waterline, and wakes
+        // the pump so an idle drain can observe it and stop.
+        trackPosition(lsn);
+        wake();
+      });
+      service.on('data', (lsn, message) => {
+        // Synchronous enqueue only: async EventEmitter listeners do NOT
+        // serialize, so all ordering is enforced by the single pump below.
+        // The queue is bounded: an overwhelmed consumer fails closed with an
+        // actionable code instead of growing memory without limit.
+        if (queue.length >= maxQueueMessages) {
+          streamError = Object.assign(new Error(`CDC inbound queue exceeded ${maxQueueMessages} buffered messages; consumer cannot keep up`), { code: 'CDC_QUEUE_OVERFLOW' });
+          wake();
+          return;
+        }
+        const lsnText = typeof lsn === 'string' ? lsn : String(lsn ?? '');
+        queue.push({ lsn: lsnText, message });
+        wake();
+      });
+      const stopService = async () => {
+        try { await service.stop(); } catch { /* stopping wins over stop errors */ }
+        try { await service.destroy(); } catch { /* shutdown must not mask results */ }
+      };
+      const shouldStop = tx => {
+        if (maxTransactions != null && metrics.appliedTransactions >= maxTransactions) return true;
+        if (untilLsn != null && tx && comparePostgresLsn(tx.commitLsn, untilLsn) >= 0) return true;
+        return false;
+      };
+      try {
+        // The library settles subscribe() only when replication ENDS (its
+        // own README drives it fire-and-forget): awaiting it would hang the
+        // pump forever. Gate pump start on the 'start' event instead, feed
+        // subscribe failures into streamError, and bound the wait so a
+        // never-starting stream fails loudly instead of hanging.
+        let started = false;
+        let subscribeSettled = false;
+        service.once('start', () => { started = true; wake(); });
+        const subscribeDone = service.subscribe(
+          new PgoutputPlugin({ protoVersion: 1, publicationNames: [...publicationNames] }), slotName, fromLsn ?? undefined
+        ).then(
+          () => { subscribeSettled = true; wake(); },
+          error => { if (!streamError) streamError = error; subscribeSettled = true; wake(); }
+        );
+        const startDeadline = Date.now() + SUBSCRIBE_START_TIMEOUT_MS;
+        for (;;) {
+          if (started || streamError || subscribeSettled) break;
+          if (Date.now() >= startDeadline) {
+            try { await service.stop(); } catch { /* stopping wins */ }
+            try { await subscribeDone; } catch { /* reported below */ }
+            fail('CDC_SUBSCRIBE_TIMEOUT', 'Replication stream did not start in time; refusing to wait indefinitely', { slotName });
+          }
+          await notified;
+        }
+        if (!started) {
+          try { await subscribeDone; } catch { /* reported below */ }
+          if (streamError) {
+            try { classifyCdcStreamError(streamError, { slotName }); } catch (classified) {
+              await stopService();
+              throw classified;
+            }
+            await stopService();
+            throw streamError;
+          }
+          await stopService();
+          fail('CDC_SUBSCRIBE_FAILED', 'Replication subscription ended before replication started', { slotName });
+        }
+        for (;;) {
+          if (queue.length === 0) {
+            if (streamError) break;
+            // A heartbeat may have carried the waterline while the pump was
+            // waiting: observe it here instead of sleeping past the drain.
+            if (idleStopReached()) {
+              await stopService();
+              return { finished: true, resumeLsn: metrics.lastCommitLsn ?? fromLsn };
+            }
+            await notified;
+            continue;
+          }
+          const { lsn, message } = queue.shift();
+          trackPosition(lsn);
+          let change;
+          try {
+            change = normalizeMessage(lsn, message);
+          } catch (error) {
+            await stopService();
+            throw error;
+          }
+          if (!change) {
+            if (idleStopReached()) {
+              await stopService();
+              return { finished: true, resumeLsn: metrics.lastCommitLsn ?? fromLsn };
+            }
+            continue;
+          }
+          metrics.receivedMessages += 1;
+          let tx = null;
+          try {
+            tx = await assembler.feed(change);
+          } catch (error) {
+            await stopService();
+            throw error;
+          }
+          if (!tx) {
+            if (idleStopReached()) {
+              await stopService();
+              return { finished: true, resumeLsn: metrics.lastCommitLsn ?? fromLsn };
+            }
+            continue;
+          }
+          metrics.receivedTransactions += 1;
+          // applyOneTransaction performs fenced target commit, durable CAS
+          // checkpoint persist, metrics/history; only then is the source acked.
+          const { ackLsn } = await applyOneTransaction(tx);
+          await service.acknowledge(ackLsn);
+          if (shouldStop(tx) || idleStopReached()) {
+            await stopService();
+            return { finished: true, resumeLsn: ackLsn };
+          }
+        }
+        if (streamError) {
+          try { classifyCdcStreamError(streamError, { slotName }); } catch (classified) {
+            await stopService();
+            throw classified;
+          }
+          await stopService();
+          throw streamError;
+        }
+        await stopService();
+        return { finished: true, resumeLsn: metrics.lastCommitLsn };
+      } catch (error) {
+        await stopService();
+        throw error;
+      }
+    });
+  }
+}
+
+// Apply one assembled source transaction to the target under the given fence
+// and return a DurableApplyResult. Upserts and deletes each commit with their
+// own CDC batch identity, so replay reconciles through the target ledger
+// without duplicating rows. The caller persists the checkpoint and only then
+// acknowledges the source — ack never precedes durability.
+export async function applyCdcTransaction({
+  target, migration, plan, targetContractId, fencingToken, transaction, primaryKey, sourceTable
+} = {}) {
+  if (!target || typeof target.commitUpsertBatch !== 'function' || typeof target.commitDeleteBatch !== 'function') {
+    fail('INVALID_CDC_APPLY_TARGET', 'CDC apply requires an opened target with upsert/delete batch commits');
+  }
+  if (!migration || typeof migration.migrationId !== 'string') fail('INVALID_CDC_APPLY_TARGET', 'migration.migrationId is required');
+  if (!plan || typeof plan.planId !== 'string') fail('INVALID_CDC_APPLY_TARGET', 'plan.planId is required');
+  if (!Number.isSafeInteger(fencingToken) || fencingToken < 1) fail('FENCE_REQUIRED', 'CDC apply requires a fresh fence token');
+  if (!transaction || transaction.commitLsn == null) fail('INVALID_CDC_TRANSACTION', 'A complete assembled CDC transaction is required');
+  // Streamed changes carry SOURCE table identity (the publication side);
+  // the target table is where they land after mapping. An event for any
+  // other table means the publication was altered mid-migration: fail closed
+  // rather than skipping it past the watermark (silent data loss).
+  const source = requireSourceTable(sourceTable);
+  const { upserts, deletes } = mapTransactionEvents({
+    transaction,
+    mapping: plan.mapping,
+    mappingRevision: plan.mappingRevision,
+    targetSchema: plan.targetSchema,
+    sourceTable: source,
+    primaryKey
+  });
+  const base = {
+    migrationId: migration.migrationId,
+    planId: plan.planId,
+    sourceSnapshotId: migration.sourceSnapshotId,
+    mappingRevision: plan.mappingRevision,
+    targetIdentity: plan.targetRef,
+    fencingToken,
+    targetContractId
+  };
+  let upsertResult = null;
+  let deleteResult = null;
+  const cdcProvenance = { xid: transaction.xid, commitLsn: transaction.commitLsn };
+  if (upserts.length > 0) {
+    const payloadHash = sha256Canonical('spool-cdc-upsert-payload-v1', upserts);
+    const batchIdentity = createCdcBatchIdentity({
+      ...base, xid: transaction.xid, commitLsn: transaction.commitLsn,
+      payloadHash, rowCount: upserts.length
+    });
+    upsertResult = await target.commitUpsertBatch({
+      ...base, batchIdentity, rows: upserts, primaryKey, cdcProvenance
+    });
+  }
+  if (deletes.length > 0) {
+    const payloadHash = sha256Canonical('spool-cdc-delete-payload-v1', deletes.map(d => ({ key: d.key, precondition: d.precondition })));
+    const batchIdentity = createCdcBatchIdentity({
+      ...base, xid: transaction.xid, commitLsn: transaction.commitLsn,
+      payloadHash, rowCount: deletes.length
+    });
+    deleteResult = await target.commitDeleteBatch({
+      ...base,
+      batchIdentity,
+      deletions: deletes.map(d => ({ key: d.key, expectedRowHash: d.expectedRowHash, precondition: d.precondition })),
+      primaryKey,
+      cdcProvenance
+    });
+  }
+  const recovered = Boolean(upsertResult?.alreadyCommitted) || Boolean(deleteResult?.alreadyCommitted);
+  return Object.freeze({
+    migrationId: migration.migrationId,
+    sourceTransactionId: transaction.xid,
+    commitLsn: transaction.commitLsn.toUpperCase(),
+    targetCommitIdentity: Object.freeze({
+      upsertBatchIdentity: upsertResult?.batchIdentity ?? null,
+      deleteBatchIdentity: deleteResult?.batchIdentity ?? null
+    }),
+    fenceToken: fencingToken,
+    inserted: upsertResult?.inserted ?? 0,
+    updated: upsertResult?.updated ?? 0,
+    deleted: deleteResult?.deleted ?? 0,
+    skippedMissing: Object.freeze([...(Array.isArray(deleteResult?.skippedMissing) ? deleteResult.skippedMissing : [])]),
+    skippedMissingCount: deleteResult?.skippedMissingCount
+      ?? (Array.isArray(deleteResult?.skippedMissing) ? deleteResult.skippedMissing.length : 0),
+    recovered,
+    spilled: transaction.spilled === true,
+    appliedAt: new Date().toISOString()
+  });
+}
+
+function mapTransactionEvents({ transaction, mapping, mappingRevision, targetSchema, sourceTable, primaryKey }) {
+  const engine = new MigrationEngine();
+  const accumulator = engine.createAccumulator(mapping, mappingRevision, targetSchema);
+  const compiledKeyMapping = compileMapping(mapping);
+  const upserts = [];
+  const deletes = [];
+  let index = 0;
+  for (const change of transaction.events) {
+    if (change.table !== sourceTable.table || change.schema !== sourceTable.schema) {
+      fail('CDC_UNEXPECTED_TABLE', 'CDC event is for a table outside the bound publication set; the publication may have been altered mid-migration', {
+        schema: change.schema ?? null, table: change.table ?? null, commitLsn: transaction.commitLsn
+      });
+    }
+    if (change.tag === 'truncate') {
+      // A source TRUNCATE empties the table, but the target truncate path
+      // requires a bound truncate approval which CDC cannot mint. Refusing
+      // closed with an operator-actionable code beats silent divergence.
+      fail('CDC_TRUNCATE_REQUIRES_OPERATOR', 'Source TRUNCATE requires an explicit operator decision; CDC apply refuses to truncate without a bound approval', {
+        schema: change.schema, table: change.table, commitLsn: transaction.commitLsn
+      });
+    }
+    if (change.tag === 'delete') {
+      deletes.push(mapDeleteKey({ change, accumulator, compiledKeyMapping, primaryKey, commitLsn: transaction.commitLsn }));
+      continue;
+    }
+    const sourceRow = change.row ?? change.new;
+    if (!sourceRow || typeof sourceRow !== 'object') {
+      fail('CDC_ROW_UNMAPPABLE', `CDC ${change.tag} event carries no mappable row`, { commitLsn: transaction.commitLsn });
+    }
+    const transformed = accumulator.process(sourceRow, index);
+    index += 1;
+    if (!transformed.ok) {
+      fail('CDC_TRANSFORM_REJECTED', 'Source row rejected by the migration mapping; refusing to drop it silently', {
+        code: transformed.code ?? null, commitLsn: transaction.commitLsn
+      });
+    }
+    upserts.push(transformed.row);
+  }
+  return Object.freeze({ upserts: Object.freeze(upserts), deletes: Object.freeze(deletes) });
+}
+
+// Map a delete to its target key. With a full old row (REPLICA IDENTITY
+// FULL) the row travels the strict accumulator path with a full-row
+// precondition. With a key-only image (default identity) only the target
+// key is computed — through the SAME compiled mapping expressions, so an
+// upsert and a delete for one key always agree — with no full-row validation
+// (there is no row to validate) and an explicit key-only precondition so
+// evidence distinguishes proven deletes from key deletes.
+function mapDeleteKey({ change, accumulator, compiledKeyMapping, primaryKey, commitLsn }) {
+  const hasOldRow = change.old != null && typeof change.old === 'object';
+  if (hasOldRow) {
+    const transformed = accumulator.process(change.old, 0);
+    if (!transformed.ok) {
+      fail('CDC_TRANSFORM_REJECTED', 'Delete old row rejected by the migration mapping; refusing to drop it silently', {
+        code: transformed.code ?? null, commitLsn
+      });
+    }
+    const key = pickKey(transformed.row, primaryKey);
+    return Object.freeze({
+      key: Object.freeze({ ...key }),
+      expectedRowHash: postgresContentRowHash({
+        primaryKey,
+        columns: Object.keys(transformed.row).sort(),
+        key,
+        row: transformed.row
+      }),
+      precondition: 'full-row'
+    });
+  }
+  const keySource = change.key;
+  if (!keySource || typeof keySource !== 'object') {
+    fail('CDC_ROW_UNMAPPABLE', 'CDC delete event carries no key image', { commitLsn });
+  }
+  let mappedKeyRow;
+  try {
+    mappedKeyRow = compiledKeyMapping.mapRow(keySource);
+  } catch (error) {
+    fail('CDC_TRANSFORM_REJECTED', 'Delete key image rejected by the migration mapping; the target key cannot be computed', {
+      code: error?.code ?? null, commitLsn
+    });
+  }
+  return Object.freeze({
+    key: Object.freeze({ ...pickKey(mappedKeyRow, primaryKey) }),
+    expectedRowHash: null,
+    precondition: 'key-only'
+  });
+}

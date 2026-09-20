@@ -194,6 +194,7 @@ export class VerificationCoordinator {
     let invalidRows = 0;
     let contentRoot = null;
     let contentProof = null;
+    let targetRowCount = null;
 
     try {
       const batchSize = plan?.writeStrategy?.batchSize;
@@ -246,7 +247,10 @@ export class VerificationCoordinator {
             if (expectedRowsLocal.length !== 0 || totalRows === 0) {
               await flushBatch(totalRows);
             }
-            return { summary: contentAccumulator.summary(), totalRows };
+            // Total target rows under the same MVCC snapshot (feature-
+            // detected: sessions without counting cannot prove no-extras).
+            const counted = typeof verifier.countRows === 'function' ? await verifier.countRows() : null;
+            return { summary: contentAccumulator.summary(), totalRows, targetRowCount: counted };
           }
         );
         const replaySummary = replayAccumulator.summary();
@@ -255,6 +259,7 @@ export class VerificationCoordinator {
         invalidRows = replaySummary.invalidRows;
         contentRoot = content.summary.rootHash;
         contentProof = content.summary;
+        targetRowCount = content.targetRowCount;
         completedLevels.push(VERIFICATION_LEVEL.CONTENT_EXACT);
         if (mode === VERIFICATION_MODE.REPAIR_REVERIFY) {
           if (replaySummary.processedRows !== sourceRows || replaySummary.validRows !== expectedValidRows || replaySummary.invalidRows !== sourceRows - expectedValidRows) {
@@ -290,23 +295,71 @@ export class VerificationCoordinator {
         fail('INVALID_VERIFICATION_CONFIG', 'Verification requires sourceState.sourceStateId for batch-identity binding');
       }
       const ledgerEntries = await ownedExecution.ledgerEntries();
-      const expectedBatchIdentities = [];
-      for (let start = 0; start < sourceRows; start += batchSize) {
-        expectedBatchIdentities.push(createBatchIdentity({
-          migrationId, planId: plan.planId, sourceSnapshotId: sourceStateId,
-          mappingRevision: plan.mappingRevision,
-          sourceRange: { start, endExclusive: Math.min(sourceRows, start + batchSize) },
-          targetIdentity: plan.targetRef
-        }));
-      }
-      try {
-        verifyMigration({
-          sourceRows, writtenRows: validRows, rejectedRows: invalidRows, filteredRows: 0,
-          expectedBatchIdentities, ledgerEntries
-        });
+      // CDC cutover proof: after streaming, the ledger mixes full-load batch
+      // identities (bound to the boundary snapshot) with per-transaction CDC
+      // identities, so exact batch-set matching against the live replay is
+      // impossible by construction. Row-count is instead proven by three
+      // independent evidences: (1) the live replay accounting matches the
+      // content proof coverage, (2) the target table holds exactly the
+      // replayed valid rows (key-point batch reads cannot see extras, the
+      // session count can), and (3) every ledger entry for this migration is
+      // coherent — same plan, same mapping revision, the boundary snapshot,
+      // a recognized batch kind. Full-load ledger completeness itself stays
+      // attested by the validated cutover receipt chain, and the serial
+      // apply→checkpoint→ack pump order plus the watermark below proves CDC
+      // prefix coverage; the content equality above proves the data.
+      const cdcCutoverProof = (mode === VERIFICATION_MODE.FINAL_PRE_CUTOVER || mode === VERIFICATION_MODE.POST_CUTOVER)
+        && snapshotCdcBoundary?.cdcSlot;
+      if (cdcCutoverProof) {
+        if (!hasContentVerify || targetRowCount == null) {
+          fail('VERIFICATION_CAPABILITY_REQUIRED', 'CDC cutover proof requires a content-capable target with session row counting');
+        }
         completedLevels.push(VERIFICATION_LEVEL.ROW_COUNT);
-      } catch (error) {
-        invariants.push({ code: error?.code ?? 'ROW_ACCOUNTING_MISMATCH', message: error?.message ?? 'Row accounting failed' });
+        if (contentProof == null || contentProof.sourceRowsCovered !== sourceRows || contentProof.rowCount !== validRows) {
+          invariants.push({
+            code: 'CONTENT_PROOF_COVERAGE_MISMATCH',
+            message: `Content proof does not cover the live replay exactly: covered ${contentProof?.sourceRowsCovered ?? 'none'}/${sourceRows}, rows ${contentProof?.rowCount ?? 'none'}/${validRows}`
+          });
+        }
+        if (targetRowCount !== validRows) {
+          invariants.push({
+            code: 'TARGET_ROW_COUNT_MISMATCH',
+            message: `Target holds ${targetRowCount} rows but the live replay proves ${validRows}; extras or missing rows beyond key-point reads`,
+            targetRowCount, validRows
+          });
+        }
+        for (const entry of ledgerEntries) {
+          if (entry.planId !== plan.planId
+            || entry.mappingRevision !== plan.mappingRevision
+            || entry.sourceSnapshotId !== snapshotCdcBoundary.sourceStateId
+            || (entry.batchKind !== 'load' && entry.batchKind !== 'cdc')) {
+            invariants.push({
+              code: 'LEDGER_COHERENCE_VIOLATION',
+              message: `Ledger entry is foreign to this CDC migration: ${entry.batchIdentity}`,
+              batchIdentity: entry.batchIdentity
+            });
+            break;
+          }
+        }
+      } else {
+        const expectedBatchIdentities = [];
+        for (let start = 0; start < sourceRows; start += batchSize) {
+          expectedBatchIdentities.push(createBatchIdentity({
+            migrationId, planId: plan.planId, sourceSnapshotId: sourceStateId,
+            mappingRevision: plan.mappingRevision,
+            sourceRange: { start, endExclusive: Math.min(sourceRows, start + batchSize) },
+            targetIdentity: plan.targetRef
+          }));
+        }
+        try {
+          verifyMigration({
+            sourceRows, writtenRows: validRows, rejectedRows: invalidRows, filteredRows: 0,
+            expectedBatchIdentities, ledgerEntries
+          });
+          completedLevels.push(VERIFICATION_LEVEL.ROW_COUNT);
+        } catch (error) {
+          invariants.push({ code: error?.code ?? 'ROW_ACCOUNTING_MISMATCH', message: error?.message ?? 'Row accounting failed' });
+        }
       }
 
       // CDC position check for cutover modes

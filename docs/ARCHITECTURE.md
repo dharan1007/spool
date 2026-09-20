@@ -40,6 +40,12 @@ A dedicated module Worker processes bounded chunks. Every message carries `jobId
 
 A mapping edited while paused increments `mappingRevision` and sets `needsReplay`. Resume clears old output, transitions through `REPLAYING`, and restarts from row zero. Correctness is favored over incremental patch complexity.
 
+## PostgreSQL CDC cutover
+
+The no-gap argument is ordering, not a shared snapshot: `establish-cdc-boundary` reserves source WAL at point P before approval, approval materializes the full-load snapshot S after P, `run` commits S before any CDC apply, and `catch-up-cdc` / the `FINAL_DRAIN` apply the stream `[P, ...]` strictly after the load through idempotent PK upserts/deletes. Streaming while the full load is in flight is refused, and snapshot repair after CDC advanced is refused (`REPAIR_CDC_CONFLICT`).
+
+Cutover requires a quiesced source (no commits from `commit-cutover` preparation through verification): racing writes fail the fresh live-source proofs closed rather than slipping into the commit. The `FINAL_PRE_CUTOVER`/`POST_CUTOVER` proofs replay the live source, require exact content equality plus target row-count equality (key-point reads cannot see extras), and require a coherent ledger (same plan, mapping revision and boundary snapshot; `load`/`cdc` kinds only). `release-cdc-boundary` drops only migration-owned slots; pre-existing slots are never dropped.
+
 ## Release delivery
 
 Production is delivered as ordinary same-origin static assets: `index.html`, `styles.css`, ES modules under `/src`, and the module Worker. The release deliberately does **not** reconstruct the application from compressed JavaScript payload chunks, `DecompressionStream`, or a dynamic blob module import. This removes an unnecessary startup failure boundary and keeps browser execution debuggable.

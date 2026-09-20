@@ -1,5 +1,6 @@
 import { rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fail } from '../core/errors.js';
 import { inferSchema } from '../core/schema.js';
 import { MigrationEngine } from '../core/migration.js';
@@ -12,6 +13,35 @@ import {
   POSTGRES_TARGET_DESCRIPTOR,
   createPostgresTargetRuntime
 } from '../connectors/postgres/runtime.js';
+import { createCdcApplier, discoverTargetPrimaryKey } from '../connectors/postgres/cdc-apply.js';
+import {
+  assertBoundaryCoversSnapshot,
+  assertSlotContractUsable,
+  comparePostgresLsn,
+  describePostgresSlot,
+  dropPostgresReplicationSlot,
+  establishPostgresSnapshotCdcBoundary,
+  getPostgresFlushLsn
+} from '../connectors/postgres/cdc.js';
+
+// Snapshot-pinned repair replays the approved snapshot ranges; after CDC
+// transactions advanced the target beyond the snapshot, replaying those
+// ranges would revert proven post-snapshot writes — silent data loss. Refuse
+// with an actionable code instead: converge via streaming plus cutover first.
+function assertNoCdcAdvanceBeforeRepair(binding) {
+  if (binding?.cdcSlot
+    && binding.appliedLsn != null
+    && binding.cdcStartLsn != null
+    && comparePostgresLsn(binding.appliedLsn, binding.cdcStartLsn) > 0) {
+    fail('REPAIR_CDC_CONFLICT', 'Snapshot repair is refused after CDC transactions advanced the target beyond the snapshot; replaying snapshot ranges would revert proven post-snapshot writes', {
+      cdcSlot: binding.cdcSlot,
+      cdcStartLsn: binding.cdcStartLsn,
+      appliedLsn: binding.appliedLsn
+    });
+  }
+  return true;
+}
+
 import {
   MYSQL_TARGET_DESCRIPTOR,
   createMysqlTargetRuntime
@@ -201,6 +231,7 @@ export class SpoolCommandService {
       sourcePolicy,
       sourceCoordinator,
       targetConnectors,
+      credentialBroker,
       statePath: options.statePath,
       snapshotRoot,
       approvalSigningKey: options.approvalSigningKey,
@@ -213,10 +244,11 @@ export class SpoolCommandService {
     });
   }
 
-  constructor({ sourcePolicy, sourceCoordinator, targetConnectors, statePath, snapshotRoot, approvalSigningKey, maxSourceBytes, release, faultInjector = null }) {
+  constructor({ sourcePolicy, sourceCoordinator, targetConnectors, credentialBroker = null, statePath, snapshotRoot, approvalSigningKey, maxSourceBytes, release, faultInjector = null }) {
     this.sourcePolicy = sourcePolicy;
     this.sourceCoordinator = sourceCoordinator;
     this.targetConnectors = targetConnectors;
+    this.credentialBroker = credentialBroker;
     this.snapshotRoot = snapshotRoot;
     this.approvalSigningKey = approvalSigningKey;
     this.maxSourceBytes = maxSourceBytes;
@@ -310,7 +342,16 @@ export class SpoolCommandService {
 
   async approve(request, { expiresAt, nonce } = {}) {
     requireRequest(request); this.#requireCutoverOpen(request.migrationId);
+    // A pre-established CDC boundary is consumed here: approval materializes
+    // the full-load snapshot AFTER the slot reservation, so the slot's
+    // consistent point provably precedes the snapshot the load will read.
+    const cdcBoundary = this.runs.getCdcBoundary(request.migrationId);
     const prepared = await this.#prepare(request);
+    if (cdcBoundary && prepared.source?.connector !== 'postgres') {
+      fail('CDC_SOURCE_UNSUPPORTED', 'An established CDC boundary requires the PostgreSQL database source', {
+        connector: prepared.source?.connector ?? null
+      });
+    }
     if (typeof expiresAt !== 'string' || typeof nonce !== 'string') fail('INVALID_APPROVAL_REQUEST', 'expiresAt and nonce are required');
     const effects = await prepared.targetRuntime.approvalEffects(prepared.plan);
     const approval = createBoundApproval(
@@ -356,10 +397,28 @@ export class SpoolCommandService {
         context: { approval, planId, sourceStateId, targetContractId }
       });
       // Persist snapshot/CDC binding if postgres source provides LSN info.
-      // Binding validation failures (including CDC_GAP) fail the approval
-      // closed: proceeding without a proven snapshot/CDC boundary would allow
-      // an unobserved source interval.
-      if (prepared.snapshot?.sourceStateId && prepared.source?.sourceState?.state?.walLsn) {
+      // With an established boundary the binding carries the slot, the
+      // publication, and the slot reservation point as the proven start —
+      // never the join-time WAL position. Binding validation failures
+      // (including CDC_GAP) fail the approval closed: proceeding without a
+      // proven snapshot/CDC boundary would allow an unobserved interval.
+      if (cdcBoundary) {
+        // The manifest embeds the SourceState (coordinator results carry no
+        // sourceState of their own).
+        const manifestState = prepared.snapshot?.sourceState?.state ?? null;
+        if (!manifestState) fail('CDC_SNAPSHOT_MISMATCH', 'Boundary snapshot has no embedded SourceState');
+        const binding = buildSnapshotCdcBinding({
+          sourceStateId: prepared.snapshot.snapshotId,
+          databaseSnapshotIdentity: String(manifestState.systemIdentifier ?? prepared.snapshot.snapshotId),
+          exportedSnapshotId: cdcBoundary.exportedSnapshotId,
+          snapshotLsn: cdcBoundary.consistentPoint,
+          cdcStartLsn: cdcBoundary.consistentPoint,
+          cdcSlot: cdcBoundary.slotName,
+          cdcPublication: cdcBoundary.publicationName,
+          catalogId: manifestState.contractId ?? null
+        });
+        this.runs.setSnapshotCdcBinding(request.migrationId, binding);
+      } else if (prepared.snapshot?.sourceStateId && prepared.source?.sourceState?.state?.walLsn) {
         const binding = buildSnapshotCdcBinding({
           sourceStateId: prepared.snapshot.snapshotId,
           databaseSnapshotIdentity: String(prepared.source.sourceState.state.systemIdentifier ?? prepared.snapshot.snapshotId),
@@ -466,8 +525,20 @@ export class SpoolCommandService {
         this.#durableTransition(request.migrationId, MIGRATION_STATES.SNAPSHOT_RUNNING, { principal: request.principal, reason: 'snapshot running', planId, sourceStateId, targetContractId });
       }
       // Persist snapshot/CDC binding if postgres source provides LSN (real protocol sequence: snapshot and LSN captured atomically inside source snapshot).
+      // A slot-bound binding (established pre-approval, consumed at approve)
+      // is never rebuilt here: the run snapshot must equal the approved
+      // snapshot the binding was bound to, otherwise the stream would not
+      // cover the full load.
       // Binding validation failures (including CDC_GAP) fail closed.
-      if (snapshot?.snapshotId && source?.sourceState?.state?.walLsn) {
+      const existingBinding = this.runs.getSnapshotCdcBinding(request.migrationId);
+      if (existingBinding?.cdcSlot) {
+        if (existingBinding.sourceStateId !== snapshot.snapshotId) {
+          fail('CDC_SNAPSHOT_MISMATCH', 'Run snapshot does not match the slot-bound CDC boundary snapshot', {
+            boundarySnapshotId: existingBinding.sourceStateId,
+            runSnapshotId: snapshot.snapshotId
+          });
+        }
+      } else if (snapshot?.snapshotId && source?.sourceState?.state?.walLsn) {
         const binding = buildSnapshotCdcBinding({
           sourceStateId: snapshot.snapshotId,
           databaseSnapshotIdentity: String(source.sourceState.state.systemIdentifier ?? snapshot.snapshotId),
@@ -741,6 +812,7 @@ export class SpoolCommandService {
     this.#open(); requireRequest(request); this.#requireCutoverOpen(request.migrationId);
     if (!Array.isArray(repairPlanIds) || repairPlanIds.length === 0) fail('INVALID_REPAIR_REQUEST', 'repairPlanIds must be a non-empty array');
     if (typeof expiresAt !== 'string' || typeof nonce !== 'string') fail('INVALID_REPAIR_REQUEST', 'expiresAt and nonce are required');
+    assertNoCdcAdvanceBeforeRepair(this.runs.getSnapshotCdcBinding(request.migrationId));
     const run = this.runs.get(request.migrationId);
     if (!run || run.status !== 'VERIFICATION_FAILED') fail('REPAIR_NOT_REQUIRED', 'Repair approval requires a run in VERIFICATION_FAILED status');
     const durableBefore = this.#durableState(request.migrationId);
@@ -822,6 +894,9 @@ export class SpoolCommandService {
       fail('REPAIR_PLAN_SUPERSEDED', 'A different repair outcome is already recorded for this migration');
     }
     if (run.status !== 'VERIFICATION_FAILED') fail('REPAIR_NOT_REQUIRED', 'Repair execution requires a run in VERIFICATION_FAILED status');
+    // An approval granted before CDC advanced must not execute after it:
+    // the snapshot ranges it authorizes would revert proven writes.
+    assertNoCdcAdvanceBeforeRepair(this.runs.getSnapshotCdcBinding(request.migrationId));
 
     const { plan, snapshot, source, sourceRows, targetRuntime, targetPreflight } = prepared;
     assertRepairCapability(targetRuntime);
@@ -1179,6 +1254,9 @@ export class SpoolCommandService {
     if (armed.status !== 'ARMED' && armed.status !== 'COMMITTED') fail('CUTOVER_NOT_ARMED', 'Cutover commit requires an armed cutover');
     const run = this.runs.get(request.migrationId);
     if (!run || (run.status !== 'COMPLETE' && run.status !== 'REPAIR_COMPLETE')) fail('CUTOVER_NOT_ALLOWED', 'Cutover requires a completed verified run');
+    // Drain evidence binds the full-load snapshot from the slot-bound binding
+    // (see #applyCdcToWaterline); the prepare itself is live refs + plan, as
+    // with every other post-run operation.
     const prepared = await this.#prepare(request);
     if (prepared.plan.planId !== armed.planId) fail('CUTOVER_PLAN_CHANGED', 'Migration plan changed since cutover arming');
     if (prepared.targetPreflight.targetContractId !== armed.targetContractId) {
@@ -1213,7 +1291,9 @@ export class SpoolCommandService {
         targetContract: prepared.targetPreflight,
         targetExecution,
         sourceRuntime: prepared.source,
-        snapshotCdcBinding,
+        // Coordinator contract name is snapshotCdcBoundary (the binding
+        // record); a mismatched key would silently null the CDC context.
+        snapshotCdcBoundary: snapshotCdcBinding,
         cutoverAttemptId: attemptId,
         release: this.release
       };
@@ -1228,6 +1308,29 @@ export class SpoolCommandService {
             targetContractId: prepared.targetPreflight.targetContractId, fenceToken: lease.fencingToken,
             context: { fenceToken: lease.fencingToken, cutoverAttemptId: attemptId },
             commandId: commandIdFor('final-drain')
+          });
+          state = this.#durableState(request.migrationId);
+        }
+        if (state.currentState === MIGRATION_STATES.FINAL_DRAIN && hasCdcSlot) {
+          // Drain the stream to the source's current flush position through
+          // this commit's leased execution (no second lease): serialized
+          // fenced apply, CAS checkpoints, ack after durability. Termination
+          // is proven by transaction commits and server keepalive heartbeats,
+          // so a quiesced source drains instead of hanging. Retry resumes
+          // from the durable applied watermark, never re-applying blindly.
+          // Writes racing the drain fail the fresh final verification below
+          // closed rather than slipping into the committed proof.
+          if (prepared.source?.connector !== 'postgres' || !prepared.source?.sourceRef) {
+            fail('CDC_SOURCE_UNSUPPORTED', 'Final drain requires a PostgreSQL database source', {
+              connector: prepared.source?.connector ?? null
+            });
+          }
+          if (!this.credentialBroker || typeof this.credentialBroker.withSecret !== 'function') {
+            fail('CDC_BROKER_REQUIRED', 'Final drain requires a credential broker');
+          }
+          const waterline = await getPostgresFlushLsn({ ref: prepared.source.sourceRef, credentialBroker: this.credentialBroker });
+          await this.#applyCdcToWaterline({
+            request, prepared, targetExecution, untilLsn: waterline, ownerEpoch: randomUUID()
           });
           state = this.#durableState(request.migrationId);
         }
@@ -1343,6 +1446,245 @@ export class SpoolCommandService {
     this.#open(); requireRequest(request);
     return this.runs.beginRecovery({
       migrationId: request.migrationId, principal: request.principal, reason, targetState
+    });
+  }
+
+  // Record CDC apply progress on the slot-bound binding. The rebuild
+  // re-validates LSN monotonicity and the ack<=applied<=received
+  // watermark, so progress can only advance through proven positions.
+  #recordCdcProgress(migrationId, { appliedLsn = null, acknowledgedLsn = null, receivedLsn = null } = {}) {
+    const binding = this.runs.getSnapshotCdcBinding(migrationId);
+    if (!binding?.cdcSlot) fail('CDC_BINDING_REQUIRED', 'CDC progress requires a snapshot/CDC binding with a slot');
+    return this.runs.setSnapshotCdcBinding(migrationId, {
+      sourceStateId: binding.sourceStateId,
+      databaseSnapshotIdentity: binding.databaseSnapshotIdentity,
+      exportedSnapshotId: binding.exportedSnapshotId,
+      snapshotLsn: binding.snapshotLsn,
+      cdcStartLsn: binding.cdcStartLsn,
+      receivedLsn: receivedLsn ?? binding.receivedLsn,
+      appliedLsn: appliedLsn ?? binding.appliedLsn,
+      acknowledgedLsn: acknowledgedLsn ?? binding.acknowledgedLsn,
+      cdcSlot: binding.cdcSlot,
+      cdcPublication: binding.cdcPublication,
+      catalogId: binding.catalogId
+    });
+  }
+
+  // Apply CDC transactions through a shared, already-leased target execution:
+  // the replication stream is read from the SOURCE database (where the slot
+  // and publication live) and applied to the migration TARGET through the
+  // caller's leased execution. Serialized assembly, fenced ledger-evidenced
+  // commits, CAS+fenced checkpoint persistence, and source acknowledgement
+  // strictly after durability. The caller owns the execution lifecycle.
+  async #applyCdcToWaterline({ request, prepared, targetExecution, untilLsn = null, maxTransactions = null, ownerEpoch }) {
+    const binding = this.runs.getSnapshotCdcBinding(request.migrationId);
+    if (!binding?.cdcSlot) fail('CDC_BINDING_REQUIRED', 'CDC apply requires a snapshot/CDC binding with a slot');
+    if (!binding?.cdcPublication) fail('CDC_BINDING_REQUIRED', 'CDC apply requires a bound publication');
+    // CDC ledger evidence binds the full-load snapshot from the binding —
+    // never the prepare-time snapshot: run() cleans materialized snapshots
+    // on COMPLETE, and post-run prepares re-materialize planning snapshots
+    // whose rows the stream must not claim to continue.
+    if (!this.credentialBroker || typeof this.credentialBroker.withSecret !== 'function') {
+      fail('CDC_BROKER_REQUIRED', 'CDC apply requires a credential broker');
+    }
+    if (prepared.source?.connector !== 'postgres' || !prepared.source?.sourceRef) {
+      fail('CDC_SOURCE_UNSUPPORTED', 'CDC apply requires a PostgreSQL database source', { connector: prepared.source?.connector ?? null });
+    }
+    const sourceRef = prepared.source.sourceRef;
+    if (typeof sourceRef.schema !== 'string' || !sourceRef.schema || typeof sourceRef.table !== 'string' || !sourceRef.table) {
+      fail('CDC_SOURCE_UNSUPPORTED', 'CDC apply requires a PostgreSQL source with schema and table', {
+        connector: prepared.source?.connector ?? null
+      });
+    }
+    const primaryKey = await discoverTargetPrimaryKey({ targetRef: prepared.plan.targetRef, credentialBroker: this.credentialBroker });
+    const checkpointAdapter = {
+      load: () => this.runs.getCdcCheckpoint(request.migrationId, binding.cdcSlot),
+      save: record => this.runs.saveCdcCheckpoint(request.migrationId, record)
+    };
+    const applier = createCdcApplier({
+      ref: {
+        endpoint: sourceRef.endpoint,
+        database: sourceRef.database,
+        identity: sourceRef.identity,
+        secretRef: sourceRef.secretRef
+      },
+      credentialBroker: this.credentialBroker,
+      slotName: binding.cdcSlot,
+      publicationNames: [binding.cdcPublication],
+      migration: { migrationId: request.migrationId, sourceSnapshotId: binding.sourceStateId },
+      plan: {
+        planId: prepared.plan.planId,
+        mappingRevision: prepared.plan.mappingRevision,
+        mapping: prepared.plan.mapping,
+        targetSchema: prepared.plan.targetSchema,
+        targetRef: prepared.plan.targetRef,
+        writeStrategy: prepared.plan.writeStrategy
+      },
+      targetContractId: prepared.targetPreflight.targetContractId,
+      primaryKey,
+      sourceTable: { schema: sourceRef.schema, table: sourceRef.table },
+      target: targetExecution.openTarget(),
+      checkpoint: checkpointAdapter,
+      renewFence: async () => (await targetExecution.renewLease()).fencingToken,
+      ownerEpoch,
+      startLsn: binding.appliedLsn ?? binding.cdcStartLsn,
+      untilLsn,
+      maxTransactions,
+      stagingDir: join(this.#migrationSnapshotDir(request.migrationId), 'cdc-staging')
+    });
+    const summary = await applier.run();
+    this.#recordCdcProgress(request.migrationId, {
+      receivedLsn: summary?.receivedLsn ?? null,
+      appliedLsn: summary?.appliedLsn ?? binding.appliedLsn ?? binding.cdcStartLsn,
+      acknowledgedLsn: summary?.acknowledgedLsn ?? null
+    });
+    return summary;
+  }
+
+  // Catch up CDC through a waterline using the canonical production path:
+  // contract-validated slot, serialized fenced apply, CAS checkpoints, ack
+  // after durability. Allowed only after the full load is verified
+  // (READY_FOR_CUTOVER), in CATCHING_UP, or during FINAL_DRAIN: streaming
+  // while the full load is in flight is refused because unordered load-vs-
+  // CDC commits could regress newer rows with older snapshot versions, and
+  // the snapshot-pinned VERIFYING proof requires target == snapshot. No
+  // state changes here: convergence is evidenced by checkpoints and binding
+  // progress, and proven by the FINAL_DRAIN plus fresh live-source proof.
+  async catchUpCdc(request, { untilLsn = null, maxTransactions = null } = {}) {
+    this.#open(); requireRequest(request);
+    const binding = this.runs.getSnapshotCdcBinding(request.migrationId);
+    if (!binding?.cdcSlot) fail('CDC_BINDING_REQUIRED', 'CDC catch-up requires a snapshot/CDC binding with a slot');
+    // A fresh planning prepare suffices: streaming needs live refs and the
+    // plan, while ledger evidence binds binding.sourceStateId (the snapshot
+    // the full load read — run() cleans materialized snapshots on COMPLETE).
+    const prepared = await this.#prepare(request);
+    if (prepared.plan.targetRef.connector !== 'postgres') {
+      fail('CDC_TARGET_UNSUPPORTED', 'CDC catch-up currently supports the PostgreSQL target', { connector: prepared.plan.targetRef.connector });
+    }
+    const state = this.#durableState(request.migrationId);
+    if (!state) fail('CDC_NOT_RUNNING', 'CDC catch-up requires durable migration state');
+    if (![MIGRATION_STATES.CATCHING_UP, MIGRATION_STATES.FINAL_DRAIN, MIGRATION_STATES.READY_FOR_CUTOVER].includes(state.currentState)) {
+      fail('CDC_NOT_RUNNING', `CDC catch-up requires a verified full load (READY_FOR_CUTOVER/CATCHING_UP/FINAL_DRAIN), not ${state.currentState}`);
+    }
+    const targetExecution = await prepared.targetRuntime.createExecution({ migrationId: request.migrationId, targetRef: prepared.plan.targetRef });
+    try {
+      await targetExecution.renewLease();
+      await targetExecution.openTarget();
+      return await this.#applyCdcToWaterline({
+        request, prepared, targetExecution, untilLsn, maxTransactions, ownerEpoch: randomUUID()
+      });
+    } finally {
+      await targetExecution.close();
+    }
+  }
+
+  // Establish the snapshot/CDC boundary BEFORE approval. The no-gap argument
+  // is ordering, not a shared snapshot (PostgreSQL exported snapshots die
+  // with the exporting transaction, so no cross-session join is possible):
+  //   1. the slot reserves WAL at consistent point P, before anything else;
+  //   2. approval materializes and binds the full-load snapshot S (S > P);
+  //   3. run() loads exactly S and commits it before any CDC apply;
+  //   4. catch-up/drain apply the stream [P, ...] after the load commits.
+  // Overlap in (P, S] therefore double-applies strictly in order — snapshot
+  // rows first, stream second — through idempotent PK upserts/deletes, and
+  // post-S changes arrive only via the stream. Streaming while the full load
+  // is in flight is refused (catchUpCdc): unordered load-vs-CDC commits
+  // could regress newer rows with older snapshot versions. The boundary
+  // record (with slot ownership flags) is stored durably; approve() consumes
+  // it by binding the slot, the publication, and P as the proven start.
+  async establishCdcBoundary(request, { slotName, publicationName } = {}) {
+    this.#open(); requireRequest(request);
+    if (typeof slotName !== 'string' || !/^[a-z0-9_]{1,63}$/.test(slotName)) {
+      fail('INVALID_CDC_BOUNDARY_REQUEST', 'slotName must be a valid PostgreSQL replication slot name');
+    }
+    if (typeof publicationName !== 'string' || !publicationName) {
+      fail('INVALID_CDC_BOUNDARY_REQUEST', 'publicationName is required');
+    }
+    if (!this.credentialBroker || typeof this.credentialBroker.withSecret !== 'function') {
+      fail('CDC_BROKER_REQUIRED', 'CDC boundary establishment requires a credential broker');
+    }
+    this.#ensureDurableState(request.migrationId, request.principal, 'cdc boundary');
+    const durable = this.#durableState(request.migrationId);
+    const preApproval = new Set([
+      MIGRATION_STATES.CREATED, MIGRATION_STATES.DISCOVERING, MIGRATION_STATES.PREFLIGHTED,
+      MIGRATION_STATES.PLANNED, MIGRATION_STATES.AWAITING_APPROVAL
+    ]);
+    if (!durable || !preApproval.has(durable.currentState)) {
+      fail('CDC_BOUNDARY_TOO_LATE', `CDC boundary establishment must precede approval, not ${durable?.currentState ?? 'unknown'}`);
+    }
+    const existingBinding = this.runs.getSnapshotCdcBinding(request.migrationId);
+    if (existingBinding?.cdcSlot) fail('CDC_BOUNDARY_EXISTS', 'A slot-bound snapshot/CDC binding already exists for this migration');
+    // Planning snapshot: normalizes the source ref (schema/table/credentials
+    // for the publication and the replication stream).
+    const planning = await this.#prepare(request);
+    if (planning.source?.connector !== 'postgres' || !planning.source?.sourceRef) {
+      fail('CDC_SOURCE_UNSUPPORTED', 'CDC boundary establishment requires a PostgreSQL database source', {
+        connector: planning.source?.connector ?? null
+      });
+    }
+    const sourceRef = planning.source.sourceRef;
+    const boundary = await establishPostgresSnapshotCdcBoundary({
+      ref: sourceRef,
+      credentialBroker: this.credentialBroker,
+      slotName,
+      publicationName,
+      tables: [{ schema: sourceRef.schema, table: sourceRef.table }],
+      sourceStateId: planning.snapshot.snapshotId
+    });
+    assertBoundaryCoversSnapshot(boundary);
+    return this.runs.setCdcBoundary(request.migrationId, {
+      boundaryId: boundary.boundaryId,
+      snapshotId: planning.snapshot.snapshotId,
+      slotName: boundary.slotName,
+      publicationName: boundary.publicationName,
+      consistentPoint: boundary.consistentPoint,
+      exportedSnapshotId: boundary.exportedSnapshotId,
+      publicationCreated: boundary.publicationCreated,
+      slotExisted: boundary.slotExisted,
+      snapshotXmin: boundary.snapshotXmin,
+      snapshotXmax: boundary.snapshotXmax,
+      snapshotXip: boundary.snapshotXip,
+      planningSourceStateId: planning.snapshot.snapshotId,
+      sourceRef: {
+        endpoint: sourceRef.endpoint,
+        database: sourceRef.database,
+        identity: { user: sourceRef.identity?.user },
+        secretRef: sourceRef.secretRef
+      }
+    });
+  }
+
+  // Release a CDC boundary: drop the migration-owned slot so the source
+  // stops retaining WAL. Refuses when ownership is unproven (no boundary
+  // record) or the slot pre-existed (foreign slots are never dropped).
+  // The publication is retained (inert without slots; operator-owned name)
+  // and the slot-bound binding is kept as historical streaming evidence.
+  async releaseCdcBoundary(request) {
+    this.#open(); requireRequest(request);
+    const record = this.runs.getCdcBoundary(request.migrationId);
+    if (!record) fail('CDC_BOUNDARY_NOT_FOUND', 'No CDC boundary record for this migration; slot ownership is unproven so no slot will be dropped');
+    if (record.slotExisted) {
+      fail('CDC_SLOT_NOT_OWNED', 'The slot pre-existed this migration; drop it explicitly via psql, SPOOL will not drop foreign slots', {
+        slotName: record.slotName
+      });
+    }
+    if (!this.credentialBroker || typeof this.credentialBroker.withSecret !== 'function') {
+      fail('CDC_BROKER_REQUIRED', 'CDC boundary release requires a credential broker');
+    }
+    const live = await describePostgresSlot({ ref: record.sourceRef, credentialBroker: this.credentialBroker, slotName: record.slotName });
+    if (!live) {
+      this.runs.deleteCdcBoundary(request.migrationId);
+      return Object.freeze({
+        migrationId: request.migrationId, slotName: record.slotName, dropped: false,
+        reason: 'slot-absent', publicationName: record.publicationName, publicationRetained: true
+      });
+    }
+    assertSlotContractUsable({ slot: live, database: record.sourceRef.database, plugin: 'pgoutput', slotName: record.slotName });
+    const result = await dropPostgresReplicationSlot({ ref: record.sourceRef, credentialBroker: this.credentialBroker, slotName: record.slotName });
+    this.runs.deleteCdcBoundary(request.migrationId);
+    return Object.freeze({
+      migrationId: request.migrationId, slotName: record.slotName, dropped: result.dropped === true,
+      publicationName: record.publicationName, publicationRetained: true
     });
   }
 

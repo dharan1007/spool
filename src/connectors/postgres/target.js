@@ -90,9 +90,16 @@ export function postgresDeleteManifestEvidence(deletions) {
   if (!Array.isArray(deletions)) fail('INVALID_DELETE_MANIFEST', 'Delete manifest must be an array');
   const manifest = deletions.map(entry => {
     if (!entry || typeof entry !== 'object') fail('INVALID_DELETE_MANIFEST', 'Delete manifest entries must be objects');
-    requiredHash('expectedRowHash', entry.expectedRowHash);
+    // Precondition kinds: 'full-row' carries an expected content hash proven
+    // against the live row; 'key-only' (CDC without REPLICA IDENTITY FULL)
+    // deletes by key and is explicitly marked in evidence — never silently
+    // treated as a proven delete.
+    const precondition = entry.precondition ?? 'full-row';
+    if (precondition !== 'full-row' && precondition !== 'key-only') fail('INVALID_DELETE_MANIFEST', 'Delete precondition must be full-row or key-only');
+    if (precondition === 'full-row') requiredHash('expectedRowHash', entry.expectedRowHash);
+    else if (entry.expectedRowHash != null) fail('INVALID_DELETE_MANIFEST', 'Key-only delete must not carry an expected row hash');
     if (typeof entry.keyId !== 'string' || !HASH.test(entry.keyId)) fail('INVALID_DELETE_MANIFEST', 'Delete manifest keyId must be a canonical sha256 identity');
-    return { keyId: entry.keyId, expectedRowHash: entry.expectedRowHash };
+    return { keyId: entry.keyId, expectedRowHash: entry.expectedRowHash ?? null, precondition };
   }).sort((left, right) => (left.keyId < right.keyId ? -1 : left.keyId > right.keyId ? 1 : 0));
   return Object.freeze({ rowCount: manifest.length, payloadHash: sha256Canonical(DELETE_MANIFEST_DOMAIN, manifest) });
 }
@@ -202,8 +209,35 @@ export async function ensurePostgresMetadata({ targetRef, credentialBroker } = {
           target_database text NOT NULL,
           target_schema text NOT NULL,
           target_table text NOT NULL,
-          committed_at timestamptz NOT NULL DEFAULT clock_timestamp()
+          committed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+          inserted integer CHECK (inserted IS NULL OR inserted >= 0),
+          updated integer CHECK (updated IS NULL OR updated >= 0),
+          deleted integer CHECK (deleted IS NULL OR deleted >= 0),
+          skipped_missing integer CHECK (skipped_missing IS NULL OR skipped_missing >= 0),
+          batch_kind text NOT NULL DEFAULT 'load' CHECK (batch_kind IN ('load', 'cdc')),
+          source_xid bigint,
+          source_commit_lsn pg_lsn
         )
+      `);
+      // Outcome + provenance columns for databases bootstrapped before they
+      // existed. Ledger identity never depends on them.
+      for (const column of ['inserted', 'updated', 'deleted', 'skipped_missing']) {
+        await client.query(`
+          ALTER TABLE ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
+          ADD COLUMN IF NOT EXISTS ${quoteIdentifier(column)} integer CHECK (${quoteIdentifier(column)} IS NULL OR ${quoteIdentifier(column)} >= 0)
+        `);
+      }
+      await client.query(`
+        ALTER TABLE ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
+        ADD COLUMN IF NOT EXISTS batch_kind text NOT NULL DEFAULT 'load'
+      `);
+      await client.query(`
+        ALTER TABLE ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
+        ADD COLUMN IF NOT EXISTS source_xid bigint
+      `);
+      await client.query(`
+        ALTER TABLE ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
+        ADD COLUMN IF NOT EXISTS source_commit_lsn pg_lsn
       `);
       await client.query(`
         CREATE TABLE IF NOT EXISTS ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEASE_TABLE)} (
@@ -371,7 +405,8 @@ async function checkRepairContract(client, target, targetContractId, operation =
 async function findLedgerEntry(client, targetRef, batchIdentity) {
   const result = await client.query(`
     SELECT batch_identity, migration_id, plan_id, source_snapshot_id, mapping_revision,
-           row_count, payload_hash, target_database, target_schema, target_table, committed_at
+           row_count, payload_hash, target_database, target_schema, target_table, committed_at,
+           inserted, updated, deleted, skipped_missing, batch_kind, source_xid, source_commit_lsn
     FROM ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
     WHERE batch_identity = $1
     FOR UPDATE
@@ -379,16 +414,29 @@ async function findLedgerEntry(client, targetRef, batchIdentity) {
   return result.rows[0] ?? null;
 }
 
-async function insertLedgerEntry(client, targetRef, evidence) {
+// Outcome counts and CDC provenance ride in the ledger row inside the SAME
+// target transaction as the mutation, so replay after a crash returns the
+// ORIGINAL exact counts instead of reconstructed approximations, and CDC
+// batches remain enumerable by commit position for boundary-bounded
+// verification. Callers that do not track per-effect counts pass no outcome
+// and store NULLs; non-CDC callers store the default 'load' kind.
+async function insertLedgerEntry(client, targetRef, evidence, outcome = {}, provenance = {}) {
+  const outcomeValue = value => (Number.isSafeInteger(value) && value >= 0 ? value : null);
+  const kind = provenance.kind ?? 'load';
+  if (kind !== 'load' && kind !== 'cdc') fail('INVALID_BATCH_PROVENANCE', 'Ledger batch kind must be load or cdc');
   await client.query(`
     INSERT INTO ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
       (batch_identity, migration_id, plan_id, source_snapshot_id, mapping_revision,
-       row_count, payload_hash, target_database, target_schema, target_table)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       row_count, payload_hash, target_database, target_schema, target_table,
+       inserted, updated, deleted, skipped_missing, batch_kind, source_xid, source_commit_lsn)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
   `, [
     evidence.batchIdentity, evidence.migrationId, evidence.planId, evidence.sourceSnapshotId,
     evidence.mappingRevision, evidence.rowCount, evidence.payloadHash,
-    targetRef.database, targetRef.schema, targetRef.table
+    targetRef.database, targetRef.schema, targetRef.table,
+    outcomeValue(outcome.inserted), outcomeValue(outcome.updated),
+    outcomeValue(outcome.deleted), outcomeValue(outcome.skippedMissing),
+    kind, provenance.xid ?? null, provenance.commitLsn ?? null
   ]);
 }
 function encodeCopyField(value) {
@@ -630,6 +678,19 @@ export class PostgresTarget {
     });
   }
 
+  // Optional CDC provenance for CDC-applied batches: binds the ledger entry to
+  // the exact source transaction for boundary-bounded verification.
+  #cdcProvenance(input) {
+    const provenance = input.cdcProvenance ?? null;
+    if (provenance == null) return { kind: 'load' };
+    if (typeof provenance !== 'object' || Array.isArray(provenance)) fail('INVALID_BATCH_PROVENANCE', 'CDC provenance must be an object');
+    if (!Number.isSafeInteger(provenance.xid) || provenance.xid < 0) fail('INVALID_BATCH_PROVENANCE', 'CDC provenance xid must be a non-negative safe integer');
+    if (typeof provenance.commitLsn !== 'string' || !/^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/.test(provenance.commitLsn)) {
+      fail('INVALID_BATCH_PROVENANCE', 'CDC provenance commitLsn must be a valid PostgreSQL LSN');
+    }
+    return { kind: 'cdc', xid: provenance.xid, commitLsn: provenance.commitLsn.toUpperCase() };
+  }
+
   async commitUpsertBatch(input = {}) {
     this.#assertOpen();
     const rows = input.rows;
@@ -643,6 +704,7 @@ export class PostgresTarget {
     const keyed = requireUniqueMutationKeys(primaryKey, rows);
     const described = postgresPayloadEvidence(rows);
     const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
+    const provenance = this.#cdcProvenance(input);
     if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
 
     const updatable = columns.filter(column => !primaryKey.includes(column));
@@ -662,7 +724,14 @@ export class PostgresTarget {
             return { kind: 'BATCH_IDENTITY_CONFLICT' };
           }
           await client.query('COMMIT');
-          return { kind: 'COMMITTED_EXACT', alreadyCommitted: true, inserted: existing.inserted ?? null, updated: null };
+          // Exact original outcome from the ledger row: replay returns what
+          // the first commit observed, never a reconstruction. Pre-outcome
+          // rows carry NULLs (documented bound, not a silent zero).
+          return {
+            kind: 'COMMITTED_EXACT', alreadyCommitted: true,
+            inserted: existing.inserted == null ? null : Number(existing.inserted),
+            updated: existing.updated == null ? null : Number(existing.updated)
+          };
         }
 
         const quotedTable = `${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`;
@@ -698,7 +767,7 @@ export class PostgresTarget {
           fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL upsert did not return exact per-row evidence', { inserted, updated, expected: keyed.length });
         }
 
-        await insertLedgerEntry(client, this.targetRef, evidence);
+        await insertLedgerEntry(client, this.targetRef, evidence, { inserted, updated }, provenance);
         await client.query('COMMIT');
         return { kind: 'COMMITTED_EXACT', alreadyCommitted: false, inserted, updated };
       } catch (error) {
@@ -712,7 +781,7 @@ export class PostgresTarget {
     return Object.freeze({
       status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
       batchIdentity: evidence.batchIdentity, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash,
-      inserted: result.inserted, updated: result.updated
+      inserted: result.inserted ?? null, updated: result.updated ?? null
     });
   }
 
@@ -728,11 +797,15 @@ export class PostgresTarget {
       const identified = postgresMutationKeyId({ primaryKey, row: entry.key });
       if (seen.has(identified.keyId)) fail('DUPLICATE_BATCH_KEY', 'Delete batch contains a duplicate primary key', { keyId: identified.keyId });
       seen.add(identified.keyId);
-      requiredHash('expectedRowHash', entry.expectedRowHash);
-      return Object.freeze({ key: identified.key, keyId: identified.keyId, expectedRowHash: entry.expectedRowHash });
+      const precondition = entry.precondition ?? 'full-row';
+      if (precondition !== 'full-row' && precondition !== 'key-only') fail('INVALID_DELETE_MANIFEST', 'Delete precondition must be full-row or key-only');
+      if (precondition === 'full-row') requiredHash('expectedRowHash', entry.expectedRowHash);
+      else if (entry.expectedRowHash != null) fail('INVALID_DELETE_MANIFEST', 'Key-only delete must not carry an expected row hash');
+      return Object.freeze({ key: identified.key, keyId: identified.keyId, expectedRowHash: entry.expectedRowHash ?? null, precondition });
     });
     const described = postgresDeleteManifestEvidence(prepared);
     const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
+    const provenance = this.#cdcProvenance(input);
     if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
 
     const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
@@ -751,13 +824,18 @@ export class PostgresTarget {
             return { kind: 'BATCH_IDENTITY_CONFLICT' };
           }
           await client.query('COMMIT');
-          return { kind: 'COMMITTED_EXACT', alreadyCommitted: true };
+          return {
+            kind: 'COMMITTED_EXACT', alreadyCommitted: true,
+            deleted: existing.deleted == null ? null : Number(existing.deleted),
+            skippedMissing: existing.skipped_missing == null ? null : Number(existing.skipped_missing)
+          };
         }
 
         const quotedTable = `${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`;
         const missing = [];
         const mismatched = [];
         const doomed = [];
+        const skippedMissing = [];
         for (const entry of prepared) {
           const whereValues = [];
           const whereClauses = primaryKey.map(field => {
@@ -766,7 +844,18 @@ export class PostgresTarget {
           });
           const found = await client.query(`SELECT * FROM ${quotedTable} WHERE ${whereClauses.join(' AND ')} FOR UPDATE`, whereValues);
           if (found.rows.length === 0) {
+            // Key-only deletes (CDC without REPLICA IDENTITY FULL) treat an
+            // already-absent row as converged and skip it with evidence;
+            // full-row deletes fail closed on missing rows.
+            if (entry.precondition === 'key-only') {
+              skippedMissing.push(entry.keyId);
+              continue;
+            }
             missing.push(entry.keyId);
+            continue;
+          }
+          if (entry.precondition === 'key-only') {
+            doomed.push(entry);
             continue;
           }
           const actual = found.rows[0];
@@ -795,9 +884,10 @@ export class PostgresTarget {
           }
         }
 
-        await insertLedgerEntry(client, this.targetRef, evidence);
+        const deletedCount = evidence.rowCount - skippedMissing.length;
+        await insertLedgerEntry(client, this.targetRef, evidence, { deleted: deletedCount, skippedMissing: skippedMissing.length }, provenance);
         await client.query('COMMIT');
-        return { kind: 'COMMITTED_EXACT', alreadyCommitted: false };
+        return { kind: 'COMMITTED_EXACT', alreadyCommitted: false, deleted: deletedCount, skippedMissing };
       } catch (error) {
         try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
         throw error;
@@ -806,10 +896,21 @@ export class PostgresTarget {
 
     if (result.kind === 'BATCH_IDENTITY_CONFLICT') fail('BATCH_IDENTITY_CONFLICT', 'Batch identity is already committed with different evidence', { batchIdentity: evidence.batchIdentity });
     if (result.kind !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL target did not return exact delete evidence');
+    // Fresh commits return the skipped key ids; replay returns only the
+    // ledger count (key ids are not recoverable). The array stays
+    // array-typed on both paths; the count preserves replay precision.
+    const skippedIds = Array.isArray(result.skippedMissing) ? result.skippedMissing : [];
+    const skippedTotal = skippedIds.length > 0
+      ? skippedIds.length
+      : (typeof result.skippedMissing === 'number' && Number.isSafeInteger(result.skippedMissing) && result.skippedMissing >= 0
+        ? result.skippedMissing
+        : 0);
     return Object.freeze({
       status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
       batchIdentity: evidence.batchIdentity, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash,
-      deleted: evidence.rowCount
+      deleted: result.deleted ?? (evidence.rowCount - skippedTotal),
+      skippedMissing: Object.freeze([...skippedIds]),
+      skippedMissingCount: skippedTotal
     });
   }
 
@@ -883,14 +984,21 @@ export class PostgresTarget {
         SELECT batch_identity AS "batchIdentity", migration_id AS "migrationId", plan_id AS "planId",
                source_snapshot_id AS "sourceSnapshotId", mapping_revision AS "mappingRevision",
                row_count AS "rowCount", payload_hash AS "payloadHash", target_table AS "targetTable",
-               committed_at AS "committedAt"
+               committed_at AS "committedAt", batch_kind AS "batchKind",
+               source_xid AS "sourceXid", source_commit_lsn AS "sourceCommitLsn"
         FROM ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
         WHERE target_database = $1 AND target_schema = $2 AND target_table = $3${migrationClause}
         ORDER BY committed_at, batch_identity
       `, values);
       return result.rows;
     });
-    return rows.map(row => Object.freeze({ ...row, mappingRevision: Number(row.mappingRevision), rowCount: Number(row.rowCount), committedAt: new Date(row.committedAt).toISOString() }));
+    return rows.map(row => Object.freeze({
+      ...row,
+      mappingRevision: Number(row.mappingRevision),
+      rowCount: Number(row.rowCount),
+      committedAt: new Date(row.committedAt).toISOString(),
+      sourceXid: row.sourceXid == null ? null : Number(row.sourceXid)
+    }));
   }
 
   async applyRepairOperation(input = {}) {

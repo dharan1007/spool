@@ -76,9 +76,18 @@ test('logical capture streams ordered row changes with LSNs and resumes from che
   });
   assert.equal(publication.created, true);
   const same = await ensurePostgresPublication({
-    ref: dbRef(), credentialBroker: broker, publicationName, tables: [{ schema: 'public', table }]
+    ref: dbRef(), credentialBroker: broker, publicationName, tables: [{ schema: 'public', table }, { schema: 'public', table: fullTable }]
   });
   assert.equal(same.created, false);
+  // Reusing an existing publication for a different table set fails closed:
+  // the production applier depends on the exact publication contract and
+  // refuses unexpected tables rather than skipping them past the watermark.
+  await assert.rejects(
+    ensurePostgresPublication({
+      ref: dbRef(), credentialBroker: broker, publicationName, tables: [{ schema: 'public', table }]
+    }),
+    error => error?.code === 'PUBLICATION_MISMATCH'
+  );
   await dropPostgresReplicationSlot({ ref: dbRef(), credentialBroker: broker, slotName });
   const slot = await createPostgresReplicationSlot({ ref: dbRef(), credentialBroker: broker, slotName });
   assert.equal(slot.existed, false);

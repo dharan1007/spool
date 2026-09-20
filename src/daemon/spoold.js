@@ -6,7 +6,7 @@ const COMMANDS = new Set([
   'inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt',
   'repair-evidence', 'approve-repair', 'run-repair', 'repair-receipt',
   'begin-cutover', 'rearm-cutover', 'commit-cutover', 'abort-cutover', 'cutover',
-  'begin-recovery'
+  'begin-recovery', 'establish-cdc-boundary', 'catch-up-cdc', 'release-cdc-boundary'
 ]);
 
 function safeTokenEqual(expected, actual) {
@@ -76,6 +76,9 @@ async function dispatch(service, body) {
     case 'abort-cutover': return service.abortCutover(body.migrationId, body.options ?? {});
     case 'cutover': return service.cutover(body.migrationId);
     case 'begin-recovery': return service.beginRecovery(body.request, body.options ?? {});
+    case 'establish-cdc-boundary': return service.establishCdcBoundary(body.request, body.options ?? {});
+    case 'catch-up-cdc': return service.catchUpCdc(body.request, body.options ?? {});
+    case 'release-cdc-boundary': return service.releaseCdcBoundary(body.request);
     default: fail('INVALID_COMMAND', 'Unsupported command');
   }
 }
