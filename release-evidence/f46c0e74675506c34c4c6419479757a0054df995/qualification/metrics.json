@@ -1,0 +1,274 @@
+{
+  "preflight": {
+    "status": "PASS",
+    "availableBytes": 4347146240,
+    "neededBytes": 230400000
+  },
+  "postgres.target.load": {
+    "scenario": "postgres.target.load",
+    "rowCount": 100000,
+    "payloadBytes": 256,
+    "batchSize": 5000,
+    "totalBytes": 35600000,
+    "durationMs": 44278.5556,
+    "rowsPerSec": 4000.987283622107,
+    "mibPerSec": 1.3583674173063947,
+    "latency": {
+      "min": 1249.67654,
+      "max": 1249.67654,
+      "mean": 1249.67654,
+      "p50": 1249.67654,
+      "p90": 1249.67654,
+      "p95": 1249.67654,
+      "p99": 1249.67654,
+      "count": 1
+    },
+    "targetCount": 100000,
+    "verification": {
+      "status": "VERIFIED",
+      "accounting": {
+        "sourceRows": 100000,
+        "writtenRows": 100000,
+        "rejectedRows": 0,
+        "filteredRows": 0,
+        "unexplainedRows": 0
+      },
+      "ledger": {
+        "complete": true,
+        "batchCount": 20,
+        "rowCount": 100000
+      }
+    },
+    "startWall": "2026-09-20T07:27:05.480Z",
+    "endWall": "2026-09-20T07:27:30.474Z",
+    "datasetId": "sha256:adddd6aecc767d9903c0ade59ab987f78d7ae2cedc435bfc28f411e5216d1ed9",
+    "planId": "sha256:c7ce6ef7ab86e00dd5a508cd19cbbf6a4e4b695e0639093ad7474540102fab7b",
+    "table": "qualify_target_spool_qualify_2026_09_20t07_26_45_892z_3b4d1862",
+    "status": "PASS"
+  },
+  "postgres.bulk.load": {
+    "scenario": "postgres.bulk.load",
+    "rowCount": 100000,
+    "batchSize": 5000,
+    "durationMs": 39288.177,
+    "rowsPerSec": 4758.186533683093,
+    "mibPerSec": 1.161666634199974,
+    "latency": {
+      "min": 1050.82051,
+      "max": 1050.82051,
+      "mean": 1050.82051,
+      "p50": 1050.82051,
+      "p90": 1050.82051,
+      "p95": 1050.82051,
+      "p99": 1050.82051,
+      "count": 1
+    },
+    "verification": "VERIFIED",
+    "status": "PASS"
+  },
+  "postgres.content-exact.verification": {
+    "scenario": "postgres.content-exact.verification",
+    "rowCount": 100000,
+    "durationMs": 82442.1214,
+    "rowsPerSec": 1548.4061771341828,
+    "mibPerSec": 0.3780288518394001,
+    "verificationMs": 0.0017,
+    "corruptionDetected": true,
+    "latency": {
+      "min": 64582.5375,
+      "max": 64582.5375,
+      "mean": 64582.5375,
+      "p50": 64582.5375,
+      "p90": 64582.5375,
+      "p95": 64582.5375,
+      "p99": 64582.5375,
+      "count": 1
+    },
+    "status": "PASS"
+  },
+  "postgres.repair.load": {
+    "scenario": "postgres.repair.load",
+    "rowCount": 100000,
+    "corruptCount": 100,
+    "repairOps": {
+      "insert": 0,
+      "update": 100,
+      "delete": 0,
+      "alreadyApplied": 0
+    },
+    "durationMs": 135735.7023,
+    "rowsPerSec": 2.0299431803070274,
+    "mibPerSec": 0.0004955915967546454,
+    "verification": "VERIFIED",
+    "status": "PASS"
+  },
+  "postgres.cdc.soak": {
+    "scenario": "postgres.cdc.soak",
+    "durationSec": 30,
+    "writers": 2,
+    "chunks": 10,
+    "eventsAttempted": 2511,
+    "expectedInsertCount": 1011,
+    "capturedChanges": 610,
+    "insertCapturedTotal": 1011,
+    "tailEvents": 401,
+    "tailCaptured": 401,
+    "windowBounded": true,
+    "strictResume": true,
+    "streamOrdered": true,
+    "slotLossDetected": true,
+    "slotLossCode": "CDC_SLOT_LOST",
+    "lagBytes": "0",
+    "checkpoint": "0/1FBB5840",
+    "status": "PASS",
+    "durationMs": 49022.4589
+  },
+  "postgres.workers.load": {
+    "scenario": "postgres.workers.load",
+    "workers": 2,
+    "perWorkerRows": 50000,
+    "totalRows": 100000,
+    "durationMs": 41002.0481,
+    "rowsPerSec": 2445.0034912327105,
+    "results": [
+      {
+        "table": "qualify_worker_spool_qualify_2026_09_20t07_26_45_892z_3b4d1862_0",
+        "rows": 50000,
+        "status": "COMPLETE",
+        "state": "READY_FOR_CUTOVER",
+        "transitions": 11
+      },
+      {
+        "table": "qualify_worker_spool_qualify_2026_09_20t07_26_45_892z_3b4d1862_1",
+        "rows": 50000,
+        "status": "COMPLETE",
+        "state": "READY_FOR_CUTOVER",
+        "transitions": 11
+      }
+    ],
+    "verification": "VERIFIED",
+    "status": "PASS"
+  },
+  "postgres.largeTransactions": {
+    "scenario": "postgres.largeTransactions",
+    "results": [
+      {
+        "size": 1,
+        "durationMs": 31.3371,
+        "rowsPerSec": 31.91105750053451,
+        "memDeltaBytes": 0,
+        "count": 1
+      },
+      {
+        "size": 100,
+        "durationMs": 35.4791,
+        "rowsPerSec": 2818.5607864912017,
+        "memDeltaBytes": 0,
+        "count": 100
+      },
+      {
+        "size": 10000,
+        "durationMs": 168.3365,
+        "rowsPerSec": 59404.82307758567,
+        "memDeltaBytes": 45056,
+        "count": 10000
+      }
+    ],
+    "largestTransaction": 10000,
+    "durationMs": 361.5571,
+    "status": "PASS"
+  },
+  "postgres.database-source.load": {
+    "scenario": "postgres.database-source.load",
+    "tableCount": 4,
+    "totalRows": 2000,
+    "catalogId": "sha256:79067e65faf18a6e52a5a997ac0ca7468124b479a3f3eff04ac0b0010b7d83f9",
+    "snapshotId": "00000044-000001C4-1",
+    "durationMs": 717.0477,
+    "status": "PASS"
+  },
+  "postgres.crashRecovery": {
+    "scenario": "postgres.crashRecovery",
+    "rpoRto": [
+      {
+        "faultId": "process-restart-after-complete",
+        "rtoMs": 17857,
+        "rpoRows": 0,
+        "finalVerification": "VERIFIED",
+        "result": "PASS"
+      },
+      {
+        "faultId": "os-kill-mid-copy",
+        "rtoMs": 384,
+        "rpoRows": 0,
+        "finalVerification": "VERIFIED",
+        "result": "PASS",
+        "ledgerBeforeKill": 1,
+        "ledgerFinal": 20,
+        "recoveredBatches": 0,
+        "checkpointBeforeKill": {
+          "lastBatchIdentity": "sha256:0d30f738b121f70d53aefa92e610c9f8942ac89f8fd767653581ed302ea1ab6b",
+          "mappingRevision": 1,
+          "migrationId": "qualify-crash-kill-spool-qualify-2026-09-20T07-26-45-892Z-3b4d1862",
+          "nextOffset": 1000,
+          "planId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "schemaVersion": 1,
+          "sourceSnapshotId": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "targetIdentity": {
+            "connectionId": "pg",
+            "connector": "postgres",
+            "database": "spooltest",
+            "endpoint": "postgresql://127.0.0.1:5432?sslmode=disable",
+            "identity": {
+              "user": "spooltest"
+            },
+            "resource": "public.qualify_crash_kill_3b4d1862_2js5",
+            "schema": "public",
+            "table": "qualify_crash_kill_3b4d1862_2js5"
+          }
+        },
+        "checkpointAfter": {
+          "lastBatchIdentity": "sha256:0d30f738b121f70d53aefa92e610c9f8942ac89f8fd767653581ed302ea1ab6b",
+          "mappingRevision": 1,
+          "migrationId": "qualify-crash-kill-spool-qualify-2026-09-20T07-26-45-892Z-3b4d1862",
+          "nextOffset": 1000,
+          "planId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "schemaVersion": 1,
+          "sourceSnapshotId": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "targetIdentity": {
+            "connectionId": "pg",
+            "connector": "postgres",
+            "database": "spooltest",
+            "endpoint": "postgresql://127.0.0.1:5432?sslmode=disable",
+            "identity": {
+              "user": "spooltest"
+            },
+            "resource": "public.qualify_crash_kill_3b4d1862_2js5",
+            "schema": "public",
+            "table": "qualify_crash_kill_3b4d1862_2js5"
+          }
+        }
+      }
+    ],
+    "status": "PASS",
+    "durationMs": 34590.3962
+  },
+  "resource": {
+    "count": 364,
+    "rss": {
+      "min": 77983744,
+      "max": 443682816,
+      "median": 428511232,
+      "p95": 439107584,
+      "initial": 103038976,
+      "final": 235745280,
+      "peak": 443682816,
+      "slope": 364577.7582417582
+    },
+    "heap": {
+      "min": 24700600,
+      "max": 343464296,
+      "median": 128525864
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "capturedAt": "2026-09-20T07:26:45.901Z",
+  "os": {
+    "platform": "win32",
+    "arch": "x64",
+    "release": "10.0.26200",
+    "kernel": null,
+    "hostname": "Dharan"
+  },
+  "cpu": {
+    "model": "AMD Ryzen 5 5600H with Radeon Graphics         ",
+    "logicalCount": 12,
+    "physicalCount": null
+  },
+  "memory": {
+    "totalBytes": 16473231360,
+    "freeBytes": 1576697856
+  },
+  "node": {
+    "version": "v22.23.2",
+    "arch": "x64",
+    "platform": "win32",
+    "npmVersion": null,
+    "packageLockDigest": "96c99970f26f6b3bbed8e9a51722a543fe8d2813c770b63d3526c8e5abdb9cfe"
+  },
+  "git": {
+    "sha": "f46c0e74675506c34c4c6419479757a0054df995",
+    "dirty": false,
+    "branch": "feat/industrial-postgres-qualification"
+  },
+  "pg": {
+    "driverVersion": "8.23.0",
+    "copyStreamsVersion": "^7.0.0",
+    "serverVersion": "17.0 (Debian 17.0-1.pgdg110+1)",
+    "settings": {
+      "fsync": "on",
+      "full_page_writes": "on",
+      "maintenance_work_mem": "65536",
+      "max_connections": "100",
+      "max_replication_slots": "4",
+      "max_wal_senders": "4",
+      "max_wal_size": "1024",
+      "shared_buffers": "16384",
+      "synchronous_commit": "on",
+      "wal_level": "logical",
+      "work_mem": "4096"
+    }
+  },
+  "container": {
+    "cgroup": null
+  }
+}
