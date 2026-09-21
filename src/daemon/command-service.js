@@ -1281,13 +1281,21 @@ export class SpoolCommandService {
       const verifier = createVerificationCoordinator();
       const snapshotCdcBinding = this.runs.getSnapshotCdcBinding(request.migrationId);
       const hasCdcSlot = Boolean(snapshotCdcBinding?.cdcSlot);
+      // Batch-identity binding uses the RUN's recorded source snapshot — the
+      // exact state the ledger batches were committed from. The post-run
+      // prepare re-materializes a fresh snapshot (new identity for database
+      // sources); binding batch identities to it would mismatch the ledger
+      // by construction and make non-CDC cutover unprovable. Freshness still
+      // comes from the live row stream: racing writes change the live count
+      // and fail the proof closed.
+      const proofSourceStateId = run.sourceSnapshotId ?? prepared.snapshot?.snapshotId ?? null;
       // Verification shares this commit's leased target execution: minting a
       // second execution would trip single-writer lease ownership, and the
       // commit fence must cover the proof it relies on.
       const verifyInput = {
         migrationId: request.migrationId,
         plan: prepared.plan,
-        sourceState: prepared.snapshot ? { sourceStateId: prepared.snapshot.snapshotId } : null,
+        sourceState: proofSourceStateId ? { sourceStateId: proofSourceStateId } : null,
         targetContract: prepared.targetPreflight,
         targetExecution,
         sourceRuntime: prepared.source,
@@ -1372,7 +1380,9 @@ export class SpoolCommandService {
             finalVerificationId: persisted.verificationId,
             fenceToken: lease.fencingToken,
             planId: prepared.plan.planId,
-            sourceStateId: prepared.snapshot?.snapshotId ?? null,
+            // Same binding as the final proof: the run's recorded snapshot,
+            // never the ephemeral re-materialized prepare snapshot.
+            sourceStateId: run.sourceSnapshotId ?? prepared.snapshot?.snapshotId ?? null,
             targetContractId: prepared.targetPreflight.targetContractId,
             commandId: commandIdFor('commit')
           });
@@ -1414,7 +1424,8 @@ export class SpoolCommandService {
           migrationId: request.migrationId, principal: request.principal,
           postCutoverVerificationId: post.verificationId,
           planId: prepared.plan.planId,
-          sourceStateId: prepared.snapshot?.snapshotId ?? null,
+          // Same binding as the post proof: the run's recorded snapshot.
+          sourceStateId: run.sourceSnapshotId ?? prepared.snapshot?.snapshotId ?? null,
           targetContractId: prepared.targetPreflight.targetContractId,
           commandId: commandIdFor('complete')
         });
