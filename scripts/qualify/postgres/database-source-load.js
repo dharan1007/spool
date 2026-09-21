@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Client } from 'pg';
 import { CredentialBroker } from '../../../src/daemon/credential-broker.js';
 import { discoverPostgresCatalog, withExportedPostgresSnapshot } from '../../../src/connectors/postgres/database-source.js';
