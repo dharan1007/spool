@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createMigrationReceipt, createRepairReceipt } from '../src/execution/receipt.js';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  createMigrationReceipt,
+  createRepairReceipt,
+  signReceiptEnvelope,
+  verifySignedReceiptEnvelope
+} from '../src/execution/receipt.js';
+import { generateSigningKeyPair, publicKeyId } from '../src/platform/signing.js';
 
 const input = () => ({
   release: { version: '1.0.0', commitSha: '0123456789abcdef0123456789abcdef01234567' },
@@ -69,4 +78,48 @@ test('repair receipt requires exact re-verification and a bound approval identit
   const unplanned = repairInput();
   unplanned.repairPlanIds = [];
   assert.throws(() => createRepairReceipt(unplanned), /INVALID_REPAIR_RECEIPT_INPUT/);
+});
+
+test('signed receipts verify offline and every semantic tamper fails', () => {
+  const receipt = createMigrationReceipt(input());
+  const keys = generateSigningKeyPair();
+  const keyId = publicKeyId(keys.publicKey);
+  const envelope = signReceiptEnvelope({ receipt, privateKey: keys.privateKey });
+  assert.equal(envelope.kind, 'spool-signed-receipt-v1');
+  assert.equal(envelope.signature.keyId, keyId);
+  assert.equal(envelope.signature.domain, 'spool-receipt-signature-v1');
+  const trustRoots = [{ keyId, publicKey: keys.publicKey }];
+  const verified = verifySignedReceiptEnvelope(envelope, { trustRoots });
+  assert.equal(verified.authentic, true);
+  assert.equal(verified.receiptId, receipt.receiptId);
+
+  // Claimed keyId must match the actual signing key.
+  const other = generateSigningKeyPair();
+  assert.throws(
+    () => signReceiptEnvelope({ receipt, privateKey: keys.privateKey, keyId: publicKeyId(other.publicKey) }),
+    /KEY_FINGERPRINT_MISMATCH/
+  );
+  // Untrusted keys fail closed.
+  assert.throws(
+    () => verifySignedReceiptEnvelope(envelope, { trustRoots: [{ keyId: publicKeyId(other.publicKey), publicKey: other.publicKey }] }),
+    /RECEIPT_KEY_UNTRUSTED/
+  );
+  // Record tamper breaks the content identity before signature checks.
+  const edited = structuredClone(envelope);
+  edited.record.counts.writtenRows += 1;
+  assert.throws(() => verifySignedReceiptEnvelope(edited, { trustRoots }), /RECEIPT_IDENTITY_MISMATCH/);
+  // ReceiptId swap breaks the binding.
+  const swapped = structuredClone(envelope);
+  swapped.receiptId = createMigrationReceipt({ ...input(), migrationId: 'mig_receipt_002' }).receiptId;
+  assert.throws(() => verifySignedReceiptEnvelope(swapped, { trustRoots }), /RECEIPT_IDENTITY_MISMATCH/);
+  // Signature tamper fails.
+  const reSigned = structuredClone(envelope);
+  reSigned.signature.signature = Buffer.from('tampered-signature-payload').toString('base64url');
+  assert.throws(() => verifySignedReceiptEnvelope(reSigned, { trustRoots }), /RECEIPT_SIGNATURE_INVALID/);
+  // Retired keys keep verifying: rotation appends, never rewrites history.
+  const rotated = generateSigningKeyPair();
+  const rotatedRoots = [...trustRoots, { keyId: publicKeyId(rotated.publicKey), publicKey: rotated.publicKey }];
+  assert.equal(verifySignedReceiptEnvelope(envelope, { trustRoots: rotatedRoots }).authentic, true);
+  // No trust roots, no verification.
+  assert.throws(() => verifySignedReceiptEnvelope(envelope, { trustRoots: [] }), /RECEIPT_TRUST_ROOTS_REQUIRED/);
 });

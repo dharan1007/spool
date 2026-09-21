@@ -27,6 +27,7 @@ const ALLOWLIST = Object.freeze([
   { pattern: 'sleep-sync', file: 'scripts/browser-smoke.py', justification: 'Bounded test polling helper (wait_for with timeout) for browser smoke; CI test synchronization, not production evidence.' },
   { pattern: 'sleep-sync', file: 'scripts/qualify-postgres-materialization.js', justification: 'Peak-RSS sampler interval (unref timer) for load measurement; observability, not synchronization.' },
   { pattern: 'sleep-sync', file: 'scripts/qualify/sampler.js', justification: 'Bounded resource sampler interval (unref) streaming RSS/heap to evidence; observability, not synchronization.' },
+  { pattern: 'sleep-sync', file: 'scripts/qualify/industrial-postgres.js', justification: 'Per-scenario watchdog heartbeat interval (unref, cleared on completion) emitting elapsed/RSS diagnostics to raw evidence; observability, never control flow.' },
   { pattern: 'sleep-sync', file: 'scripts/qualify/postgres/cdc-soak.js', justification: 'Predicate-driven writer pacing (10ms yield between transactions); workload pacing, never evidence synchronization.' },
   { pattern: 'sleep-sync', file: 'scripts/qualify/postgres/repair-load.js', justification: 'Predicate-driven tamper poll (5ms) waiting for target ledger rows before fault injection; readiness is ledger-observed, not time-assumed.' },
   { pattern: 'sleep-sync', file: 'src/connectors/postgres/reference.js', justification: 'Bounded WAL LSN-advance wait with an explicit deadline for CDC recovery tests; wait loop only, never evidence.' },
