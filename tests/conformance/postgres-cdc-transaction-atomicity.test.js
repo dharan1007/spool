@@ -51,7 +51,13 @@ async function resetTable(table) {
   try {
     await setup.query(`DROP TABLE IF EXISTS public."${table}" CASCADE`);
     await setup.query(`CREATE TABLE public."${table}" (id integer PRIMARY KEY, name text NOT NULL)`);
-    await setup.query('DELETE FROM spool_internal.batch_ledger WHERE target_table = $1', [table]);
+    // Fresh clusters have no SPOOL metadata yet (acquirePostgresLease
+    // bootstraps it): absent-table cleanup is a no-op, never a failure.
+    try {
+      await setup.query('DELETE FROM spool_internal.batch_ledger WHERE target_table = $1', [table]);
+    } catch (error) {
+      if (error?.code !== '42P01') throw error;
+    }
     try {
       await setup.query('DELETE FROM spool_internal.execution_leases WHERE resource = $1', [leaseResource(table)]);
     } catch (error) {
