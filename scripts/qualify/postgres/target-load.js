@@ -176,6 +176,8 @@ export async function runTargetLoad({ profile, seed, evidenceWriter, pgConfig, r
     const lat = histogram.percentiles();
     const finalMetrics = {
       scenario,
+      requestedConfig: { rows: profile.rows, batchSize: profile.batchSize },
+      effectiveConfig: { rows: rowCount, batchSize },
       rowCount,
       payloadBytes,
       batchSize,

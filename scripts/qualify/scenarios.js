@@ -9,21 +9,29 @@ import { runBulkLoad } from './postgres/bulk-load.js';
 import { runVerificationLoad } from './postgres/verification-load.js';
 import { runRepairLoad } from './postgres/repair-load.js';
 import { runCdcSoak } from './postgres/cdc-soak.js';
+import { runCdcProductionLifecycle } from './postgres/cdc-production-lifecycle.js';
 import { runWorkerLoad } from './postgres/worker-load.js';
 import { runLargeTransactions } from './postgres/large-transactions.js';
 import { runDatabaseSourceLoad } from './postgres/database-source-load.js';
 import { runCrashRecovery } from './postgres/crash-recovery.js';
 
+// profileKeys declares which profile fields a scenario must consume EXACTLY.
+// The harness compares metrics.effectiveConfig against the profile for every
+// listed key; any divergence is PROFILE_DOWNSCALED (FAIL). Silent
+// Math.min caps are forbidden: if the environment cannot execute the
+// declared workload, the run is ENVIRONMENT_BLOCKED, never a quiet PASS
+// under a larger profile name.
 export const REQUIRED_SCENARIOS = Object.freeze([
-  Object.freeze({ name: 'postgres.target.load', run: runTargetLoad }),
-  Object.freeze({ name: 'postgres.bulk.load', run: runBulkLoad }),
-  Object.freeze({ name: 'postgres.content-exact.verification', run: runVerificationLoad }),
-  Object.freeze({ name: 'postgres.repair.load', run: runRepairLoad }),
-  Object.freeze({ name: 'postgres.cdc.soak', run: runCdcSoak }),
-  Object.freeze({ name: 'postgres.workers.load', run: runWorkerLoad }),
-  Object.freeze({ name: 'postgres.largeTransactions', run: runLargeTransactions }),
-  Object.freeze({ name: 'postgres.database-source.load', run: runDatabaseSourceLoad }),
-  Object.freeze({ name: 'postgres.crashRecovery', run: runCrashRecovery })
+  Object.freeze({ name: 'postgres.target.load', run: runTargetLoad, profileKeys: ['rows', 'batchSize'] }),
+  Object.freeze({ name: 'postgres.bulk.load', run: runBulkLoad, profileKeys: ['rows', 'batchSize'] }),
+  Object.freeze({ name: 'postgres.content-exact.verification', run: runVerificationLoad, profileKeys: ['rows'] }),
+  Object.freeze({ name: 'postgres.repair.load', run: runRepairLoad, profileKeys: ['rows'] }),
+  Object.freeze({ name: 'postgres.cdc.soak', run: runCdcSoak, profileKeys: ['cdcDurationSeconds', 'writers'] }),
+  Object.freeze({ name: 'postgres.cdc.productionLifecycle', run: runCdcProductionLifecycle, profileKeys: ['rows', 'writers', 'cdcDurationSeconds', 'largeTransactionRows'] }),
+  Object.freeze({ name: 'postgres.workers.load', run: runWorkerLoad, profileKeys: ['rows', 'workers'] }),
+  Object.freeze({ name: 'postgres.largeTransactions', run: runLargeTransactions, profileKeys: ['largeTransactionRows'] }),
+  Object.freeze({ name: 'postgres.database-source.load', run: runDatabaseSourceLoad, profileKeys: ['writers'] }),
+  Object.freeze({ name: 'postgres.crashRecovery', run: runCrashRecovery, profileKeys: ['rows'] })
 ]);
 
 export function requiredScenarioNames() {

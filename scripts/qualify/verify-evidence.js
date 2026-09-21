@@ -5,17 +5,25 @@
 //   1. sha256sums.txt pins every file's contents (except itself).
 //   2. The directory file set (minus sha256sums.txt) exactly equals the
 //      manifest's pinned set: no added, removed, or renamed files.
-//   3. Manifest schema version is supported (v2: set-pinning, no embedded
-//      sums, per-scenario status, stub count).
+//   3. Manifest schema version is supported (v3: v2 set-pinning plus
+//      requested/effective configuration for anti-downscale enforcement).
 //   4. failures.json is consistent with the manifest summary.
 //   5. The manifest result follows from the failures (PASS only with zero
 //      unexpected failures and a complete scenario set; releaseGrade only on
 //      PASS with a clean tree).
 //   6. Every required scenario reported a terminal status; no stubs recorded.
+//   7. Requested configuration equals effective configuration for immutable
+//      profile names (CI/SMALL/MEDIUM/LARGE/INDUSTRIAL): runs carrying a
+//      larger profile name after silent downscaling are rejected. *_CUSTOM
+//      runs must record both sides of the divergence.
+//   8. Every scenario's recorded effectiveConfig matches the manifest
+//      effectiveConfig on its declared profile keys (no per-scenario quiet
+//      reduction hiding under a profile-wide match).
 import { join } from 'node:path';
 import { readdir, readFile } from 'node:fs/promises';
 import { verifySha256Sums } from './checksums.js';
-import { requiredScenarioNames } from './scenarios.js';
+import { REQUIRED_SCENARIOS, requiredScenarioNames } from './scenarios.js';
+import { PROFILE_DEFINITIONS } from './profiles.js';
 
 function fail(message) {
   console.error(`Evidence verification failed: ${message}`);
@@ -44,7 +52,7 @@ async function main() {
   } catch (e) {
     fail(`manifest.json is missing or invalid: ${e.message}`);
   }
-  if (manifest.schemaVersion !== 2) fail(`unsupported manifest schemaVersion ${manifest.schemaVersion}; expected 2`);
+  if (manifest.schemaVersion !== 3) fail(`unsupported manifest schemaVersion ${manifest.schemaVersion}; expected 3`);
   const pinned = Array.isArray(manifest.evidence?.files) ? [...manifest.evidence.files].sort() : null;
   if (!pinned || pinned.length !== onDisk.length || pinned.some((file, index) => file !== onDisk[index])) {
     fail(`file set mismatch: on disk [${onDisk.join(', ')}] vs manifest [${(pinned ?? []).join(', ')}]`);
@@ -96,6 +104,63 @@ async function main() {
   }
   if (manifest.releaseGrade === true && (manifest.result !== 'PASS' || manifest.dirty === true)) {
     fail('releaseGrade=true requires result PASS on a clean tree');
+  }
+
+  // 7. Requested == effective for immutable names.
+  const profileName = manifest.profile;
+  const requested = manifest.requestedConfig ?? null;
+  const effective = manifest.effectiveConfig ?? null;
+  const isCustom = typeof profileName === 'string' && profileName.endsWith('_CUSTOM');
+  if (!requested || typeof requested !== 'object' || !effective || typeof effective !== 'object') {
+    fail('manifest must record requestedConfig and effectiveConfig');
+  }
+  if (!isCustom) {
+    const definition = PROFILE_DEFINITIONS[profileName];
+    if (!definition) fail(`unknown immutable profile ${profileName}`);
+    for (const key of Object.keys(effective)) {
+      if (key === 'name' || key === 'requestedProfile' || key === 'requestedConfig' || key === 'customized' || key === 'description') continue;
+      if (effective[key] !== definition[key]) {
+        fail(`immutable profile ${profileName} ran ${key}=${effective[key]} instead of declared ${definition[key]} (silent downscale)`);
+      }
+    }
+    for (const key of Object.keys(requested)) {
+      if (key === 'name' || key === 'requestedProfile' || key === 'requestedConfig' || key === 'customized' || key === 'description') continue;
+      if (requested[key] !== definition[key]) {
+        fail(`immutable profile ${profileName} requested ${key}=${requested[key]} instead of declared ${definition[key]}`);
+      }
+    }
+  } else {
+    const baseName = profileName.slice(0, -'_CUSTOM'.length);
+    if (manifest.requestedProfile !== baseName) {
+      fail(`custom profile ${profileName} must record requestedProfile=${baseName}`);
+    }
+    let diverges = false;
+    for (const key of new Set([...Object.keys(requested), ...Object.keys(effective)])) {
+      if (key === 'name' || key === 'requestedProfile' || key === 'requestedConfig' || key === 'customized' || key === 'description') continue;
+      if (requested[key] !== effective[key]) diverges = true;
+    }
+    if (!diverges) fail(`custom profile ${profileName} records no divergence; use the immutable name`);
+  }
+
+  // 8. Per-scenario effectiveConfig matches the manifest effectiveConfig.
+  let metrics;
+  try {
+    metrics = JSON.parse(await readFile(join(dir, 'metrics.json'), 'utf8'));
+  } catch (e) {
+    fail(`metrics.json is missing or invalid: ${e.message}`);
+  }
+  for (const entry of REQUIRED_SCENARIOS) {
+    const scenarioMetrics = metrics[entry.name];
+    if (!scenarioMetrics || typeof scenarioMetrics !== 'object') fail(`metrics for ${entry.name} are missing`);
+    const scenarioEffective = scenarioMetrics.effectiveConfig;
+    if (!scenarioEffective || typeof scenarioEffective !== 'object') {
+      fail(`${entry.name} did not record effectiveConfig`);
+    }
+    for (const key of entry.profileKeys ?? []) {
+      if (scenarioEffective[key] !== effective[key]) {
+        fail(`${entry.name} ran ${key}=${scenarioEffective[key]} but manifest effective is ${effective[key]}`);
+      }
+    }
   }
 
   console.log(`Evidence verified: ${dir}`);

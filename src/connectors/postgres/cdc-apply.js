@@ -3,7 +3,7 @@ import { mkdir, rm, readdir } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import { createInterface } from 'node:readline';
 import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { fail } from '../../core/errors.js';
 import { sha256Canonical, canonicalJson } from '../../platform/canonical-json.js';
 import { parsePostgresEndpoint, withPostgresClient } from './connection.js';
@@ -60,23 +60,37 @@ function eventBytes(change) {
   return Buffer.byteLength(canonicalJson(change), 'utf8');
 }
 
-// Bounded in-memory ring buffer for debug history. Production correctness
-// never depends on retained history; limit 0 retains nothing.
+// Bounded fixed-capacity circular buffer for debug history. O(1) insertion
+// via head/length over a preallocated array — no Array.shift() compaction.
+// Production correctness never depends on retained history; limit 0 retains
+// nothing and allocates only the frozen handle.
 export function createRingBuffer(limit = 1000) {
   if (!Number.isSafeInteger(limit) || limit < 0) fail('INVALID_CDC_BUFFER', 'ring buffer limit must be a non-negative safe integer');
-  const buffer = [];
+  if (limit === 0) {
+    return Object.freeze({
+      limit,
+      push() {},
+      values() { return Object.freeze([]); },
+      size() { return 0; }
+    });
+  }
+  const slots = new Array(limit);
+  let head = 0;
+  let length = 0;
   return Object.freeze({
     limit,
     push(item) {
-      if (limit === 0) return;
-      buffer.push(item);
-      while (buffer.length > limit) buffer.shift();
+      slots[(head + length) % limit] = item;
+      if (length < limit) length += 1;
+      else head = (head + 1) % limit;
     },
     values() {
-      return Object.freeze([...buffer]);
+      const ordered = new Array(length);
+      for (let i = 0; i < length; i++) ordered[i] = slots[(head + i) % limit];
+      return Object.freeze(ordered);
     },
     size() {
-      return buffer.length;
+      return length;
     }
   });
 }
@@ -113,15 +127,17 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
     tx.spillBytes = (tx.spillBytes ?? 0) + eventBytes(change);
   }
 
-  async function readStaged(xid) {
-    const events = [];
+  // Streaming staged reader: yields spilled events one line at a time so a
+  // multi-million-event source transaction never materializes as a JS array.
+  // Callers needing two passes (identity hash, then apply) simply iterate
+  // twice; the file is sequential and cheap to re-stream.
+  async function *streamStaged(xid) {
     const stream = createReadStream(spillPath(xid), { encoding: 'utf8' });
     const lines = createInterface({ input: stream, crlfDelay: Infinity });
     for await (const line of lines) {
       if (!line.trim()) continue;
-      events.push(JSON.parse(line));
+      yield JSON.parse(line);
     }
-    return events;
   }
 
   return Object.freeze({
@@ -140,22 +156,22 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
             previous: lastCommitLsn, current: change.lsn
           });
         }
-        let events = current.events;
-        if (current.spilled) {
-          // Memory holds the oldest events, the staging file the newest:
-          // concatenate in arrival order.
-          const staged = await readStaged(current.xid);
-          events = [...current.events, ...staged];
-        }
+        // The finalized value is a HANDLE, not the event array: memory holds
+        // at most maxInMemoryEvents oldest events, the staging file the
+        // newest. Consumers stream arrival order via iterateTransactionEvents
+        // (memory first, then the staged file). Materializing the merge here
+        // would defeat the memory bound for huge source transactions.
+        const eventCount = current.events.length + stagedCount;
         const completed = Object.freeze({
           xid: current.xid,
           beginLsn: current.beginLsn,
           commitLsn: change.lsn,
           commitEndLsn: change.commitEndLsn ?? null,
-          events: Object.freeze(events),
-          eventCount: events.length,
+          memoryEvents: Object.freeze([...current.events]),
+          eventCount,
           spilled: current.spilled,
-          stagedEvents: stagedCount
+          stagedEvents: stagedCount,
+          stagedBytes: current.spillBytes ?? 0
         });
         lastCommitLsn = change.lsn;
         current = null;
@@ -211,13 +227,83 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
       return Object.freeze(xids.sort((a, b) => a - b));
     },
     async recoverStaged(xid) {
-      // Re-materialize a staged transaction left behind by a crash. The
-      // caller re-applies it through the normal idempotent path (ledger
-      // reconciliation absorbs already-committed work) and then discards it.
-      const events = await readStaged(xid);
-      return Object.freeze({ xid, events: Object.freeze(events), eventCount: events.length, spilled: true });
+      // Recover a staging handle left behind by a crash without
+      // materializing it. The caller counts streamed events for evidence,
+      // re-applies through the normal idempotent path (ledger
+      // reconciliation absorbs already-committed work), then discards it.
+      let eventCount = 0;
+      for await (const _ignored of streamStaged(xid)) eventCount += 1;
+      return Object.freeze({ xid, memoryEvents: Object.freeze([]), eventCount, spilled: true, stagedEvents: eventCount, stagedBytes: null });
     }
   });
+}
+
+// Stream one finalized transaction handle in arrival order: bounded memory
+// events first, then the durable spill segments. Peak memory scales with the
+// configured chunk/segment size, never with source transaction size.
+export async function *iterateTransactionEvents(handle, { stagingDir = null } = {}) {
+  if (!handle || typeof handle !== 'object') fail('INVALID_CDC_TRANSACTION', 'A finalized CDC transaction handle is required');
+  for (const event of handle.memoryEvents ?? []) yield event;
+  if (handle.spilled === true) {
+    if (!stagingDir) fail('CDC_STAGING_REQUIRED', 'Spilled transaction requires its staging directory to stream', { xid: handle.xid });
+    const stream = createReadStream(join(stagingDir, `cdc-tx-${handle.xid}.jsonl`), { encoding: 'utf8' });
+    const lines = createInterface({ input: stream, crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      yield JSON.parse(line);
+    }
+  }
+}
+
+const CDC_TRANSACTION_DOMAIN = 'spool-cdc-transaction-v1';
+
+// Identity binding the COMPLETE source transaction: migration/plan/
+// snapshot/mapping/target/fence context plus xid, begin/commit LSN, ordered
+// mutation count and the incremental ordered-payload hash. One source
+// transaction maps to exactly one target ledger record — never independent
+// upsert/delete batch identities.
+export function createCdcTransactionIdentity({ migrationId, planId, sourceSnapshotId, mappingRevision, targetIdentity, xid, beginLsn, commitLsn, mutationCount, payloadHash } = {}) {
+  if (typeof migrationId !== 'string' || !migrationId) fail('INVALID_CDC_TRANSACTION', 'migrationId is required');
+  if (typeof planId !== 'string' || !planId) fail('INVALID_CDC_TRANSACTION', 'planId is required');
+  if (typeof sourceSnapshotId !== 'string' || !sourceSnapshotId) fail('INVALID_CDC_TRANSACTION', 'sourceSnapshotId is required');
+  if (!Number.isInteger(mappingRevision) || mappingRevision < 1) fail('INVALID_CDC_TRANSACTION', 'mappingRevision must be >= 1');
+  if (!Number.isSafeInteger(xid) || xid < 0) fail('INVALID_CDC_TRANSACTION', 'xid must be a non-negative safe integer');
+  requireLsn(beginLsn, 'beginLsn');
+  requireLsn(commitLsn, 'commitLsn');
+  if (!Number.isSafeInteger(mutationCount) || mutationCount < 0) fail('INVALID_CDC_TRANSACTION', 'mutationCount must be a non-negative safe integer');
+  if (typeof payloadHash !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(payloadHash)) fail('INVALID_CDC_TRANSACTION', 'payloadHash must be a canonical sha256 identity');
+  return sha256Canonical(CDC_TRANSACTION_DOMAIN, {
+    migrationId,
+    planId,
+    sourceSnapshotId,
+    mappingRevision,
+    targetIdentity: connectorIdentity(targetIdentity),
+    sourceTransaction: { xid, beginLsn: beginLsn.toUpperCase(), commitLsn: commitLsn.toUpperCase() },
+    mutationCount,
+    payloadHash
+  });
+}
+
+// Incremental ordered-payload hash over a mutation stream: each canonical
+// mutation record is length-framed into a running SHA-256, so the hash binds
+// exact order without buffering the stream.
+export function hashOrderedMutations(mutations) {
+  const digest = createHash('sha256');
+  let count = 0;
+  const feed = record => {
+    const text = canonicalJson(record);
+    digest.update(`${Buffer.byteLength(text, 'utf8')}:`, 'utf8');
+    digest.update(text, 'utf8');
+    count += 1;
+  };
+  if (typeof mutations?.[Symbol.asyncIterator] === 'function') {
+    return (async () => {
+      for await (const mutation of mutations) feed(mutation);
+      return Object.freeze({ payloadHash: `sha256:${digest.digest('hex')}`, mutationCount: count });
+    })();
+  }
+  for (const mutation of mutations ?? []) feed(mutation);
+  return Object.freeze({ payloadHash: `sha256:${digest.digest('hex')}`, mutationCount: count });
 }
 
 // Map one assembled source transaction to target mutations through the
@@ -288,7 +374,7 @@ export function createCdcApplier({
   target, checkpoint, renewFence, ownerEpoch,
   startLsn = null, untilLsn = null, maxTransactions = null,
   assemblerOptions = {}, stagingDir = null, debugHistoryLimit = 1000,
-  maxQueueMessages = 50000, maxReconnects = 5,
+  maxQueueMessages = 50000, maxReconnects = 5, maxCdcTransactionMutations = 5000000,
   onTransaction = null
 } = {}) {
   if (!ref || typeof ref !== 'object') fail('INVALID_CDC_APPLY_CONFIG', 'source ref is required');
@@ -303,8 +389,8 @@ export function createCdcApplier({
   }
   if (!Array.isArray(primaryKey) || primaryKey.length === 0) fail('INVALID_CDC_APPLY_CONFIG', 'primaryKey is required');
   const source = requireSourceTable(sourceTable);
-  if (!target || typeof target.commitUpsertBatch !== 'function' || typeof target.commitDeleteBatch !== 'function') {
-    fail('INVALID_CDC_APPLY_CONFIG', 'an opened target with upsert/delete batch commits is required');
+  if (!target || typeof target.commitCdcTransaction !== 'function') {
+    fail('INVALID_CDC_APPLY_CONFIG', 'an opened target with atomic CDC transaction commits is required');
   }
   if (!checkpoint || typeof checkpoint.load !== 'function' || typeof checkpoint.save !== 'function') {
     fail('INVALID_CDC_APPLY_CONFIG', 'checkpoint store with load/save is required');
@@ -359,7 +445,9 @@ export function createCdcApplier({
           fencingToken: fenceToken,
           transaction: tx,
           primaryKey,
-          sourceTable: source
+          sourceTable: source,
+          stagingDir,
+          maxMutations: maxCdcTransactionMutations
         });
         // Exact replay counts come from the target ledger row on recovery,
         // so the checkpoint carries watermarks only.
@@ -378,7 +466,7 @@ export function createCdcApplier({
         if (tx.spilled) metrics.spilledTransactions += 1;
         metrics.skippedMissingDeletes += result.skippedMissingCount ?? result.skippedMissing.length;
         metrics.lastCommitLsn = tx.commitLsn;
-        history.push({ commitLsn: tx.commitLsn, eventCount: tx.events?.length ?? 0, recovered: result.recovered, spilled: tx.spilled === true });
+        history.push({ commitLsn: tx.commitLsn, eventCount: tx.eventCount ?? 0, recovered: result.recovered, spilled: tx.spilled === true });
         if (onTransaction) await onTransaction(result);
         return { result, ackLsn: tx.commitLsn };
       };
@@ -649,15 +737,19 @@ export function createCdcApplier({
 }
 
 // Apply one assembled source transaction to the target under the given fence
-// and return a DurableApplyResult. Upserts and deletes each commit with their
-// own CDC batch identity, so replay reconciles through the target ledger
-// without duplicating rows. The caller persists the checkpoint and only then
-// acknowledges the source — ack never precedes durability.
+// and return a DurableApplyResult. The complete source transaction commits
+// as exactly ONE target transaction (commitCdcTransaction) bound to a single
+// transaction identity — never split into separate upsert/delete commits.
+// Mapping streams incrementally in two passes (identity-hash pass, apply
+// pass) so memory stays bounded by chunk size, not transaction size. The
+// caller persists the checkpoint and only then acknowledges the source — ack
+// never precedes durability.
 export async function applyCdcTransaction({
-  target, migration, plan, targetContractId, fencingToken, transaction, primaryKey, sourceTable
+  target, migration, plan, targetContractId, fencingToken, transaction, primaryKey, sourceTable,
+  stagingDir = null, maxMutations = null
 } = {}) {
-  if (!target || typeof target.commitUpsertBatch !== 'function' || typeof target.commitDeleteBatch !== 'function') {
-    fail('INVALID_CDC_APPLY_TARGET', 'CDC apply requires an opened target with upsert/delete batch commits');
+  if (!target || typeof target.commitCdcTransaction !== 'function') {
+    fail('INVALID_CDC_APPLY_TARGET', 'CDC apply requires an opened target with atomic CDC transaction commits');
   }
   if (!migration || typeof migration.migrationId !== 'string') fail('INVALID_CDC_APPLY_TARGET', 'migration.migrationId is required');
   if (!plan || typeof plan.planId !== 'string') fail('INVALID_CDC_APPLY_TARGET', 'plan.planId is required');
@@ -668,111 +760,108 @@ export async function applyCdcTransaction({
   // other table means the publication was altered mid-migration: fail closed
   // rather than skipping it past the watermark (silent data loss).
   const source = requireSourceTable(sourceTable);
-  const { upserts, deletes } = mapTransactionEvents({
-    transaction,
+  const mapOptions = {
     mapping: plan.mapping,
     mappingRevision: plan.mappingRevision,
     targetSchema: plan.targetSchema,
     sourceTable: source,
-    primaryKey
-  });
-  const base = {
+    primaryKey,
+    commitLsn: transaction.commitLsn
+  };
+  const streamMutations = async function *() {
+    let index = 0;
+    const engine = new MigrationEngine();
+    const accumulator = engine.createAccumulator(mapOptions.mapping, mapOptions.mappingRevision, mapOptions.targetSchema);
+    const compiledKeyMapping = compileMapping(mapOptions.mapping);
+    for await (const change of iterateTransactionEvents(transaction, { stagingDir })) {
+      yield mapOneCdcEvent({ change, accumulator, compiledKeyMapping, index, ...mapOptions });
+      index += 1;
+    }
+  };
+  // Pass 1 (streaming, O(1) memory): ordered payload hash + exact count.
+  const hashed = await hashOrderedMutations(streamMutations());
+  const transactionIdentity = createCdcTransactionIdentity({
     migrationId: migration.migrationId,
     planId: plan.planId,
     sourceSnapshotId: migration.sourceSnapshotId,
     mappingRevision: plan.mappingRevision,
     targetIdentity: plan.targetRef,
+    xid: transaction.xid,
+    beginLsn: transaction.beginLsn,
+    commitLsn: transaction.commitLsn,
+    mutationCount: hashed.mutationCount,
+    payloadHash: hashed.payloadHash
+  });
+  // Pass 2 (streaming): the target consumes the mutation iterable
+  // incrementally inside ONE transaction — no materialized array.
+  const commit = await target.commitCdcTransaction({
+    migrationId: migration.migrationId,
+    planId: plan.planId,
+    sourceSnapshotId: migration.sourceSnapshotId,
+    mappingRevision: plan.mappingRevision,
+    targetContractId,
     fencingToken,
-    targetContractId
-  };
-  let upsertResult = null;
-  let deleteResult = null;
-  const cdcProvenance = { xid: transaction.xid, commitLsn: transaction.commitLsn };
-  if (upserts.length > 0) {
-    const payloadHash = sha256Canonical('spool-cdc-upsert-payload-v1', upserts);
-    const batchIdentity = createCdcBatchIdentity({
-      ...base, xid: transaction.xid, commitLsn: transaction.commitLsn,
-      payloadHash, rowCount: upserts.length
-    });
-    upsertResult = await target.commitUpsertBatch({
-      ...base, batchIdentity, rows: upserts, primaryKey, cdcProvenance
-    });
-  }
-  if (deletes.length > 0) {
-    const payloadHash = sha256Canonical('spool-cdc-delete-payload-v1', deletes.map(d => ({ key: d.key, precondition: d.precondition })));
-    const batchIdentity = createCdcBatchIdentity({
-      ...base, xid: transaction.xid, commitLsn: transaction.commitLsn,
-      payloadHash, rowCount: deletes.length
-    });
-    deleteResult = await target.commitDeleteBatch({
-      ...base,
-      batchIdentity,
-      deletions: deletes.map(d => ({ key: d.key, expectedRowHash: d.expectedRowHash, precondition: d.precondition })),
-      primaryKey,
-      cdcProvenance
-    });
-  }
-  const recovered = Boolean(upsertResult?.alreadyCommitted) || Boolean(deleteResult?.alreadyCommitted);
+    transactionIdentity,
+    xid: transaction.xid,
+    beginLsn: transaction.beginLsn,
+    commitLsn: transaction.commitLsn,
+    mutationCount: hashed.mutationCount,
+    payloadHash: hashed.payloadHash,
+    primaryKey,
+    mutations: streamMutations(),
+    maxMutations
+  });
   return Object.freeze({
     migrationId: migration.migrationId,
     sourceTransactionId: transaction.xid,
     commitLsn: transaction.commitLsn.toUpperCase(),
-    targetCommitIdentity: Object.freeze({
-      upsertBatchIdentity: upsertResult?.batchIdentity ?? null,
-      deleteBatchIdentity: deleteResult?.batchIdentity ?? null
-    }),
+    targetCommitIdentity: Object.freeze({ transactionIdentity: commit.transactionIdentity }),
     fenceToken: fencingToken,
-    inserted: upsertResult?.inserted ?? 0,
-    updated: upsertResult?.updated ?? 0,
-    deleted: deleteResult?.deleted ?? 0,
-    skippedMissing: Object.freeze([...(Array.isArray(deleteResult?.skippedMissing) ? deleteResult.skippedMissing : [])]),
-    skippedMissingCount: deleteResult?.skippedMissingCount
-      ?? (Array.isArray(deleteResult?.skippedMissing) ? deleteResult.skippedMissing.length : 0),
-    recovered,
+    inserted: commit.inserted ?? 0,
+    updated: commit.updated ?? 0,
+    deleted: commit.deleted ?? 0,
+    skippedMissingCount: commit.skippedMissing ?? 0,
+    recovered: commit.alreadyCommitted === true,
     spilled: transaction.spilled === true,
     appliedAt: new Date().toISOString()
   });
 }
 
-function mapTransactionEvents({ transaction, mapping, mappingRevision, targetSchema, sourceTable, primaryKey }) {
-  const engine = new MigrationEngine();
-  const accumulator = engine.createAccumulator(mapping, mappingRevision, targetSchema);
-  const compiledKeyMapping = compileMapping(mapping);
-  const upserts = [];
-  const deletes = [];
-  let index = 0;
-  for (const change of transaction.events) {
-    if (change.table !== sourceTable.table || change.schema !== sourceTable.schema) {
-      fail('CDC_UNEXPECTED_TABLE', 'CDC event is for a table outside the bound publication set; the publication may have been altered mid-migration', {
-        schema: change.schema ?? null, table: change.table ?? null, commitLsn: transaction.commitLsn
-      });
-    }
-    if (change.tag === 'truncate') {
-      // A source TRUNCATE empties the table, but the target truncate path
-      // requires a bound truncate approval which CDC cannot mint. Refusing
-      // closed with an operator-actionable code beats silent divergence.
-      fail('CDC_TRUNCATE_REQUIRES_OPERATOR', 'Source TRUNCATE requires an explicit operator decision; CDC apply refuses to truncate without a bound approval', {
-        schema: change.schema, table: change.table, commitLsn: transaction.commitLsn
-      });
-    }
-    if (change.tag === 'delete') {
-      deletes.push(mapDeleteKey({ change, accumulator, compiledKeyMapping, primaryKey, commitLsn: transaction.commitLsn }));
-      continue;
-    }
-    const sourceRow = change.row ?? change.new;
-    if (!sourceRow || typeof sourceRow !== 'object') {
-      fail('CDC_ROW_UNMAPPABLE', `CDC ${change.tag} event carries no mappable row`, { commitLsn: transaction.commitLsn });
-    }
-    const transformed = accumulator.process(sourceRow, index);
-    index += 1;
-    if (!transformed.ok) {
-      fail('CDC_TRANSFORM_REJECTED', 'Source row rejected by the migration mapping; refusing to drop it silently', {
-        code: transformed.code ?? null, commitLsn: transaction.commitLsn
-      });
-    }
-    upserts.push(transformed.row);
+// Map ONE CDC event to ONE ordered target mutation. Stateless across calls
+// except the row-local accumulator (no cross-row transform state), so the
+// apply path can stream events incrementally in two passes without ever
+// buffering the transaction. Returned mutations are frozen and carry an
+// explicit op: upsert mutations carry the full mapped row, delete mutations
+// carry the mapped key plus precondition evidence.
+function mapOneCdcEvent({ change, accumulator, compiledKeyMapping, primaryKey, sourceTable, commitLsn, index }) {
+  if (change.table !== sourceTable.table || change.schema !== sourceTable.schema) {
+    fail('CDC_UNEXPECTED_TABLE', 'CDC event is for a table outside the bound publication set; the publication may have been altered mid-migration', {
+      schema: change.schema ?? null, table: change.table ?? null, commitLsn
+    });
   }
-  return Object.freeze({ upserts: Object.freeze(upserts), deletes: Object.freeze(deletes) });
+  if (change.tag === 'truncate') {
+    // A source TRUNCATE empties the table, but the target truncate path
+    // requires a bound truncate approval which CDC cannot mint. Refusing
+    // closed with an operator-actionable code beats silent divergence.
+    fail('CDC_TRUNCATE_REQUIRES_OPERATOR', 'Source TRUNCATE requires an explicit operator decision; CDC apply refuses to truncate without a bound approval', {
+      schema: change.schema, table: change.table, commitLsn
+    });
+  }
+  if (change.tag === 'delete') {
+    const mapped = mapDeleteKey({ change, accumulator, compiledKeyMapping, primaryKey, commitLsn });
+    return Object.freeze({ op: 'delete', key: mapped.key, expectedRowHash: mapped.expectedRowHash, precondition: mapped.precondition });
+  }
+  const sourceRow = change.row ?? change.new;
+  if (!sourceRow || typeof sourceRow !== 'object') {
+    fail('CDC_ROW_UNMAPPABLE', `CDC ${change.tag} event carries no mappable row`, { commitLsn });
+  }
+  const transformed = accumulator.process(sourceRow, index);
+  if (!transformed.ok) {
+    fail('CDC_TRANSFORM_REJECTED', 'Source row rejected by the migration mapping; refusing to drop it silently', {
+      code: transformed.code ?? null, commitLsn
+    });
+  }
+  return Object.freeze({ op: 'upsert', row: Object.freeze({ ...transformed.row }) });
 }
 
 // Map a delete to its target key. With a full old row (REPLICA IDENTITY

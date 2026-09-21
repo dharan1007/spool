@@ -33,8 +33,13 @@ function opEvents(kind) {
 
 export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.cdc.soak';
-  const durationSec = Math.min(profile.cdcDurationSeconds, 30);
-  const writers = Math.min(profile.writers, 2);
+  // No silent caps: the scenario executes the declared profile workload
+  // exactly. Requested and effective configuration are both recorded; any
+  // divergence fails the run (the verifier enforces requested==effective for
+  // immutable profile names).
+  const durationSec = profile.cdcDurationSeconds;
+  const writers = profile.writers;
+  const effectiveConfig = { cdcDurationSeconds: durationSec, writers };
   const seedKey = createHash('sha256').update(`cdc-soak-${runId}-${seed}`).digest('hex').slice(0, 12);
   const table = `qualify_cdc_${seedKey}`;
   const publicationName = `qcdc_pub_${seedKey}`;
@@ -312,6 +317,8 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
 
     const metrics = {
       scenario,
+      requestedConfig: { cdcDurationSeconds: profile.cdcDurationSeconds, writers: profile.writers },
+      effectiveConfig,
       durationSec,
       writers,
       chunks: CHUNKS,

@@ -18,7 +18,8 @@ export async function runBulkLoad({ profile, seed, evidenceWriter, pgConfig, run
   const csvPath = join(sourceRoot, 'dataset.csv');
   let client, service;
   const table = `qualify_bulk_${runId.replaceAll('-', '_').toLowerCase()}`;
-  const rowCount = Math.min(profile.rows, 500_000); // bulk test capped for CI
+  const rowCount = profile.rows;
+  const effectiveConfig = { rows: rowCount, batchSize: profile.batchSize };
   const payloadBytes = profile.payloadBytes;
   const batchSize = profile.batchSize;
 
@@ -77,7 +78,7 @@ export async function runBulkLoad({ profile, seed, evidenceWriter, pgConfig, run
     if (cnt.rows[0].c !== rowCount) throw new Error(`bulk count mismatch ${cnt.rows[0].c} != ${rowCount}`);
 
     const lat = histogram.percentiles();
-    const metrics = { scenario, rowCount, batchSize, durationMs: ms, rowsPerSec: rowsPerSecond(rowCount, ms), mibPerSec: mibPerSecond(rowCount * payloadBytes, ms), latency: lat, verification: result.verification.status };
+    const metrics = { scenario, requestedConfig: { rows: profile.rows, batchSize: profile.batchSize }, effectiveConfig, rowCount, batchSize, durationMs: ms, rowsPerSec: rowsPerSecond(rowCount, ms), mibPerSec: mibPerSecond(rowCount * payloadBytes, ms), latency: lat, verification: result.verification.status };
     evidenceWriter.appendRaw({ scenario, event: 'bulk_completed', ...metrics });
     return { metrics, failures, verification: 'VERIFIED' };
   } catch (e) {

@@ -13,11 +13,19 @@ test('profile parsing resolves CI/SMALL/MEDIUM and honors overrides', () => {
   const ci = resolveProfile('CI');
   assert.equal(ci.rows, 100_000);
   assert.equal(ci.name, 'CI');
+  assert.equal(ci.customized, false);
+  assert.equal(ci.requestedProfile, 'CI');
   const small = resolveProfile('SMALL');
   assert.equal(small.rows, 1_000_000);
+  // Any effective override renames the run: no silent downscale under an
+  // immutable name.
   const custom = resolveProfile('CI', { rows: 5000, payloadBytes: 128 });
   assert.equal(custom.rows, 5000);
   assert.equal(custom.payloadBytes, 128);
+  assert.equal(custom.name, 'CI_CUSTOM');
+  assert.equal(custom.customized, true);
+  assert.equal(custom.requestedProfile, 'CI');
+  assert.equal(custom.requestedConfig.rows, 100_000);
   assert.throws(() => resolveProfile('UNKNOWN'), /UNKNOWN_PROFILE/);
   assert.throws(() => resolveProfile('CI', { rows: -1 }), /INVALID_PROFILE/);
 });
@@ -25,6 +33,18 @@ test('profile parsing resolves CI/SMALL/MEDIUM and honors overrides', () => {
 test('profile overrides appear in config', () => {
   const p = resolveProfile('CI', { batchSize: 1234 });
   assert.equal(p.batchSize, 1234);
+  assert.equal(p.name, 'CI_CUSTOM');
+});
+
+test('profile consistency validation fails closed', () => {
+  assert.throws(() => resolveProfile('CI', { batchSize: 200_000 }), /INVALID_PROFILE/);
+  assert.throws(() => resolveProfile('CI', { largeTransactionRows: 0 }), /INVALID_PROFILE/);
+  assert.throws(() => resolveProfile('CI', { maxRssBytes: 1024 }), /INVALID_PROFILE/);
+  assert.throws(() => resolveProfile('CI', { noSuchKey: 1 }), /INVALID_PROFILE_OVERRIDE/);
+  // Identical-to-base overrides keep the immutable name.
+  const same = resolveProfile('CI', { rows: 100_000 });
+  assert.equal(same.name, 'CI');
+  assert.equal(same.customized, false);
 });
 
 test('dataset generation is deterministic and reproducible', () => {

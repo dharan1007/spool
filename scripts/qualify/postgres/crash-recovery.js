@@ -11,7 +11,8 @@ import { writeDatasetCsv } from '../dataset.js';
 export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.crashRecovery';
   const table = `qualify_crash_${runId.replaceAll('-', '_').toLowerCase()}`;
-  const rowCount = Math.min(profile.rows, 50_000);
+  const rowCount = profile.rows;
+  const effectiveConfig = { rows: rowCount };
   const payloadBytes = profile.payloadBytes;
   const failures = [];
   const rpoRto = [];
@@ -316,10 +317,10 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
     }
 
     const status = failures.length ? 'FAIL' : 'PASS';
-    return { metrics: { scenario, rpoRto, status }, failures };
+    return { metrics: { scenario, requestedConfig: { rows: profile.rows }, effectiveConfig, rowCount, rpoRto, status }, failures };
   } catch (e) {
     failures.push({ scenario, code: e.code ?? 'CRASH_RECOVERY_FAILED', message: e.message, expected: false, classification: 'CORRECTNESS', timestamp: new Date().toISOString() });
-    return { metrics: { scenario, rpoRto, status: 'FAIL' }, failures };
+    return { metrics: { scenario, requestedConfig: { rows: profile.rows }, effectiveConfig, rowCount, rpoRto, status: 'FAIL' }, failures };
   } finally {
     try { await rm(sourceRoot, { recursive: true, force: true }); } catch {}
     try { await rm(targetRoot, { recursive: true, force: true }); } catch {}

@@ -914,6 +914,266 @@ export class PostgresTarget {
     });
   }
 
+  // Atomic source-transaction commit: one PostgreSQL source transaction
+  // becomes exactly ONE target commit. Mutations arrive in source order
+  // (array or async iterable for memory-bounded streaming); consecutive
+  // upserts are set-batched, deletes stay ordered, one ledger record binds
+  // the complete transaction. Pre-commit faults leave zero visible effects;
+  // post-commit retry returns the original exact counts from the ledger row.
+  async commitCdcTransaction(input = {}) {
+    this.#assertOpen();
+    const migrationId = requiredString('migrationId', input.migrationId);
+    const planId = requiredHash('planId', input.planId);
+    const sourceSnapshotId = requiredHash('sourceSnapshotId', input.sourceSnapshotId);
+    const mappingRevision = input.mappingRevision;
+    if (!Number.isInteger(mappingRevision) || mappingRevision < 1) fail('INVALID_BATCH_EVIDENCE', 'mappingRevision must be >= 1');
+    const transactionIdentity = requiredHash('transactionIdentity', input.transactionIdentity);
+    const xid = input.xid;
+    if (!Number.isSafeInteger(xid) || xid < 0) fail('INVALID_CDC_TRANSACTION', 'xid must be a non-negative safe integer');
+    const commitLsn = input.commitLsn;
+    if (typeof commitLsn !== 'string' || !/^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/.test(commitLsn)) {
+      fail('INVALID_CDC_POSITION', 'commitLsn must be a valid PostgreSQL LSN');
+    }
+    const primaryKey = input.primaryKey;
+    if (!Array.isArray(primaryKey) || primaryKey.length === 0) fail('INVALID_MUTATION_KEY', 'CDC transaction primaryKey must be a non-empty array');
+    for (const field of primaryKey) {
+      if (typeof field !== 'string' || !SAFE_COLUMN.test(field)) fail('INVALID_MUTATION_KEY', `CDC transaction primaryKey field ${field} is invalid`);
+    }
+    const mutationCount = input.mutationCount;
+    if (!Number.isSafeInteger(mutationCount) || mutationCount < 0) fail('INVALID_CDC_TRANSACTION', 'mutationCount must be a non-negative safe integer');
+    const payloadHash = requiredHash('payloadHash', input.payloadHash);
+    const maxMutations = input.maxMutations ?? null;
+    if (maxMutations != null) {
+      if (!Number.isSafeInteger(maxMutations) || maxMutations < 1) fail('INVALID_CDC_TRANSACTION', 'maxMutations must be a positive safe integer');
+      if (mutationCount > maxMutations) fail('CDC_TRANSACTION_BUDGET_EXCEEDED', 'Source transaction exceeds the configured mutation effect budget', { mutationCount, maxMutations });
+    }
+    const mutations = input.mutations;
+    const isIterable = mutations != null && typeof mutations[Symbol.asyncIterator] === 'function';
+    if (!Array.isArray(mutations) && !isIterable) fail('INVALID_CDC_TRANSACTION', 'mutations must be an array or async iterable in source order');
+    if (Array.isArray(mutations) && mutations.length !== mutationCount) {
+      fail('INVALID_CDC_TRANSACTION', 'Array mutation length must equal the declared mutationCount', { declared: mutationCount, actual: mutations.length });
+    }
+    if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
+
+    const evidence = {
+      batchIdentity: transactionIdentity,
+      migrationId, planId, sourceSnapshotId, mappingRevision,
+      rowCount: mutationCount, payloadHash
+    };
+    const provenance = { kind: 'cdc', xid, commitLsn: commitLsn.toUpperCase() };
+    const context = { transactionIdentity, xid, commitLsn };
+
+    const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
+      await client.query('BEGIN');
+      try {
+        if (this.requireFencing) {
+          await checkRepairFence(client, this, input.fencingToken, 'cdc-transaction');
+        }
+        if (await this._hitFault('CDC_TX_AFTER_FENCE_CHECK', context)) {
+          await client.query('ROLLBACK');
+          fail('FAULT_CDC_TX_AFTER_FENCE_CHECK', 'Injected fault after fence check', context);
+        }
+
+        await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
+
+        const existing = await findLedgerEntry(client, this.targetRef, transactionIdentity);
+        if (existing) {
+          if (!ledgerMatches(existing, evidence, this.targetRef)) {
+            await client.query('ROLLBACK');
+            return { kind: 'BATCH_IDENTITY_CONFLICT' };
+          }
+          await client.query('COMMIT');
+          return {
+            kind: 'COMMITTED_EXACT', alreadyCommitted: true,
+            inserted: existing.inserted == null ? null : Number(existing.inserted),
+            updated: existing.updated == null ? null : Number(existing.updated),
+            deleted: existing.deleted == null ? null : Number(existing.deleted),
+            skippedMissing: existing.skipped_missing == null ? null : Number(existing.skipped_missing)
+          };
+        }
+
+        const quotedTable = `${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`;
+        let columns = null;
+        let updatable = null;
+        let upsertBuffer = [];
+        let inserted = 0;
+        let updated = 0;
+        let deleted = 0;
+        let skippedMissing = 0;
+        let appliedMutations = 0;
+        let middleFaultFired = false;
+
+        const flushUpserts = async () => {
+          if (upsertBuffer.length === 0) return;
+          const chunk = upsertBuffer;
+          upsertBuffer = [];
+          const quotedColumns = columns.map(quoteIdentifier).join(', ');
+          const conflictTarget = `(${primaryKey.map(quoteIdentifier).join(', ')})`;
+          const action = updatable.length === 0
+            ? 'DO NOTHING'
+            : `DO UPDATE SET ${updatable.map(column => `${quoteIdentifier(column)} = EXCLUDED.${quoteIdentifier(column)}`).join(', ')}`;
+          const maxRowsPerStatement = Math.max(1, Math.min(1000, Math.floor(60_000 / columns.length)));
+          for (let offset = 0; offset < chunk.length; offset += maxRowsPerStatement) {
+            const piece = chunk.slice(offset, offset + maxRowsPerStatement);
+            const values = [];
+            const groups = piece.map(row => {
+              const placeholders = columns.map(column => {
+                values.push(row[column]);
+                return `$${values.length}`;
+              });
+              return `(${placeholders.join(', ')})`;
+            });
+            const written = await client.query(
+              `INSERT INTO ${quotedTable} (${quotedColumns}) VALUES ${groups.join(', ')} ON CONFLICT ${conflictTarget} ${action} RETURNING (xmax = 0) AS inserted`,
+              values
+            );
+            for (const row of written.rows) {
+              if (row.inserted === true) inserted += 1;
+              else updated += 1;
+            }
+          }
+          if (updatable.length > 0 && inserted + updated < 1) {
+            await client.query('ROLLBACK');
+            fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL CDC upsert chunk returned no per-row evidence', context);
+          }
+        };
+
+        const applyDelete = async entry => {
+          const identified = postgresMutationKeyId({ primaryKey, row: entry.key });
+          const whereValues = [];
+          const whereClauses = primaryKey.map(field => {
+            whereValues.push(entry.key[field]);
+            return `${quoteIdentifier(field)} = $${whereValues.length}`;
+          });
+          const found = await client.query(`SELECT * FROM ${quotedTable} WHERE ${whereClauses.join(' AND ')} FOR UPDATE`, whereValues);
+          if (found.rows.length === 0) {
+            if (entry.precondition === 'key-only') {
+              skippedMissing += 1;
+              return;
+            }
+            await client.query('ROLLBACK');
+            fail('DELETE_PRECONDITION_FAILED', 'CDC delete precondition failed: target row is missing', { keyId: identified.keyId });
+          }
+          if (entry.precondition !== 'key-only') {
+            requiredHash('expectedRowHash', entry.expectedRowHash);
+            const actual = found.rows[0];
+            const observedColumns = Object.keys(actual).filter(name => name !== 'tableoid' && name !== 'ctid' && name !== 'xmin' && name !== 'xmax').sort();
+            const observedRowHash = postgresContentRowHash({ primaryKey, columns: observedColumns, key: entry.key, row: actual });
+            if (observedRowHash !== entry.expectedRowHash) {
+              await client.query('ROLLBACK');
+              fail('DELETE_PRECONDITION_FAILED', 'CDC delete precondition failed: target row changed since the source image', { keyId: identified.keyId });
+            }
+          }
+          const removed = await client.query(`DELETE FROM ${quotedTable} WHERE ${whereClauses.join(' AND ')}`, whereValues);
+          if (removed.rowCount !== 1) {
+            await client.query('ROLLBACK');
+            fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL CDC delete did not remove exactly one row', { keyId: identified.keyId });
+          }
+          deleted += 1;
+        };
+
+        const applyMutation = async mutation => {
+          if (!mutation || typeof mutation !== 'object' || Array.isArray(mutation)) {
+            await client.query('ROLLBACK');
+            fail('INVALID_CDC_TRANSACTION', 'CDC transaction mutations must be objects', context);
+          }
+          if (mutation.op === 'upsert' || mutation.op === 'insert' || mutation.op === 'update') {
+            const row = mutation.row;
+            if (!row || typeof row !== 'object' || Array.isArray(row)) {
+              await client.query('ROLLBACK');
+              fail('INVALID_CDC_TRANSACTION', 'CDC upsert mutation must carry a row object', context);
+            }
+            const rowColumns = Object.keys(row).sort();
+            if (columns == null) {
+              if (rowColumns.length === 0) {
+                await client.query('ROLLBACK');
+                fail('INVALID_BATCH_ROW', 'CDC upsert rows must contain at least one column', context);
+              }
+              columns = rowColumns;
+              for (const field of primaryKey) {
+                if (!columns.includes(field)) {
+                  await client.query('ROLLBACK');
+                  fail('INVALID_MUTATION_KEY', `CDC transaction primaryKey field ${field} is not part of the mutation columns`, context);
+                }
+              }
+              updatable = columns.filter(column => !primaryKey.includes(column));
+            } else if (rowColumns.join('\u0000') !== columns.join('\u0000')) {
+              await client.query('ROLLBACK');
+              fail('ROW_SHAPE_MISMATCH', 'All mutations in a CDC transaction must have the same columns', context);
+            }
+            for (const field of primaryKey) {
+              if (row[field] === null || row[field] === undefined) {
+                await client.query('ROLLBACK');
+                fail('INVALID_MUTATION_KEY', `CDC mutation row is missing primary-key field ${field}`, context);
+              }
+            }
+            upsertBuffer.push(row);
+            if (upsertBuffer.length >= 1000) await flushUpserts();
+          } else if (mutation.op === 'delete') {
+            await flushUpserts();
+            await applyDelete(mutation);
+          } else {
+            await client.query('ROLLBACK');
+            fail('INVALID_CDC_TRANSACTION', `Unsupported CDC mutation op ${mutation.op}`, context);
+          }
+          appliedMutations += 1;
+          if (appliedMutations === 1 && await this._hitFault('CDC_TX_AFTER_FIRST_MUTATION', context)) {
+            await client.query('ROLLBACK');
+            fail('FAULT_CDC_TX_AFTER_FIRST_MUTATION', 'Injected fault after first mutation', context);
+          }
+          if (!middleFaultFired && mutationCount > 1 && appliedMutations >= Math.ceil(mutationCount / 2)
+            && await this._hitFault('CDC_TX_AFTER_MIDDLE_MUTATION', context)) {
+            middleFaultFired = true;
+            await client.query('ROLLBACK');
+            fail('FAULT_CDC_TX_AFTER_MIDDLE_MUTATION', 'Injected fault after middle mutation', context);
+          }
+        };
+
+        if (Array.isArray(mutations)) {
+          for (const mutation of mutations) await applyMutation(mutation);
+        } else {
+          for await (const mutation of mutations) await applyMutation(mutation);
+        }
+        if (appliedMutations !== mutationCount) {
+          await client.query('ROLLBACK');
+          fail('TARGET_COMMIT_UNPROVEN', 'CDC transaction stream ended before the declared mutation count', { applied: appliedMutations, declared: mutationCount });
+        }
+        await flushUpserts();
+
+        if (await this._hitFault('CDC_TX_BEFORE_LEDGER', context)) {
+          await client.query('ROLLBACK');
+          fail('FAULT_CDC_TX_BEFORE_LEDGER', 'Injected fault before ledger write', context);
+        }
+        await insertLedgerEntry(client, this.targetRef, evidence, { inserted, updated, deleted, skippedMissing }, provenance);
+        if (await this._hitFault('CDC_TX_AFTER_LEDGER', context)) {
+          await client.query('ROLLBACK');
+          fail('FAULT_CDC_TX_AFTER_LEDGER', 'Injected fault after ledger write', context);
+        }
+        if (await this._hitFault('CDC_TX_BEFORE_COMMIT', context)) {
+          await client.query('ROLLBACK');
+          fail('FAULT_CDC_TX_BEFORE_COMMIT', 'Injected fault before commit', context);
+        }
+        await client.query('COMMIT');
+        if (await this._hitFault('CDC_TX_AFTER_COMMIT_BEFORE_RETURN', context)) {
+          fail('FAULT_CDC_TX_AFTER_COMMIT_BEFORE_RETURN', 'Injected fault after commit before return', context);
+        }
+        return { kind: 'COMMITTED_EXACT', alreadyCommitted: false, inserted, updated, deleted, skippedMissing };
+      } catch (error) {
+        try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
+        throw error;
+      }
+    });
+
+    if (result.kind === 'BATCH_IDENTITY_CONFLICT') fail('BATCH_IDENTITY_CONFLICT', 'CDC transaction identity is already committed with different evidence', { transactionIdentity });
+    if (result.kind !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL target did not return exact CDC transaction evidence');
+    return Object.freeze({
+      status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
+      transactionIdentity, rowCount: mutationCount, payloadHash,
+      inserted: result.inserted ?? null, updated: result.updated ?? null,
+      deleted: result.deleted ?? null, skippedMissing: result.skippedMissing ?? null
+    });
+  }
+
   async truncateTarget(input = {}) {
     this.#assertOpen();
     const migrationId = requiredString('migrationId', input.migrationId);

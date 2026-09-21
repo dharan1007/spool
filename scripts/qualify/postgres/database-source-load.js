@@ -7,7 +7,8 @@ import { joinPostgresSnapshot } from '../../../src/connectors/postgres/database-
 
 export async function runDatabaseSourceLoad({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.database-source.load';
-  const tableCount = Math.min(10, profile.writers * 2);
+  const tableCount = profile.writers * 2;
+  const effectiveConfig = { writers: profile.writers };
   const prefix = `qualify_db_${runId.replaceAll('-', '_').toLowerCase()}`;
   let admin;
   const tables = Array.from({ length: tableCount }, (_, i) => `${prefix}_${i}`);
@@ -69,7 +70,7 @@ export async function runDatabaseSourceLoad({ profile, seed, evidenceWriter, pgC
     for (const t of tables) await cleanup.query(`DROP TABLE IF EXISTS public."${t}" CASCADE`);
     await cleanup.end();
 
-    return { metrics: { scenario, tableCount, totalRows: snapshotResult.totalRows, catalogId: catalog.catalogId, snapshotId: snapshotResult.exportedSnapshotId }, failures: [] };
+    return { metrics: { scenario, requestedConfig: { writers: profile.writers }, effectiveConfig, tableCount, totalRows: snapshotResult.totalRows, catalogId: catalog.catalogId, snapshotId: snapshotResult.exportedSnapshotId }, failures: [] };
   } finally {
     try { if (admin) await admin.end(); } catch {}
     try {

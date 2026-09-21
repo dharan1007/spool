@@ -71,24 +71,48 @@ function parseOverride(key, value) {
   return n;
 }
 
+export const IMMUTABLE_PROFILE_NAMES = Object.freeze(Object.keys(PROFILE_DEFINITIONS));
+
+// Consistency validation: every field that scales the workload is bounded,
+// and largeTransactionRows must be a positive executable size. Overrides
+// never silently rename a run: any override produces a distinct
+// <BASE>_CUSTOM profile whose requested config is the immutable base and
+// whose effective config is the resolved override. The verifier rejects
+// evidence where an immutable name carries a diverged configuration.
 export function resolveProfile(name, overrides = {}) {
   const upper = String(name ?? 'CI').toUpperCase();
-  const base = PROFILE_DEFINITIONS[upper];
-  if (!base) fail('UNKNOWN_PROFILE', `Unknown qualification profile ${name}. Valid: ${Object.keys(PROFILE_DEFINITIONS).join(', ')}`);
+  const baseName = upper.endsWith('_CUSTOM') ? upper.slice(0, -'_CUSTOM'.length) : upper;
+  const base = PROFILE_DEFINITIONS[baseName];
+  if (!base) fail('UNKNOWN_PROFILE', `Unknown qualification profile ${name}. Valid: ${Object.keys(PROFILE_DEFINITIONS).join(', ')} (+ _CUSTOM variants by override only)`);
+  const requested = { ...base };
   const resolved = { ...base };
+  let customized = upper.endsWith('_CUSTOM');
   for (const [key, value] of Object.entries(overrides)) {
     if (!OVERRIDE_KEYS.has(key)) fail('INVALID_PROFILE_OVERRIDE', `Unknown override ${key}`);
     if (value == null || value === '') continue;
     resolved[key] = parseOverride(key, value);
+    if (resolved[key] !== requested[key]) customized = true;
   }
   // Validate bounds
   if (resolved.rows < 1) fail('INVALID_PROFILE', 'rows must be >=1');
   if (resolved.payloadBytes < 1 || resolved.payloadBytes > 16 * 1024) fail('INVALID_PROFILE', 'payloadBytes must be 1..16384');
   if (resolved.batchSize < 1 || resolved.batchSize > 50000) fail('INVALID_PROFILE', 'batchSize must be 1..50000');
+  if (resolved.batchSize > resolved.rows) fail('INVALID_PROFILE', 'batchSize must not exceed rows');
   if (resolved.writers < 1 || resolved.writers > 100) fail('INVALID_PROFILE', 'writers must be 1..100');
   if (resolved.workers < 1 || resolved.workers > 64) fail('INVALID_PROFILE', 'workers must be 1..64');
   if (resolved.cdcDurationSeconds < 5 || resolved.cdcDurationSeconds > 72 * 3600) fail('INVALID_PROFILE', 'cdcDurationSeconds must be 5..259200');
-  return Object.freeze(resolved);
+  if (!Number.isSafeInteger(resolved.largeTransactionRows) || resolved.largeTransactionRows < 1) fail('INVALID_PROFILE', 'largeTransactionRows must be >= 1');
+  if (!Number.isSafeInteger(resolved.maxRssBytes) || resolved.maxRssBytes < 64 * 1024 * 1024) fail('INVALID_PROFILE', 'maxRssBytes must be >= 64MiB');
+  const neededBytes = resolved.rows * (resolved.payloadBytes + 512) * 3;
+  if (!Number.isSafeInteger(neededBytes)) fail('INVALID_PROFILE', 'profile disk requirement overflows the safe integer range');
+  const effectiveName = customized ? `${baseName}_CUSTOM` : baseName;
+  return Object.freeze({
+    ...resolved,
+    name: effectiveName,
+    requestedProfile: baseName,
+    requestedConfig: Object.freeze(requested),
+    customized
+  });
 }
 
 export function formatProfile(profile) {

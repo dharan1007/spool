@@ -9,8 +9,9 @@ import { rowsPerSecond } from '../metrics.js';
 
 export async function runWorkerLoad({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.workers.load';
-  const workers = Math.min(profile.workers, 4);
-  const rowCount = Math.min(profile.rows, 200_000);
+  const workers = profile.workers;
+  const rowCount = profile.rows;
+  const effectiveConfig = { rows: rowCount, workers };
   const payloadBytes = profile.payloadBytes;
   const batchSize = profile.batchSize;
   const perWorkerRows = Math.floor(rowCount / workers);
@@ -74,6 +75,8 @@ export async function runWorkerLoad({ profile, seed, evidenceWriter, pgConfig, r
     const totalRows = results.reduce((a, b) => a + b.rows, 0);
     const metrics = {
       scenario,
+      requestedConfig: { rows: profile.rows, workers: profile.workers },
+      effectiveConfig,
       workers,
       perWorkerRows,
       totalRows,

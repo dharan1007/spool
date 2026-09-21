@@ -111,9 +111,20 @@ async function main() {
   let overallResult = 'PASS';
   let configDigest = null;
 
-  // Config
+  // Config: requested vs effective is pinned here and again in the manifest.
+  // An immutable profile name with a diverged configuration is rejected by
+  // the verifier — overrides produce a <BASE>_CUSTOM run, never a quiet PASS
+  // under the larger name.
   const config = {
     profile,
+    requestedProfile: profile.requestedProfile ?? profile.name,
+    requestedConfig: profile.requestedConfig ?? { ...profile },
+    effectiveConfig: {
+      rows: profile.rows, payloadBytes: profile.payloadBytes, batchSize: profile.batchSize,
+      writers: profile.writers, workers: profile.workers,
+      cdcDurationSeconds: profile.cdcDurationSeconds,
+      largeTransactionRows: profile.largeTransactionRows, maxRssBytes: profile.maxRssBytes
+    },
     seed,
     datasetId: did,
     runId,
@@ -169,7 +180,8 @@ async function main() {
   // failure (not an expected refusal) fails the run. Recording a failure
   // without failing was the old silent-PASS hole. The fold rule lives in
   // scenarios.js (unit-tested) so the harness cannot drift from it.
-  async function runScenario(name, fn) {
+  async function runScenario(entry, fn) {
+    const name = entry.name;
     const start = process.hrtime.bigint();
     const startWall = new Date().toISOString();
     evidenceWriter.appendRaw({ scenario: name, event: 'scenario_started', timestamp: startWall });
@@ -179,8 +191,24 @@ async function main() {
       evidenceWriter.appendRaw({ scenario: name, event: 'scenario_completed', durationMs: ms, timestamp: new Date().toISOString() });
       const folded = foldScenarioFailures(result?.failures);
       if (folded.failures.length) failures.push(...folded.failures);
-      metrics[name] = { ...result?.metrics, durationMs: ms, status: folded.status };
-      if (folded.status === 'FAIL') overallResult = 'FAIL';
+      // Requested-vs-effective enforcement: the scenario must have consumed
+      // the declared profile fields exactly. A missing effectiveConfig or
+      // any divergence is PROFILE_DOWNSCALED — the run is not that profile.
+      const effective = result?.metrics?.effectiveConfig;
+      const downscaled = [];
+      if (!effective || typeof effective !== 'object') {
+        downscaled.push({ scenario: name, code: 'PROFILE_EFFECTIVE_UNRECORDED', message: `Scenario ${name} did not record its effective configuration`, expected: false, classification: 'HARNESS', timestamp: new Date().toISOString() });
+      } else {
+        for (const key of entry.profileKeys ?? []) {
+          if (effective[key] !== profile[key]) {
+            downscaled.push({ scenario: name, code: 'PROFILE_DOWNSCALED', message: `Scenario ${name} ran ${key}=${effective[key]} instead of declared ${profile[key]}`, expected: false, classification: 'HARNESS', timestamp: new Date().toISOString() });
+          }
+        }
+      }
+      if (downscaled.length) failures.push(...downscaled);
+      const status = folded.status === 'FAIL' || downscaled.length ? 'FAIL' : 'PASS';
+      metrics[name] = { ...result?.metrics, durationMs: ms, status };
+      if (status === 'FAIL') overallResult = 'FAIL';
       return result;
     } catch (e) {
       const ms = Number(process.hrtime.bigint() - start) / 1e6;
@@ -197,7 +225,7 @@ async function main() {
   // statically imported: no dynamic loading, no per-scenario try/catch, no
   // stubs. A missing module crashes the harness instead of passing silently.
   for (const entry of REQUIRED_SCENARIOS) {
-    await runScenario(entry.name, () => entry.run({ profile, seed, evidenceWriter, pgConfig, runId }));
+    await runScenario(entry, () => entry.run({ profile, seed, evidenceWriter, pgConfig, runId }));
   }
 
   sampler.stop();
@@ -270,7 +298,7 @@ async function main() {
   for (const name of requiredScenarioNames()) scenarioStatus[name] = metrics[name]?.status ?? 'MISSING';
   const unexpectedFailures = failures.filter(f => f.classification !== 'EXPECTED_REFUSAL' && f.expected === false).length;
   const manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     qualificationRunId: runId,
     suiteVersion: 'industrial-postgres-v1',
     repository: 'dharan1007/spool',
@@ -278,6 +306,9 @@ async function main() {
     dirty: gitDirty,
     profile: profile.name,
     profileConfig: profile,
+    requestedProfile: config.requestedProfile,
+    requestedConfig: config.requestedConfig,
+    effectiveConfig: config.effectiveConfig,
     datasetId: did,
     seed,
     startTime,

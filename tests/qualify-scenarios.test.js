@@ -14,6 +14,7 @@ test('required scenario manifest is complete and ordered', () => {
     'postgres.content-exact.verification',
     'postgres.repair.load',
     'postgres.cdc.soak',
+    'postgres.cdc.productionLifecycle',
     'postgres.workers.load',
     'postgres.largeTransactions',
     'postgres.database-source.load',
@@ -22,6 +23,9 @@ test('required scenario manifest is complete and ordered', () => {
   for (const entry of REQUIRED_SCENARIOS) {
     assert.equal(typeof entry.name, 'string');
     assert.equal(typeof entry.run, 'function');
+    // Every scenario declares the profile fields it must consume exactly;
+    // the harness fails the run on any silent downscale of a listed key.
+    assert.ok(Array.isArray(entry.profileKeys) && entry.profileKeys.length > 0, `${entry.name} must declare profileKeys`);
   }
 });
 

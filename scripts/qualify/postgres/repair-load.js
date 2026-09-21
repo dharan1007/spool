@@ -9,7 +9,8 @@ import { rowsPerSecond, mibPerSecond } from '../metrics.js';
 
 export async function runRepairLoad({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.repair.load';
-  const rowCount = Math.min(profile.rows, 200_000);
+  const rowCount = profile.rows;
+  const effectiveConfig = { rows: rowCount };
   const payloadBytes = profile.payloadBytes;
   const batchSize = profile.batchSize;
   const sourceRoot = await mkdtemp(join(tmpdir(), 'spool-qualify-source-'));
@@ -119,6 +120,8 @@ export async function runRepairLoad({ profile, seed, evidenceWriter, pgConfig, r
 
     const metrics = {
       scenario,
+      requestedConfig: { rows: profile.rows },
+      effectiveConfig,
       rowCount,
       corruptCount,
       repairOps: repairResult.repair.opCounts,

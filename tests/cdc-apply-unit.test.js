@@ -5,8 +5,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   createCdcBatchIdentity,
+  createCdcTransactionIdentity,
   createRingBuffer,
-  createCdcTransactionAssembler
+  createCdcTransactionAssembler,
+  iterateTransactionEvents,
+  hashOrderedMutations
 } from '../src/connectors/postgres/cdc-apply.js';
 
 function change(tag, lsn, extra = {}) {
@@ -96,16 +99,56 @@ test('assembler spills oversized transactions to disk and preserves order', asyn
     assert.ok(tx);
     assert.equal(tx.spilled, true);
     assert.equal(tx.eventCount, total);
-    // Arrival order preserved across the memory/disk boundary.
-    assert.equal(tx.events[0].row.id, 1);
-    assert.equal(tx.events[99].row.id, 100);
-    assert.equal(tx.events[100].row.id, 101);
-    assert.equal(tx.events[total - 1].row.id, total);
+    // The finalized value is a handle: no materialized event array crosses
+    // the memory/disk boundary. Streaming preserves arrival order.
+    assert.equal(tx.memoryEvents.length <= 100, true);
+    const streamed = [];
+    for await (const event of iterateTransactionEvents(tx, { stagingDir: dir })) streamed.push(event);
+    assert.equal(streamed.length, total);
+    assert.equal(streamed[0].row.id, 1);
+    assert.equal(streamed[99].row.id, 100);
+    assert.equal(streamed[100].row.id, 101);
+    assert.equal(streamed[total - 1].row.id, total);
     await assembler.discardStaged(9);
     assert.deepEqual(await assembler.listStaged(), []);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('CDC transaction identity binds the complete ordered transaction', () => {
+  const base = {
+    migrationId: 'mig-1', planId: 'sha256:' + '1'.repeat(64), sourceSnapshotId: 'sha256:' + '2'.repeat(64),
+    mappingRevision: 1, targetIdentity: { connector: 'postgres', resource: 'public.t' },
+    xid: 777, beginLsn: '0/16B6B00', commitLsn: '0/16B6C50',
+    mutationCount: 3, payloadHash: 'sha256:' + '3'.repeat(64)
+  };
+  const first = createCdcTransactionIdentity(base);
+  assert.match(first, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(first, createCdcTransactionIdentity(structuredClone(base)));
+  // Any transaction coordinate change aliases nothing.
+  assert.notEqual(createCdcTransactionIdentity({ ...base, commitLsn: '0/16B6C60' }), first);
+  assert.notEqual(createCdcTransactionIdentity({ ...base, xid: 778 }), first);
+  assert.notEqual(createCdcTransactionIdentity({ ...base, mutationCount: 4 }), first);
+  assert.notEqual(createCdcTransactionIdentity({ ...base, payloadHash: 'sha256:' + '4'.repeat(64) }), first);
+  assert.throws(() => createCdcTransactionIdentity({ ...base, beginLsn: 'bogus' }), /INVALID_CDC_POSITION/);
+});
+
+test('ordered mutation hash binds order without buffering', async () => {
+  const first = hashOrderedMutations([{ op: 'upsert', row: { id: 1 } }, { op: 'delete', key: { id: 2 } }]);
+  assert.equal(first.mutationCount, 2);
+  assert.match(first.payloadHash, /^sha256:[a-f0-9]{64}$/);
+  // Order matters: swapped mutations hash differently.
+  const swapped = hashOrderedMutations([{ op: 'delete', key: { id: 2 } }, { op: 'upsert', row: { id: 1 } }]);
+  assert.notEqual(swapped.payloadHash, first.payloadHash);
+  // Async iterables hash identically to arrays (streaming path equivalence).
+  async function *gen() {
+    yield { op: 'upsert', row: { id: 1 } };
+    yield { op: 'delete', key: { id: 2 } };
+  }
+  const streamed = await hashOrderedMutations(gen());
+  assert.equal(streamed.payloadHash, first.payloadHash);
+  assert.equal(streamed.mutationCount, 2);
 });
 
 test('staged transactions are listed for crash discard', async () => {

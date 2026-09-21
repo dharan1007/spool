@@ -9,7 +9,8 @@ import { rowsPerSecond, mibPerSecond, LatencyHistogram } from '../metrics.js';
 
 export async function runVerificationLoad({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.content-exact.verification';
-  const rowCount = Math.min(profile.rows, 200_000); // verification load capped for CI
+  const rowCount = profile.rows;
+  const effectiveConfig = { rows: rowCount };
   const payloadBytes = profile.payloadBytes;
   const batchSize = profile.batchSize;
   const histogram = new LatencyHistogram();
@@ -96,6 +97,8 @@ export async function runVerificationLoad({ profile, seed, evidenceWriter, pgCon
 
     const metrics = {
       scenario,
+      requestedConfig: { rows: profile.rows },
+      effectiveConfig,
       rowCount,
       durationMs: ms,
       rowsPerSec: rowsPerSecond(rowCount, ms),
