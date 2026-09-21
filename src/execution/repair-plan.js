@@ -69,6 +69,19 @@ export function createRepairPlan(input = {}) {
 
   const operations = verification.diff.entries.map(operationFromDiff);
   const effects = [...new Set(operations.map(operation => operation.effect))].sort();
+  // Effect budget: the plan authorizes at most maxOperations mutations. An
+  // explicitly provided budget smaller than the derived operation set fails
+  // closed (REPAIR_BUDGET_EXCEEDED) instead of silently authorizing partial
+  // repair; an absent budget binds exactly the derived set (no slack).
+  const budgetInput = input.effectBudget ?? {};
+  if (budgetInput != null && typeof budgetInput !== 'object') fail('INVALID_REPAIR_PLAN_INPUT', 'effectBudget must be an object');
+  const maxOperations = budgetInput.maxOperations ?? operations.length;
+  if (!Number.isSafeInteger(maxOperations) || maxOperations < 0) fail('INVALID_REPAIR_PLAN_INPUT', 'effectBudget.maxOperations must be a non-negative safe integer');
+  if (operations.length > maxOperations) {
+    fail('REPAIR_BUDGET_EXCEEDED', 'Repair operation set exceeds the authorized effect budget', {
+      operations: operations.length, maxOperations
+    });
+  }
   const record = {
     schemaVersion: 1,
     migrationId: requireMigrationId(input.migrationId),
@@ -80,6 +93,7 @@ export function createRepairPlan(input = {}) {
     primaryKey: verification.primaryKey,
     columns: verification.columns,
     effects,
+    effectBudget: Object.freeze({ maxOperations }),
     operations
   };
   const canonicalRecord = JSON.parse(canonicalJson(record));

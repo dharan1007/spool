@@ -185,8 +185,23 @@ async function main() {
     const start = process.hrtime.bigint();
     const startWall = new Date().toISOString();
     evidenceWriter.appendRaw({ scenario: name, event: 'scenario_started', timestamp: startWall });
+    // Watchdog heartbeats: while a scenario runs, emit periodic diagnostics
+    // (elapsed, RSS, heap) so a hung stage is identifiable from raw.jsonl
+    // instead of a silent gap. Heartbeats never pass/fail anything — a
+    // legitimate multi-hour operation emits heartbeats and continues.
+    const HEARTBEAT_MS = 30_000;
+    const heartbeat = setInterval(() => {
+      const mem = process.memoryUsage();
+      evidenceWriter.appendRaw({
+        scenario: name, event: 'scenario_heartbeat',
+        elapsedMs: Number(process.hrtime.bigint() - start) / 1e6,
+        rssBytes: mem.rss, heapUsedBytes: mem.heapUsed,
+        timestamp: new Date().toISOString()
+      });
+    }, HEARTBEAT_MS);
+    if (heartbeat.unref) heartbeat.unref();
     try {
-      const result = await fn();
+      const result = await fn().finally(() => clearInterval(heartbeat));
       const ms = Number(process.hrtime.bigint() - start) / 1e6;
       evidenceWriter.appendRaw({ scenario: name, event: 'scenario_completed', durationMs: ms, timestamp: new Date().toISOString() });
       const folded = foldScenarioFailures(result?.failures);

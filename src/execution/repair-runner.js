@@ -21,6 +21,18 @@ function requirePlans(plans) {
     if (!Array.isArray(plan.primaryKey) || plan.primaryKey.length === 0) fail('INVALID_REPAIR_EXECUTION', `repair plan ${index} primaryKey is required`);
     if (!Array.isArray(plan.columns) || plan.columns.length === 0) fail('INVALID_REPAIR_EXECUTION', `repair plan ${index} columns are required`);
     if (!Array.isArray(plan.operations) || plan.operations.length === 0) fail('INVALID_REPAIR_EXECUTION', `repair plan ${index} operations must be a non-empty array`);
+    // Effect budget is part of the authorized plan: execution refuses a plan
+    // whose operation set exceeds its own budget (tamper/aliasing guard).
+    const budget = plan.effectBudget ?? null;
+    if (budget != null) {
+      if (typeof budget !== 'object' || Array.isArray(budget)) fail('INVALID_REPAIR_EXECUTION', `repair plan ${index} effectBudget must be an object`);
+      if (!Number.isSafeInteger(budget.maxOperations) || budget.maxOperations < 0) fail('INVALID_REPAIR_EXECUTION', `repair plan ${index} effectBudget.maxOperations must be a non-negative safe integer`);
+      if (plan.operations.length > budget.maxOperations) {
+        fail('REPAIR_BUDGET_EXCEEDED', `repair plan ${index} exceeds its authorized effect budget`, {
+          operations: plan.operations.length, maxOperations: budget.maxOperations
+        });
+      }
+    }
     return plan;
   });
 }
