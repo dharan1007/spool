@@ -259,12 +259,36 @@ export async function ensurePostgresMetadata({ targetRef, credentialBroker } = {
   validateMetadataDescription(rows);
 }
 
+// Metadata bootstrap is idempotent DDL, but it costs ~10 statements plus a
+// catalog scan per call — unusable on hot paths (fence renewal per CDC
+// transaction). Cache per target; a missing-table error invalidates the
+// entry and retries once, so DROPped metadata (tests, restore) recovers
+// instead of failing closed on a stale assumption.
+const ensuredMetadataTargets = new Set();
+
+function metadataCacheKey(targetRef) {
+  return `${targetRef.database ?? ''}.${targetRef.schema ?? ''}.${targetRef.table ?? ''}`;
+}
+
+export function invalidatePostgresMetadataCache(targetRef = null) {
+  if (targetRef) ensuredMetadataTargets.delete(metadataCacheKey(targetRef));
+  else ensuredMetadataTargets.clear();
+}
+
+async function ensurePostgresMetadataCached({ targetRef, credentialBroker }) {
+  const key = metadataCacheKey(targetRef);
+  if (!ensuredMetadataTargets.has(key)) {
+    await ensurePostgresMetadata({ targetRef, credentialBroker });
+    ensuredMetadataTargets.add(key);
+  }
+}
+
 export async function acquirePostgresLease({ targetRef, credentialBroker, resource, owner, ttlMs } = {}) {
   requiredString('resource', resource); requiredString('owner', owner);
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) fail('INVALID_POSTGRES_RUNTIME_CONFIG', 'ttlMs must be a positive safe integer');
-  await ensurePostgresMetadata({ targetRef, credentialBroker });
+  await ensurePostgresMetadataCached({ targetRef, credentialBroker });
 
-  const result = await withPostgresClient({ targetRef, credentialBroker }, async client => {
+  const acquire = () => withPostgresClient({ targetRef, credentialBroker }, async client => {
     await client.query('BEGIN');
     try {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [resource]);
@@ -305,6 +329,22 @@ export async function acquirePostgresLease({ targetRef, credentialBroker, resour
       throw error;
     }
   });
+
+  let result;
+  try {
+    result = await acquire();
+  } catch (error) {
+    // The metadata cache may be stale (schema dropped out of band): retry
+    // once after re-bootstrapping instead of failing on the assumption. The
+    // credential broker wraps raw pg errors (losing the 42P01 code), so
+    // match the undefined-table message as well as the code.
+    const message = String(error?.message ?? '');
+    const missingTable = error?.code === '42P01' || /relation .* does not exist|undefined table/i.test(message);
+    if (!missingTable) throw error;
+    invalidatePostgresMetadataCache(targetRef);
+    await ensurePostgresMetadataCached({ targetRef, credentialBroker });
+    result = await acquire();
+  }
 
   if (result.status === 'HELD') fail('LEASE_HELD', 'PostgreSQL execution lease is held by another owner', { resource, owner: result.owner });
   if (result.status === 'TOKEN_OVERFLOW') fail('FENCING_TOKEN_EXHAUSTED', 'PostgreSQL fencing token exceeded the supported safe integer range', { resource });
@@ -392,14 +432,32 @@ async function checkRepairFence(client, target, fencingToken, operation = 'repai
   }
 }
 
+// Live contract re-validation is a catalog scan (~50ms): unusable per CDC
+// transaction at volume. Cache the last proven contract per table for
+// CONTRACT_CACHE_TTL_MS; every commit still validates, against a contract
+// proven fresh within the TTL. A mid-window DDL change is caught at the next
+// refresh, and the cutover proofs re-resolve the contract from scratch — so
+// no commit ever relies on an unboundedly stale contract.
+const CONTRACT_CACHE_TTL_MS = 10_000;
+const provenContracts = new Map();
+
+function contractCacheKey(targetRef) {
+  return `${targetRef.database ?? ''}.${targetRef.schema ?? ''}.${targetRef.table ?? ''}`;
+}
+
 async function checkRepairContract(client, target, targetContractId, operation = 'repair') {
   if (targetContractId == null) return;
   requiredHash('targetContractId', targetContractId);
+  const key = contractCacheKey(target.targetRef);
+  const cached = provenContracts.get(key);
+  if (cached && cached.contractId === targetContractId && Date.now() - cached.at < CONTRACT_CACHE_TTL_MS) return;
   const actualTargetContractId = await postgresTargetContractId(client, target.targetRef);
   if (actualTargetContractId !== targetContractId) {
+    provenContracts.delete(key);
     await client.query('ROLLBACK');
     fail('TARGET_CONTRACT_CHANGED', `Live PostgreSQL target contract changed before ${operation}`, { expectedTargetContractId: targetContractId, actualTargetContractId });
   }
+  provenContracts.set(key, { contractId: actualTargetContractId, at: Date.now() });
 }
 
 async function findLedgerEntry(client, targetRef, batchIdentity) {

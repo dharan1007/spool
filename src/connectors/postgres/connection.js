@@ -1,4 +1,5 @@
-import { Client } from 'pg';
+import { Client, Pool } from 'pg';
+import { createHash } from 'node:crypto';
 import { fail } from '../../core/errors.js';
 
 const TLS_MODES = new Set(['disable', 'require', 'verify-full']);
@@ -63,16 +64,53 @@ export function postgresConnectionConfig(targetRef, password) {
   };
 }
 
+// Process-wide connection pools keyed by server/database/user/password.
+// A fresh TCP+auth handshake costs tens of milliseconds per use — fatal for
+// per-transaction CDC apply at volume. Pooling preserves every semantic the
+// callback relies on: pool.connect() hands out a DEDICATED backend for the
+// callback's duration, so BEGIN/COMMIT, advisory locks, FOR UPDATE rows and
+// temp objects behave exactly as with a fresh client. allowExitOnIdle keeps
+// short-lived test processes from hanging on idle sockets.
+const pools = new Map();
+
+function poolKey(config, password) {
+  const digest = createHash('sha256').update(password, 'utf8').digest('hex').slice(0, 16);
+  return `${config.host}:${config.port}/${config.database}/${config.user}/${digest}`;
+}
+
+function poolFor(config) {
+  let pool = pools.get(poolKey(config, config.password));
+  if (!pool) {
+    pool = new Pool({ ...config, max: 20, idleTimeoutMillis: 10_000, allowExitOnIdle: true });
+    pool.on('error', () => { /* idle-client errors surface on checkout, never here */ });
+    pools.set(poolKey(config, config.password), pool);
+  }
+  return pool;
+}
+
+export function poolStats() {
+  return Object.freeze([...pools.entries()].map(([key, pool]) => Object.freeze({
+    key: key.replace(/\/[a-f0-9]{16}$/, '/<redacted>'),
+    totalCount: pool.totalCount, idleCount: pool.idleCount, waitingCount: pool.waitingCount
+  })));
+}
+
+export async function closePostgresPools() {
+  const open = [...pools.values()];
+  pools.clear();
+  await Promise.all(open.map(pool => pool.end().catch(() => {})));
+}
+
 export async function withPostgresClient({ targetRef, credentialBroker }, callback) {
   if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_POSTGRES_CONFIG', 'credentialBroker.withSecret() is required');
   if (typeof callback !== 'function') fail('INVALID_POSTGRES_CONFIG', 'PostgreSQL client callback is required');
   return credentialBroker.withSecret(targetRef?.secretRef, async password => {
-    const client = new Client(postgresConnectionConfig(targetRef, password));
-    await client.connect();
+    const pool = poolFor(postgresConnectionConfig(targetRef, password));
+    const client = await pool.connect();
     try {
       return await callback(client);
     } finally {
-      try { await client.end(); } catch { /* primary operation error wins */ }
+      try { client.release(); } catch { /* primary operation error wins */ }
     }
   });
 }

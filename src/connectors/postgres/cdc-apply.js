@@ -404,6 +404,12 @@ export function createCdcApplier({
   }
 
   const assembler = createCdcTransactionAssembler({ ...assemblerOptions, stagingDir });
+  // Shared server-ack state (applier scope, visible to both the per-
+  // transaction checkpoint writer and the stream pump): pending names the
+  // latest applied-but-unacked LSN, last the latest server-acked one.
+  const ACK_BATCH_TXNS = 50;
+  const ACK_BATCH_MS = 2000;
+  const serverAck = { pending: null, last: null, atCount: 0, atMs: Date.now() };
   const history = createRingBuffer(debugHistoryLimit);
   const metrics = {
     receivedMessages: 0, receivedTransactions: 0, appliedTransactions: 0,
@@ -427,16 +433,33 @@ export function createCdcApplier({
       const slotRecord = await describePostgresSlot({ ref, credentialBroker, slotName });
       assertSlotContractUsable({ slot: slotRecord, database: ref.database, plugin: 'pgoutput', slotName });
 
-      // Fence + checkpoint snapshot for this run. The fence is renewed ahead
-      // of every apply; the checkpoint version is reloaded after reconnects.
+      // Fence + checkpoint snapshot for this run. The lease is renewed ahead
+      // of the first apply and then at most every FENCE_RENEW_INTERVAL_MS:
+      // renewal only extends expiry (same owner keeps its token), while the
+      // synchronous in-commit fence check inside every target commit is the
+      // real per-transaction stale-owner guard. Renewing a lease per
+      // transaction would collapse throughput at volume with zero added
+      // safety; the checkpoint version is still reloaded after reconnects.
+      // The 5s interval assumes lease TTLs comfortably above it (service
+      // default is 5 minutes): a lapsed lease fails the next commit closed
+      // with LEASE_EXPIRED rather than committing unfenced.
+      const FENCE_RENEW_INTERVAL_MS = 5000;
       let fenceToken = await renewFence();
       if (!Number.isSafeInteger(fenceToken) || fenceToken < 1) fail('FENCE_REQUIRED', 'CDC apply requires a fresh fence token');
+      let fenceRenewedAt = Date.now();
+      serverAck.pending = null;
+      serverAck.last = null;
+      serverAck.atCount = metrics.appliedTransactions;
+      serverAck.atMs = Date.now();
       let stored = await checkpoint.load();
       let expectedVersion = stored?.version ?? 0;
 
       const applyOneTransaction = async tx => {
-        fenceToken = await renewFence();
-        if (!Number.isSafeInteger(fenceToken) || fenceToken < 1) fail('FENCE_REQUIRED', 'CDC apply requires a fresh fence token');
+        if (Date.now() - fenceRenewedAt >= FENCE_RENEW_INTERVAL_MS) {
+          fenceToken = await renewFence();
+          if (!Number.isSafeInteger(fenceToken) || fenceToken < 1) fail('FENCE_REQUIRED', 'CDC apply requires a fresh fence token');
+          fenceRenewedAt = Date.now();
+        }
         const result = await applyCdcTransaction({
           target,
           migration,
@@ -450,7 +473,9 @@ export function createCdcApplier({
           maxMutations: maxCdcTransactionMutations
         });
         // Exact replay counts come from the target ledger row on recovery,
-        // so the checkpoint carries watermarks only.
+        // so the checkpoint carries watermarks only. acknowledgedLsn is the
+        // last SERVER-acked LSN (honestly behind appliedLsn mid-batch);
+        // resume uses appliedLsn first, server replay reconciles via ledger.
         const saved = await checkpoint.save({
           slot: slotName,
           expectedVersion,
@@ -458,7 +483,7 @@ export function createCdcApplier({
           fenceToken,
           receivedLsn: tx.commitLsn,
           appliedLsn: tx.commitLsn,
-          acknowledgedLsn: tx.commitLsn
+          acknowledgedLsn: serverAck.last ?? null
         });
         expectedVersion = saved.version;
         metrics.appliedTransactions += 1;
@@ -622,6 +647,17 @@ export function createCdcApplier({
         try { await service.stop(); } catch { /* stopping wins over stop errors */ }
         try { await service.destroy(); } catch { /* shutdown must not mask results */ }
       };
+      // Batched server-ack state lives in serverAck (run scope, shared with
+      // the checkpoint writer): acknowledgedLsn in the checkpoint always
+      // names the last SERVER-acked LSN (never the merely applied one).
+      const flushPendingAck = async () => {
+        if (serverAck.pending == null) return;
+        await service.acknowledge(serverAck.pending);
+        serverAck.last = serverAck.pending;
+        serverAck.atCount = metrics.appliedTransactions;
+        serverAck.atMs = Date.now();
+        serverAck.pending = null;
+      };
       const shouldStop = tx => {
         if (maxTransactions != null && metrics.appliedTransactions >= maxTransactions) return true;
         if (untilLsn != null && tx && comparePostgresLsn(tx.commitLsn, untilLsn) >= 0) return true;
@@ -670,7 +706,10 @@ export function createCdcApplier({
             if (streamError) break;
             // A heartbeat may have carried the waterline while the pump was
             // waiting: observe it here instead of sleeping past the drain.
+            // Queue empty + no open transaction means everything dequeued is
+            // applied, so flushing the batched ack here is exact.
             if (idleStopReached()) {
+              await flushPendingAck();
               await stopService();
               return { finished: true, resumeLsn: metrics.lastCommitLsn ?? fromLsn };
             }
@@ -711,9 +750,20 @@ export function createCdcApplier({
           metrics.receivedTransactions += 1;
           // applyOneTransaction performs fenced target commit, durable CAS
           // checkpoint persist, metrics/history; only then is the source acked.
+          // Server acknowledgements are batched (every ACK_BATCH_TXNS or
+          // ACK_BATCH_MS, plus every stop): ack position is cumulative, so
+          // acking LSN-100 after applying through LSN-200 releases the same
+          // WAL with far fewer roundtrips. Crash-before-ack replays from the
+          // server position and reconciles through the ledger — never loss,
+          // never duplication. The checkpoint's acknowledgedLsn always names
+          // the last SERVER-acked LSN, honestly behind appliedLsn mid-batch.
           const { ackLsn } = await applyOneTransaction(tx);
-          await service.acknowledge(ackLsn);
+          serverAck.pending = ackLsn;
+          const ackDue = metrics.appliedTransactions - serverAck.atCount >= ACK_BATCH_TXNS
+            || Date.now() - serverAck.atMs >= ACK_BATCH_MS;
+          if (ackDue) await flushPendingAck();
           if (shouldStop(tx) || idleStopReached()) {
+            await flushPendingAck();
             await stopService();
             return { finished: true, resumeLsn: ackLsn };
           }

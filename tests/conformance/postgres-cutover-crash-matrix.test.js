@@ -104,6 +104,22 @@ async function fixtureDir() {
   return { dir, sourceRoot, targetRoot, snapshotDir, statePath: join(targetRoot, 'spool-state.db') };
 }
 
+// Windows releases file locks asynchronously (and AV scanners wedge
+// just-closed SQLite files for many seconds): retry, then give up without
+// failing the test — a leftover temp dir is litter, not a correctness
+// failure. Cleanup must never convert a passing test into a failure.
+async function removeDirTree(dir) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (error?.code !== 'EBUSY' && error?.code !== 'EPERM') throw error;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+}
+
 function serviceOptions(f) {
   return {
     sourceRoot: f.sourceRoot, targetRoot: f.targetRoot, snapshotDir: f.snapshotDir, statePath: f.statePath,
@@ -146,7 +162,7 @@ test('crash after arm resumes with the same attempt identity and commits once', 
       assert.equal(replay.cutoverAttemptId, attemptId);
       assert.deepEqual(await tableRows(TARGET_TABLE), await tableRows(SOURCE_TABLE));
     } finally { second.close(); }
-  } finally { await rm(f.dir, { recursive: true, force: true }); }
+  } finally { await removeDirTree(f.dir); }
 });
 
 test('aborted attempt requires rearm with a fresh attempt identity', { skip: !enabled, timeout: 300_000 }, async () => {
@@ -173,5 +189,5 @@ test('aborted attempt requires rearm with a fresh attempt identity', { skip: !en
       assert.equal(committed.cutoverAttemptId, rearmed.cutoverAttemptId);
       assert.deepEqual(await tableRows(TARGET_TABLE), await tableRows(SOURCE_TABLE));
     } finally { second.close(); }
-  } finally { await rm(f.dir, { recursive: true, force: true }); }
+  } finally { await removeDirTree(f.dir); }
 });
