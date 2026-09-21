@@ -928,6 +928,80 @@
       "assurance": null,
       "evidence": {},
       "notes": "Blocked: vendor sandbox access."
+    },
+    {
+      "id": "postgres.cdc.transaction-atomicity",
+      "label": "PostgreSQL CDC source-transaction atomicity",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": [
+          "src/connectors/postgres/target.js",
+          "src/connectors/postgres/cdc-apply.js"
+        ],
+        "integrationTests": [
+          "tests/conformance/postgres-cdc-transaction-atomicity.test.js"
+        ],
+        "faultTests": [
+          "tests/conformance/postgres-cdc-transaction-atomicity.test.js"
+        ]
+      },
+      "notes": "Implemented with unit-tested streaming identity and fault points; one-source-transaction-to-one-target-commit is NOT yet proven against live PostgreSQL (environment PG unreachable at implementation time). EXPERIMENTAL until the atomicity conformance passes live."
+    },
+    {
+      "id": "postgres.cdc.production-lifecycle",
+      "label": "PostgreSQL CDC production lifecycle qualification",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": [
+          "scripts/qualify/postgres/cdc-production-lifecycle.js"
+        ],
+        "integrationTests": [
+          "scripts/qualify/postgres/cdc-production-lifecycle.js"
+        ]
+      },
+      "notes": "Scenario drives the customer path (boundary/approve/run/catchUpCdc/beginCutover/commitCutover/release) with exact convergence checks; no live run yet. EXPERIMENTAL until a CI-or-larger profile passes with a verified bundle."
+    },
+    {
+      "id": "postgres.cdc.truncate",
+      "label": "PostgreSQL CDC source TRUNCATE handling",
+      "status": "UNSUPPORTED",
+      "assurance": null,
+      "evidence": {},
+      "notes": "Officially unsupported by decision: source TRUNCATE fails closed with CDC_TRUNCATE_REQUIRES_OPERATOR. No approved CDC truncate path exists; do not rely on truncate propagation."
+    },
+    {
+      "id": "execution.receipt-signing",
+      "label": "Signed execution receipts with offline verification",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": [
+          "src/execution/receipt.js",
+          "src/platform/signing.js",
+          "scripts/verify-receipt.js"
+        ],
+        "integrationTests": [
+          "tests/receipt.test.js"
+        ]
+      },
+      "notes": "Unit-proven with per-field tamper tests; not yet bound into migration completion output or proven on a live migration receipt. Key lifecycle is local PEM only; no KMS/HSM."
+    },
+    {
+      "id": "cutover.write-barrier",
+      "label": "Source write barriers for cutover",
+      "status": "EXPERIMENTAL",
+      "assurance": null,
+      "evidence": {
+        "implementation": [
+          "src/cutover/write-barrier.js"
+        ],
+        "integrationTests": [
+          "tests/write-barrier.test.js"
+        ]
+      },
+      "notes": "Module and attestation validation are unit-tested; DATABASE_READ_ONLY proof (rejected-write + final LSN) is unproven live and commitCutover binding is pending. APPLICATION_GATE/PROXY_ROUTER explicitly unsupported. EXPERIMENTAL until live proof."
     }
   ]
 }
