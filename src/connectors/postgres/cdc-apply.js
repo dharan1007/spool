@@ -211,6 +211,21 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
       if (!stagingDir) return;
       try { await rm(spillPath(xid), { force: true }); } catch {}
     },
+    // Abort the in-flight transaction (forgotten on reconnect): the durable
+    // watermark defines the resume point, so the server re-delivers the whole
+    // transaction from its BEGIN on resubscribe. Keeping any partial buffer
+    // (memory or staged spill) would concatenate stale rows onto the fresh
+    // replay — or double-emit BEGIN, which is a protocol violation, not a
+    // resumable position. Nothing was applied or checkpoited for this
+    // transaction yet, so discarding is losslessly idempotent.
+    async abortOpenTransaction() {
+      if (!current) return null;
+      const abandoned = { xid: current.xid, spilled: current.spilled, bufferedEvents: current.events.length + stagedCount };
+      if (current.spilled) await this.discardStaged(current.xid);
+      current = null;
+      stagedCount = 0;
+      return Object.freeze({ ...abandoned });
+    },
     async listStaged() {
       if (!stagingDir) return Object.freeze([]);
       let files;
@@ -548,6 +563,13 @@ export function createCdcApplier({
             stored = await checkpoint.load();
             expectedVersion = stored?.version ?? expectedVersion;
             resumeLsn = stored?.appliedLsn ?? stored?.acknowledgedLsn ?? resumeLsn;
+            // The connection died mid-transaction: drop any partially
+            // assembled transaction first, because the resubscribe below
+            // replays every transaction (BEGIN included) from the durable
+            // watermark. Re-applying a partially buffered transaction onto
+            // its own replayed prefix would corrupt ordering and the
+            // assembler would reject the duplicated BEGIN.
+            await assembler.abortOpenTransaction();
             continue;
           }
           throw error;

@@ -170,3 +170,43 @@ test('staged transactions are listed for crash discard', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('reconnect abandons the in-flight transaction and allows clean re-delivery', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'spool-cdc-reconnect-'));
+  try {
+    const assembler = createCdcTransactionAssembler({ maxInMemoryEvents: 2, stagingDir: dir });
+    // First delivery: BEGIN + rows for a transaction interrupted by a
+    // transport failure (only the first two rows got through before the
+    // connection died; the third spilled to staging).
+    await assembler.feed(change('begin', '0/100', { xid: 11 }));
+    await assembler.feed(rowChange('insert', '0/110', 1, 'a'));
+    await assembler.feed(rowChange('insert', '0/120', 2, 'b'));
+    await assembler.feed(rowChange('insert', '0/130', 3, 'c'));
+    assert.equal(await assembler.hasOpenTransaction(), true);
+    // Reconnecting must discard the partial transaction INCLUDING its staged
+    // spill: the durable watermark points BEFORE this transaction, so the
+    // server will replay the whole thing from its BEGIN again.
+    const abandoned = await assembler.abortOpenTransaction();
+    assert.equal(abandoned.xid, 11);
+    assert.equal(abandoned.spilled, true);
+    assert.deepEqual(await assembler.listStaged(), []);
+    assert.equal(await assembler.hasOpenTransaction(), false);
+    // Clean replay from the watermark: one BEGIN, one COMMIT, no protocol
+    // violation, no stale rows from the abandoned first delivery.
+    await assembler.feed(change('begin', '0/100', { xid: 11 }));
+    await assembler.feed(rowChange('insert', '0/110', 1, 'a'));
+    await assembler.feed(rowChange('insert', '0/120', 2, 'b'));
+    await assembler.feed(rowChange('insert', '0/130', 3, 'c'));
+    const tx = await assembler.feed(change('commit', '0/140'));
+    assert.equal(tx.xid, 11);
+    assert.equal(tx.commitLsn, '0/140');
+    assert.equal(tx.eventCount, 3);
+    const streamed = [];
+    for await (const event of iterateTransactionEvents(tx, { stagingDir: dir })) streamed.push(event);
+    assert.deepEqual(streamed.map(event => event.row.id), [1, 2, 3]);
+    // Aborting with nothing open is a no-op.
+    assert.equal(await assembler.abortOpenTransaction(), null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
