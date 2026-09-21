@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,11 +21,14 @@ export async function runCdcProductionLifecycle({ profile, seed, evidenceWriter,
   const durationSec = profile.cdcDurationSeconds;
   const largeTxRows = profile.largeTransactionRows;
   const effectiveConfig = { rows: rowCount, writers, cdcDurationSeconds: durationSec, largeTransactionRows: largeTxRows };
-  const key = runId.replaceAll('-', '_').toLowerCase();
+  // PostgreSQL truncates identifiers past 63 characters: derive a short
+  // deterministic suffix so the expected names always equal the live names
+  // (a 70-char expectation would never match the streamed relation name).
+  const key = createHash('sha256').update(`cdcprod-${runId}-${seed}`).digest('hex').slice(0, 12);
   const sourceTable = `qualify_cdcprod_src_${key}`;
   const targetTable = `qualify_cdcprod_dst_${key}`;
-  const slotName = `qcdcp_${key}`.slice(0, 60);
-  const publicationName = `qcdcpp_${key}`.slice(0, 60);
+  const slotName = `qcdcp_${key}`;
+  const publicationName = `qcdcpp_${key}`;
   const failures = [];
   const secretRef = { provider: 'env', key: 'SPOOL_TEST_PG_PASSWORD' };
   const broker = new CredentialBroker();

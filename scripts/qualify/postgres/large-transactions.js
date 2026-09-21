@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,7 +25,9 @@ export async function runLargeTransactions({ profile, seed, evidenceWriter, pgCo
   const scenario = 'postgres.largeTransactions';
   const sizes = [1, 100, 10000, 100000, 1000000].filter(n => n <= profile.largeTransactionRows);
   const effectiveConfig = { largeTransactionRows: profile.largeTransactionRows };
-  const table = `qualify_large_tx_${runId.replaceAll('-', '_').toLowerCase()}`;
+  // PostgreSQL truncates identifiers past 63 characters: hash the run id.
+  const key = createHash('sha256').update(`large-tx-${runId}-${seed}`).digest('hex').slice(0, 12);
+  const table = `qualify_large_tx_${key}`;
   const stagingRoot = await mkdtemp(join(tmpdir(), 'spool-qualify-large-tx-'));
   const broker = new CredentialBroker();
   broker.withSecret = async (ref, fn) => fn(pgConfig.password);
@@ -81,7 +84,11 @@ export async function runLargeTransactions({ profile, seed, evidenceWriter, pgCo
       const counter = (async function *() {
         for await (const event of iterateTransactionEvents(tx, { stagingDir })) {
           streamed += 1;
-          yield { op: event.tag === 'delete' ? 'delete' : 'upsert', row: event.row, key: event.key };
+          // Canonical records carry no undefined fields: inserts hash the
+          // row, deletes the key. An undefined key would fail closed in the
+          // canonical hasher (CANONICAL_UNDEFINED) instead of hashing.
+          if (event.tag === 'delete') yield { op: 'delete', key: event.key };
+          else yield { op: 'upsert', row: event.row };
         }
       })();
       const hashed = await hashOrderedMutations(counter);

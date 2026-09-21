@@ -7,6 +7,14 @@ import { SpoolCommandService } from '../../../src/daemon/command-service.js';
 import { writeDatasetCsv, datasetId } from '../dataset.js';
 import { rowsPerSecond, mibPerSecond, LatencyHistogram } from '../metrics.js';
 
+
+// PostgreSQL truncates identifiers past 63 characters: all scenario table
+// names derive from a short deterministic hash so expected names always
+// equal live names and parallel runs cannot collide on truncation.
+function shortKey(seed, runId) {
+  return createHash('sha256').update(`qualify-${seed}-${runId}`).digest('hex').slice(0, 12);
+}
+
 export async function runVerificationLoad({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.content-exact.verification';
   const rowCount = profile.rows;
@@ -20,7 +28,7 @@ export async function runVerificationLoad({ profile, seed, evidenceWriter, pgCon
   const snapshotDir = join(tmpdir(), `spool-qualify-snap-${runId}-verify`);
   const csvPath = join(sourceRoot, 'dataset.csv');
   let client, service;
-  const table = `qualify_verify_${runId.replaceAll('-', '_').toLowerCase()}`;
+  const table = `qualify_verify_${shortKey(seed, runId)}`;
 
   try {
     const did = datasetId({ seed: seed + '-verify', rowCount, payloadBytes });

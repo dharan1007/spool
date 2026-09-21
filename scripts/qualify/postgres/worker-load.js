@@ -7,6 +7,14 @@ import { SpoolCommandService } from '../../../src/daemon/command-service.js';
 import { writeDatasetCsv, datasetId } from '../dataset.js';
 import { rowsPerSecond } from '../metrics.js';
 
+
+// PostgreSQL truncates identifiers past 63 characters: all scenario table
+// names derive from a short deterministic hash so expected names always
+// equal live names and parallel runs cannot collide on truncation.
+function shortKey(seed, runId) {
+  return createHash('sha256').update(`qualify-${seed}-${runId}`).digest('hex').slice(0, 12);
+}
+
 export async function runWorkerLoad({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.workers.load';
   const workers = profile.workers;
@@ -18,7 +26,7 @@ export async function runWorkerLoad({ profile, seed, evidenceWriter, pgConfig, r
   const sourceRoot = await mkdtemp(join(tmpdir(), 'spool-qualify-source-'));
   const targetRoot = await mkdtemp(join(tmpdir(), 'spool-qualify-target-'));
   let client;
-  const tables = Array.from({ length: workers }, (_, i) => `qualify_worker_${runId.replaceAll('-', '_').toLowerCase()}_${i}`);
+  const tables = Array.from({ length: workers }, (_, i) => `qualify_worker_${shortKey(seed, runId)}_${i}`);
   const failures = [];
 
   try {

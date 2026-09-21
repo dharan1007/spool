@@ -5,11 +5,19 @@ import { createPostgresSourceRuntime } from '../../../src/connectors/postgres/so
 import { withPostgresClient } from '../../../src/connectors/postgres/connection.js';
 import { joinPostgresSnapshot } from '../../../src/connectors/postgres/database-source.js';
 
+
+// PostgreSQL truncates identifiers past 63 characters: all scenario table
+// names derive from a short deterministic hash so expected names always
+// equal live names and parallel runs cannot collide on truncation.
+function shortKey(seed, runId) {
+  return createHash('sha256').update(`qualify-${seed}-${runId}`).digest('hex').slice(0, 12);
+}
+
 export async function runDatabaseSourceLoad({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.database-source.load';
   const tableCount = profile.writers * 2;
   const effectiveConfig = { writers: profile.writers };
-  const prefix = `qualify_db_${runId.replaceAll('-', '_').toLowerCase()}`;
+  const prefix = `qualify_db_${shortKey(seed, runId)}`;
   let admin;
   const tables = Array.from({ length: tableCount }, (_, i) => `${prefix}_${i}`);
   try {

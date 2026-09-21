@@ -8,9 +8,17 @@ import { CredentialBroker } from '../../../src/daemon/credential-broker.js';
 import { SpoolCommandService } from '../../../src/daemon/command-service.js';
 import { writeDatasetCsv } from '../dataset.js';
 
+
+// PostgreSQL truncates identifiers past 63 characters: all scenario table
+// names derive from a short deterministic hash so expected names always
+// equal live names and parallel runs cannot collide on truncation.
+function shortKey(seed, runId) {
+  return createHash('sha256').update(`qualify-${seed}-${runId}`).digest('hex').slice(0, 12);
+}
+
 export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.crashRecovery';
-  const table = `qualify_crash_${runId.replaceAll('-', '_').toLowerCase()}`;
+  const table = `qualify_crash_${shortKey(seed, runId)}`;
   const rowCount = profile.rows;
   const effectiveConfig = { rows: rowCount };
   const payloadBytes = profile.payloadBytes;

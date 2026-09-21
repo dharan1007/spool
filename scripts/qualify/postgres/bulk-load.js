@@ -7,6 +7,14 @@ import { SpoolCommandService } from '../../../src/daemon/command-service.js';
 import { writeDatasetCsv, datasetId } from '../dataset.js';
 import { LatencyHistogram, rowsPerSecond, mibPerSecond } from '../metrics.js';
 
+
+// PostgreSQL truncates identifiers past 63 characters: all scenario table
+// names derive from a short deterministic hash so expected names always
+// equal live names and parallel runs cannot collide on truncation.
+function shortKey(seed, runId) {
+  return createHash('sha256').update(`qualify-${seed}-${runId}`).digest('hex').slice(0, 12);
+}
+
 export async function runBulkLoad({ profile, seed, evidenceWriter, pgConfig, runId }) {
   const scenario = 'postgres.bulk.load';
   const histogram = new LatencyHistogram();
@@ -17,7 +25,7 @@ export async function runBulkLoad({ profile, seed, evidenceWriter, pgConfig, run
   const snapshotDir = join(tmpdir(), `spool-qualify-snap-${runId}-bulk`);
   const csvPath = join(sourceRoot, 'dataset.csv');
   let client, service;
-  const table = `qualify_bulk_${runId.replaceAll('-', '_').toLowerCase()}`;
+  const table = `qualify_bulk_${shortKey(seed, runId)}`;
   const rowCount = profile.rows;
   const effectiveConfig = { rows: rowCount, batchSize: profile.batchSize };
   const payloadBytes = profile.payloadBytes;
