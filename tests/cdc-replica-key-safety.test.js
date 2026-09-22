@@ -162,3 +162,20 @@ test('missing target primary-key mapping is refused before CDC starts', () => {
     error => error?.code === 'CDC_TARGET_KEY_MAPPING_MISSING'
   );
 });
+
+
+test('REPLICA IDENTITY FULL still requires every target primary-key mapping expression', () => {
+  assert.throws(
+    () => assertCdcTargetKeyReplicaSafe({
+      mapping: [{ target: 'payload', expr: { op: 'field', name: 'payload' } }],
+      targetPrimaryKey: ['id'],
+      replicaIdentity: {
+        mode: 'FULL',
+        columns: [],
+        schema: 'public',
+        table: 'src'
+      }
+    }),
+    error => error?.code === 'CDC_TARGET_KEY_MAPPING_MISSING'
+  );
+});
