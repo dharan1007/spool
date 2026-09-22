@@ -71,7 +71,7 @@ test('spoold routes repair and cutover commands to the service with caller optio
       [{ command: 'run-repair', request: { a: 1 }, options: { repairApproval: 'x' } }, 200],
       [{ command: 'repair-receipt', migrationId: 'm1' }, 200],
       [{ command: 'begin-cutover', request: { a: 1 }, options: { receipt: 'r' } }, 200],
-      [{ command: 'commit-cutover', request: { a: 1 } }, 200],
+      [{ command: 'commit-cutover', request: { a: 1 }, options: { sourceBarrier: { barrierId: 'barrier-1' } } }, 200],
       [{ command: 'abort-cutover', migrationId: 'm1', options: { reason: 'why' } }, 200],
       [{ command: 'cutover', migrationId: 'm1' }, 200],
       [{ command: 'drop-database' }, 400]
@@ -86,6 +86,7 @@ test('spoold routes repair and cutover commands to the service with caller optio
       'beginCutover', 'commitCutover', 'abortCutover', 'cutover'
     ]);
     assert.deepEqual(seen[1].args, [{ a: 1 }, { nonce: 'n' }]);
+    assert.deepEqual(seen[5].args, [{ a: 1 }, { sourceBarrier: { barrierId: 'barrier-1' } }]);
     assert.deepEqual(seen[6].args, ['m1', { reason: 'why' }]);
   } finally { await daemon.close(); }
 });
