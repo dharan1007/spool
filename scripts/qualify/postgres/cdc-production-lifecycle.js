@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { Client } from 'pg';
 import { CredentialBroker } from '../../../src/daemon/credential-broker.js';
 import { SpoolCommandService } from '../../../src/daemon/command-service.js';
+import { attestOperatorBarrier } from '../../../src/cutover/write-barrier.js';
 
 // Production CDC lifecycle qualification: drives the exact customer code
 // path through SpoolCommandService — establishCdcBoundary, approve, run,
@@ -207,7 +208,17 @@ export async function runCdcProductionLifecycle({ profile, seed, evidenceWriter,
     if (armed.status !== 'ARMED') {
       failures.push({ scenario, code: 'LIFECYCLE_ARM_FAILED', message: `arm ended ${armed.status}`, expected: false, classification: 'CORRECTNESS', timestamp: new Date().toISOString() });
     }
-    const committed = await service.commitCutover(request);
+    const attestor = await admin();
+    let attestedFinalLsn;
+    try { attestedFinalLsn = await flushLsn(attestor); } finally { await attestor.end(); }
+    const sourceBarrier = attestOperatorBarrier({
+      migrationId,
+      principal: 'qualification:operator',
+      statement: 'Qualification writers are stopped and remain stopped for the remainder of cutover.',
+      finalLsn: attestedFinalLsn,
+      routingDecision: 'qualification harness will not restart source writers after the cutover decision'
+    });
+    const committed = await service.commitCutover(request, { sourceBarrier });
     if (committed.status !== 'COMMITTED') {
       failures.push({ scenario, code: 'LIFECYCLE_COMMIT_FAILED', message: `commit ended ${committed.status}`, expected: false, classification: 'CORRECTNESS', timestamp: new Date().toISOString() });
     }
