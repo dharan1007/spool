@@ -1,4 +1,5 @@
 import { Client } from 'pg';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { fail } from '../core/errors.js';
 import { sha256Canonical } from '../platform/canonical-json.js';
 import { postgresConnectionConfig } from '../connectors/postgres/connection.js';
@@ -6,6 +7,9 @@ import { postgresConnectionConfig } from '../connectors/postgres/connection.js';
 const BARRIER_DOMAIN = 'spool-source-write-barrier-v2';
 const LSN = /^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/;
 const PG_LOCK_TIMEOUT = '55P03';
+const OPERATOR_SIGNATURE_DOMAIN = 'spool-source-write-barrier-operator-signature-v1';
+const HASH = /^sha256:[a-f0-9]{64}$/;
+const SIGNATURE = /^hmac-sha256:[a-f0-9]{64}$/;
 
 export const WRITE_BARRIER_KINDS = Object.freeze([
   'POSTGRES_TABLE_SHARE_LOCK',
@@ -41,6 +45,41 @@ export function describeBarrierKind(kind) {
   }
   if (!WRITE_BARRIER_KINDS.includes(kind)) fail('WRITE_BARRIER_UNKNOWN', `Unknown source write barrier kind ${kind}`, { kind });
   return kind;
+}
+
+function signingBytes(signingKey) {
+  if (!(typeof signingKey === 'string' || Buffer.isBuffer(signingKey) || signingKey instanceof Uint8Array)) {
+    fail('INVALID_BARRIER_SIGNING_KEY', 'Source barrier signing key must be bytes or string');
+  }
+  const bytes = Buffer.from(signingKey);
+  if (bytes.length < 16) fail('INVALID_BARRIER_SIGNING_KEY', 'Source barrier signing key must be at least 16 bytes');
+  return bytes;
+}
+
+function operatorSignature(record, signingKey) {
+  const digest = createHmac('sha256', signingBytes(signingKey))
+    .update(`SPOOL\0${OPERATOR_SIGNATURE_DOMAIN}\0`, 'utf8')
+    .update(JSON.stringify(record), 'utf8')
+    .digest('hex');
+  return `hmac-sha256:${digest}`;
+}
+
+function safeEqualSignature(expected, actual) {
+  if (!SIGNATURE.test(expected ?? '') || !SIGNATURE.test(actual ?? '')) return false;
+  return timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(actual, 'utf8'));
+}
+
+function operatorSignedRecord(barrier) {
+  return {
+    schemaVersion: 1,
+    barrierId: barrier.barrierId,
+    kind: barrier.kind,
+    migrationId: barrier.migrationId,
+    acquiredAt: barrier.acquiredAt,
+    finalLsn: barrier.finalLsn,
+    zeroDowntime: barrier.zeroDowntime,
+    attestation: barrier.attestation
+  };
 }
 
 function requireMigrationId(value) {
@@ -96,22 +135,33 @@ export function barrierIdentity({ migrationId, kind, acquiredAt, finalLsn, attes
 // Operator attestation for an externally enforced freeze. The attestation is
 // evidence of an operator-controlled gate, not proof that SPOOL itself fenced
 // the source. It is therefore never a zero-downtime or autonomous-cutover claim.
-export function attestOperatorBarrier({ migrationId, principal, statement, finalLsn, routingDecision = null } = {}) {
+export function attestOperatorBarrier({
+  migrationId,
+  cutoverAttemptId,
+  principal,
+  statement,
+  finalLsn,
+  routingDecision
+} = {}, { signingKey } = {}) {
   requireMigrationId(migrationId);
+  if (typeof cutoverAttemptId !== 'string' || !HASH.test(cutoverAttemptId)) {
+    fail('INVALID_BARRIER_ATTESTATION', 'cutoverAttemptId must be the canonical cutover attempt identity');
+  }
   if (typeof principal !== 'string' || !principal) fail('INVALID_BARRIER_ATTESTATION', 'attesting principal is required');
   if (typeof statement !== 'string' || !statement.trim() || statement.length > 2000) {
     fail('INVALID_BARRIER_ATTESTATION', 'attestation statement must be a non-empty bounded string');
   }
   if (typeof finalLsn !== 'string' || !LSN.test(finalLsn)) fail('INVALID_BARRIER_ATTESTATION', 'finalLsn must be a valid PostgreSQL LSN');
-  if (routingDecision != null && (typeof routingDecision !== 'string' || !routingDecision.trim())) {
-    fail('INVALID_BARRIER_ATTESTATION', 'routingDecision must be a non-empty string when provided');
+  if (typeof routingDecision !== 'string' || !routingDecision.trim() || routingDecision.length > 2000) {
+    fail('INVALID_BARRIER_ATTESTATION', 'routingDecision must be a non-empty bounded string');
   }
   const attestedAt = new Date().toISOString();
   const attestation = Object.freeze({
+    cutoverAttemptId,
     principal,
     statement: statement.trim(),
     finalLsn: finalLsn.toUpperCase(),
-    routingDecision: routingDecision?.trim() ?? null,
+    routingDecision: routingDecision.trim(),
     attestedAt
   });
   const barrierId = barrierIdentity({
@@ -121,7 +171,7 @@ export function attestOperatorBarrier({ migrationId, principal, statement, final
     finalLsn,
     attestation
   });
-  return Object.freeze({
+  const unsigned = {
     barrierId,
     kind: 'EXTERNAL_OPERATOR_BARRIER',
     migrationId,
@@ -129,7 +179,70 @@ export function attestOperatorBarrier({ migrationId, principal, statement, final
     finalLsn: finalLsn.toUpperCase(),
     attestation,
     zeroDowntime: false
+  };
+  const signature = operatorSignature(operatorSignedRecord(unsigned), signingKey);
+  return Object.freeze({ ...unsigned, signature });
+}
+
+export function assertOperatorBarrier(barrier, {
+  signingKey,
+  migrationId,
+  cutoverAttemptId,
+  principal
+} = {}) {
+  requireMigrationId(migrationId);
+  if (!barrier || typeof barrier !== 'object' || Array.isArray(barrier)) {
+    fail('CUTOVER_SOURCE_BARRIER_REQUIRED', 'PostgreSQL cutover requires a signed external source-write freeze attestation');
+  }
+  if (barrier.kind !== 'EXTERNAL_OPERATOR_BARRIER') {
+    fail('CUTOVER_SOURCE_BARRIER_REQUIRED', 'PostgreSQL cutover requires EXTERNAL_OPERATOR_BARRIER attestation in addition to the database lock fence', {
+      kind: barrier.kind ?? null
+    });
+  }
+  if (barrier.migrationId !== migrationId) {
+    fail('CUTOVER_SOURCE_BARRIER_MISMATCH', 'Source-write barrier is bound to a different migration', {
+      expectedMigrationId: migrationId,
+      barrierMigrationId: barrier.migrationId ?? null
+    });
+  }
+  if (barrier.zeroDowntime !== false) {
+    fail('CUTOVER_SOURCE_BARRIER_INVALID', 'External source-write barrier must not claim zero-downtime');
+  }
+  const attestation = barrier.attestation;
+  if (!attestation || typeof attestation !== 'object'
+    || typeof attestation.principal !== 'string' || !attestation.principal
+    || typeof attestation.statement !== 'string' || !attestation.statement.trim()
+    || typeof attestation.routingDecision !== 'string' || !attestation.routingDecision.trim()
+    || typeof attestation.cutoverAttemptId !== 'string' || !HASH.test(attestation.cutoverAttemptId)) {
+    fail('CUTOVER_SOURCE_BARRIER_INVALID', 'External source-write barrier requires attempt, principal, statement, and routingDecision evidence');
+  }
+  if (attestation.cutoverAttemptId !== cutoverAttemptId) {
+    fail('CUTOVER_SOURCE_BARRIER_ATTEMPT_MISMATCH', 'Source-write barrier is bound to a different cutover attempt', {
+      expectedCutoverAttemptId: cutoverAttemptId,
+      barrierCutoverAttemptId: attestation.cutoverAttemptId
+    });
+  }
+  if (attestation.principal !== principal) {
+    fail('CUTOVER_SOURCE_BARRIER_PRINCIPAL_MISMATCH', 'Source-write barrier attesting principal does not match the cutover request principal', {
+      expectedPrincipal: principal,
+      barrierPrincipal: attestation.principal
+    });
+  }
+  const expectedId = barrierIdentity({
+    migrationId,
+    kind: barrier.kind,
+    acquiredAt: barrier.acquiredAt,
+    finalLsn: barrier.finalLsn,
+    attestation
   });
+  if (expectedId !== barrier.barrierId) {
+    fail('CUTOVER_SOURCE_BARRIER_INVALID', 'External source-write barrier identity does not match its evidence payload');
+  }
+  const expectedSignature = operatorSignature(operatorSignedRecord(barrier), signingKey);
+  if (!safeEqualSignature(expectedSignature, barrier.signature)) {
+    fail('CUTOVER_SOURCE_BARRIER_SIGNATURE_INVALID', 'External source-write barrier signature does not verify');
+  }
+  return true;
 }
 
 // Strong PostgreSQL table barrier.
