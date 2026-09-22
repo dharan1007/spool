@@ -23,7 +23,12 @@ import {
   establishPostgresSnapshotCdcBoundary,
   getPostgresFlushLsn
 } from '../connectors/postgres/cdc.js';
-import { acquirePostgresTableShareLockBarrier, attestOperatorBarrier, assertOperatorBarrier } from '../cutover/write-barrier.js';
+import {
+  acquirePostgresTableShareLockBarrier,
+  acquirePostgresTargetTableShareLockBarrier,
+  attestOperatorBarrier,
+  assertOperatorBarrier
+} from '../cutover/write-barrier.js';
 
 // Snapshot-pinned repair replays the approved snapshot ranges; after CDC
 // transactions advanced the target beyond the snapshot, replaying those
@@ -1350,6 +1355,7 @@ export class SpoolCommandService {
     if (!armed.cutoverAttemptId) fail('CUTOVER_ATTEMPT_MISMATCH', 'Armed cutover has no attempt identity; re-arm before committing');
     const targetExecution = await prepared.targetRuntime.createExecution({ migrationId: request.migrationId, targetRef: prepared.plan.targetRef });
     let sourceLockBarrier = null;
+    let targetLockBarrier = null;
     try {
       if (postgresSource) {
         sourceLockBarrier = await acquirePostgresTableShareLockBarrier({
@@ -1366,6 +1372,27 @@ export class SpoolCommandService {
       // Open the shared execution: the coordinator verifies through it
       // (ledger reads and content sessions require an opened target).
       await targetExecution.openTarget();
+
+      // The target barrier is deliberately lazy. During FINAL_DRAIN SPOOL
+      // still needs to write CDC mutations to the target, and SHARE would
+      // correctly block those ROW EXCLUSIVE writes. Once drain is complete
+      // (or immediately for non-CDC cutover/recovery), acquire it exactly once
+      // and retain it through verification, commit, post-verification and
+      // completion.
+      const ensureTargetLockBarrier = async () => {
+        if (prepared.plan.targetRef?.connector !== 'postgres') return null;
+        if (!targetLockBarrier) {
+          targetLockBarrier = await acquirePostgresTargetTableShareLockBarrier({
+            migrationId: request.migrationId,
+            targetRef: prepared.plan.targetRef,
+            credentialBroker: this.credentialBroker
+          });
+        } else {
+          await targetLockBarrier.verifyHeld();
+        }
+        return targetLockBarrier;
+      };
+
       const attemptId = armed.cutoverAttemptId;
       const commandIdFor = step => `cutover:${attemptId}:${step}`;
       let finalVerificationProducedHere = null;
@@ -1446,6 +1473,9 @@ export class SpoolCommandService {
           state = this.#durableState(request.migrationId);
         }
         if ([MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN].includes(state.currentState)) {
+          // Close the target-side proof/decision race. From this point through
+          // COMPLETED, external target DML is blocked by a table SHARE lock.
+          await ensureTargetLockBarrier();
           // Fresh FINAL_PRE_CUTOVER proof: executed now, never reused.
           const finalVerification = await verifier.verify({
             ...verifyInput,
@@ -1483,6 +1513,7 @@ export class SpoolCommandService {
         if (state.currentState === MIGRATION_STATES.FINAL_VERIFY) {
           let persisted = finalVerificationProducedHere;
           if (!persisted) {
+            await ensureTargetLockBarrier();
             // Recovery entered FINAL_VERIFY from disk. The historical proof
             // explains how we got here, but cannot authorize a later
             // irreversible decision: target data may have changed while this
@@ -1500,7 +1531,9 @@ export class SpoolCommandService {
             persisted = this.runs.saveVerification(request.migrationId, refreshed);
           }
           if (!persisted) fail('VERIFICATION_REQUIRED', 'FINAL_VERIFY has no fresh final verification for this invocation');
+          await ensureTargetLockBarrier();
           if (sourceLockBarrier) await sourceLockBarrier.verifyHeld();
+          await targetLockBarrier?.verifyHeld();
           // Last possible fence check before the local irreversible decision.
           // A token-lineage change aborts instead of carrying a stale proof
           // across an intervening target owner.
@@ -1523,6 +1556,13 @@ export class SpoolCommandService {
                 externalBarrierId: externalSourceBarrier?.barrierId ?? null,
                 externalPrincipal: externalSourceBarrier?.attestation?.principal ?? null,
                 externalRoutingDecision: externalSourceBarrier?.attestation?.routingDecision ?? null,
+                zeroDowntime: false
+              } : null,
+              targetWriteBarrier: targetLockBarrier ? {
+                barrierId: targetLockBarrier.barrierId,
+                kind: targetLockBarrier.kind,
+                acquiredAt: targetLockBarrier.acquiredAt,
+                proof: targetLockBarrier.proof,
                 zeroDowntime: false
               } : null
             },
@@ -1568,6 +1608,7 @@ export class SpoolCommandService {
         // A restart already in POST_CUTOVER_VERIFY reuses the immutable proof
         // saved by that same atomic transition.
         if (state.currentState === MIGRATION_STATES.CUTOVER_COMMITTED) {
+          await ensureTargetLockBarrier();
           if (post) {
             fail('CUTOVER_STATE_CONFLICT', 'POST_CUTOVER verification exists while durable state is still CUTOVER_COMMITTED', {
               migrationId: request.migrationId,
@@ -1607,6 +1648,7 @@ export class SpoolCommandService {
             });
           }
         } else {
+          await ensureTargetLockBarrier();
           // Recovery entered POST_CUTOVER_VERIFY from disk. Preserve the old
           // evidence for audit, but completion requires a proof produced in
           // this live invocation; target data can change while a process is
@@ -1635,6 +1677,8 @@ export class SpoolCommandService {
           fail('VERIFICATION_REQUIRED', 'Migration completion requires post-cutover evidence produced in the current live invocation');
         }
         if (sourceLockBarrier) await sourceLockBarrier.verifyHeld();
+        await ensureTargetLockBarrier();
+        await targetLockBarrier?.verifyHeld();
         await renewCutoverLease();
 
         // No unauthorized SPOOL mutation may have occurred between the cutover
@@ -1653,6 +1697,7 @@ export class SpoolCommandService {
       }
       return this.runs.cutover(request.migrationId);
     } finally {
+      if (targetLockBarrier) await targetLockBarrier.release().catch(() => {});
       if (sourceLockBarrier) await sourceLockBarrier.release().catch(() => {});
       await targetExecution.close();
     }
