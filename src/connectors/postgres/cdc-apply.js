@@ -115,8 +115,11 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
   }
 
   async function ensureSpillHandle(tx) {
+    // Resolve the guarded path first so "staging not configured" produces the
+    // stable CDC_TRANSACTION_TOO_LARGE contract instead of mkdir(null).
+    const path = spillPath(tx.xid);
     await mkdir(stagingDir, { recursive: true });
-    if (!tx.spillHandle) tx.spillHandle = await open(spillPath(tx.xid), 'a');
+    if (!tx.spillHandle) tx.spillHandle = await open(path, 'a');
     return tx.spillHandle;
   }
 
@@ -144,6 +147,7 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
       tx.spilled = true;
       tx.spillBytes = (tx.spillBytes ?? 0) + eventBytes(change);
     } catch (error) {
+      if (error?.code === 'CDC_TRANSACTION_TOO_LARGE') throw error;
       // Disk/quota/fd failures are terminal for this attempt. No source
       // checkpoint has advanced, so replay from WAL remains the recovery
       // mechanism. Surface an operator-actionable CDC code rather than a raw
