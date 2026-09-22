@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from 'pg';
-import { acquirePostgresTableShareLockBarrier } from '../../src/cutover/write-barrier.js';
+import {
+  acquirePostgresTableShareLockBarrier,
+  acquirePostgresTargetTableShareLockBarrier
+} from '../../src/cutover/write-barrier.js';
 
 const endpoint = process.env.SPOOL_TEST_POSTGRES_ENDPOINT;
 const database = process.env.SPOOL_TEST_POSTGRES_DATABASE ?? 'spooltest';
@@ -231,5 +234,54 @@ test('PostgreSQL backend termination drops the barrier and writers recover inste
     await writer.query('ROLLBACK').catch(() => {});
     await writer.end().catch(() => {});
     await killer.end().catch(() => {});
+  }
+});
+
+
+test('PostgreSQL target cutover barrier independently blocks target DML until release', { skip: !enabled, timeout: 120_000 }, async () => {
+  const table = 'spool_target_cutover_barrier';
+  await reset(table);
+  const writer = await client();
+  const reader = await client();
+  let barrier = null;
+  try {
+    barrier = await acquirePostgresTargetTableShareLockBarrier({
+      migrationId: 'target-cutover-barrier',
+      targetRef: sourceRef(table),
+      credentialBroker: broker,
+      lockTimeoutMs: 5_000,
+      probeTimeoutMs: 100
+    });
+
+    assert.equal(barrier.kind, 'POSTGRES_TARGET_TABLE_SHARE_LOCK');
+    assert.equal(barrier.proof.role, 'target');
+    assert.equal(barrier.zeroDowntime, false);
+    assert.match(barrier.barrierId, /^sha256:[a-f0-9]{64}$/);
+    assert.equal((await barrier.verifyHeld()).held, true);
+
+    // Verification/read traffic remains possible under SHARE.
+    const before = await reader.query(`SELECT value FROM public."${table}" WHERE id=1`);
+    assert.equal(before.rows[0].value, 'before');
+
+    // Ordinary target mutation takes ROW EXCLUSIVE and must be stopped by
+    // PostgreSQL itself while cutover evidence is being produced/committed.
+    await writer.query('BEGIN');
+    await writer.query("SET LOCAL lock_timeout = '250ms'");
+    await expectLockTimeout(() =>
+      writer.query(`UPDATE public."${table}" SET value='raced-cutover' WHERE id=1`)
+    );
+    await writer.query('ROLLBACK');
+
+    await barrier.release();
+    barrier = null;
+
+    await writer.query(`UPDATE public."${table}" SET value='after-cutover-barrier' WHERE id=1`);
+    const after = await reader.query(`SELECT value FROM public."${table}" WHERE id=1`);
+    assert.equal(after.rows[0].value, 'after-cutover-barrier');
+  } finally {
+    if (barrier) await barrier.release().catch(() => {});
+    await writer.query('ROLLBACK').catch(() => {});
+    await writer.end().catch(() => {});
+    await reader.end().catch(() => {});
   }
 });
