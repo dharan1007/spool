@@ -303,7 +303,7 @@ async function main() {
   const endTime = new Date().toISOString();
   const durationMs = Number(process.hrtime.bigint() - startMonotonic) / 1e6;
 
-  // Manifest (schemaVersion 2): evidence.files is the complete sorted file
+  // Manifest (schemaVersion 4): evidence.files is the complete sorted file
   // set excluding only sha256sums.txt itself — a file cannot contain its own
   // checksum, so checksums live in sha256sums.txt alone and the manifest pins
   // the set, never stale embedded sums. The verifier enforces set equality.
