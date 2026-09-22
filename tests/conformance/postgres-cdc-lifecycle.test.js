@@ -210,6 +210,28 @@ test('CDC lifecycle: boundary before approval, catch-up converges, drain commits
     assert.equal(committed.commitEvidence.fenced, true);
     assert.equal(committed.commitEvidence.sourceWriteBarrier.kind, 'POSTGRES_TABLE_SHARE_LOCK');
     assert.equal(committed.commitEvidence.sourceWriteBarrier.externalBarrierId, sourceBarrier.barrierId);
+
+    // commitCutover returns only after its finally block releases the dedicated
+    // SHARE-lock session. Prove no stale source fence survives successful
+    // completion by acquiring ROW EXCLUSIVE immediately, without mutating data.
+    const releaseProbe = await adminClient();
+    try {
+      const stale = await releaseProbe.query(
+        `SELECT count(*)::int AS locks
+           FROM pg_catalog.pg_locks
+          WHERE pid = $1 AND granted = true AND mode = 'ShareLock'`,
+        [committed.commitEvidence.sourceWriteBarrier.proof.backendPid]
+      );
+      assert.equal(Number(stale.rows[0].locks), 0);
+      await releaseProbe.query('BEGIN');
+      await releaseProbe.query("SET LOCAL lock_timeout = '500ms'");
+      await releaseProbe.query(`LOCK TABLE public."${SOURCE_TABLE}" IN ROW EXCLUSIVE MODE`);
+      await releaseProbe.query('ROLLBACK');
+    } finally {
+      await releaseProbe.query('ROLLBACK').catch(() => {});
+      await releaseProbe.end();
+    }
+
     assert.deepEqual(await tableRows(TARGET_TABLE), await tableRows(SOURCE_TABLE));
 
     // 8. Release drops the migration-owned slot; the record is gone.
