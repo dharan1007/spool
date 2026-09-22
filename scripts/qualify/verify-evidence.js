@@ -25,7 +25,7 @@ import { join } from 'node:path';
 import { readdir, readFile } from 'node:fs/promises';
 import { verifySha256Sums } from './checksums.js';
 import { REQUIRED_SCENARIOS, requiredScenarioNames } from './scenarios.js';
-import { PROFILE_DEFINITIONS } from './profiles.js';
+import { PROFILE_DEFINITIONS, qualifiesIndustrialScale } from './profiles.js';
 
 function fail(message) {
   console.error(`Evidence verification failed: ${message}`);
@@ -112,10 +112,12 @@ async function main() {
   }
   if (manifest.schemaVersion >= 4) {
     if (typeof manifest.industrialScaleGrade !== 'boolean') fail('v4 manifest industrialScaleGrade must be boolean');
-    const expectedIndustrialScaleGrade = manifest.result === 'PASS'
-      && manifest.dirty !== true
-      && manifest.profile === 'INDUSTRIAL'
-      && manifest.requestedProfile === 'INDUSTRIAL';
+    const expectedIndustrialScaleGrade = qualifiesIndustrialScale({
+      result: manifest.result,
+      dirty: manifest.dirty,
+      profile: manifest.profile,
+      requestedProfile: manifest.requestedProfile
+    });
     if (manifest.industrialScaleGrade !== expectedIndustrialScaleGrade) {
       fail(`industrialScaleGrade=${manifest.industrialScaleGrade} is inconsistent with result/profile/tree; expected ${expectedIndustrialScaleGrade}`);
     }
