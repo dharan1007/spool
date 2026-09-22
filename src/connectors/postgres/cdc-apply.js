@@ -15,7 +15,9 @@ import {
   normalizeMessage,
   classifyCdcStreamError,
   describePostgresSlot,
-  assertSlotContractUsable
+  assertSlotContractUsable,
+  describePostgresReplicaIdentity,
+  assertCdcTargetKeyReplicaSafe
 } from './cdc.js';
 import { postgresContentRowHash } from './row-codec.js';
 
@@ -471,6 +473,22 @@ export function createCdcApplier({
     metrics: () => Object.freeze({ ...metrics }),
     history: () => history.values(),
     async run() {
+      // Before reading/acking WAL, prove that a target-key-changing UPDATE is
+      // observable from the source table's actual replica identity. Otherwise
+      // pgoutput may omit the old source values needed to delete the previous
+      // mapped target key, creating silent duplicates.
+      const replicaIdentity = await describePostgresReplicaIdentity({
+        ref,
+        credentialBroker,
+        schema: source.schema,
+        table: source.table
+      });
+      assertCdcTargetKeyReplicaSafe({
+        mapping: plan.mapping,
+        targetPrimaryKey: primaryKey,
+        replicaIdentity
+      });
+
       // Validate the slot contract before consuming: same name with wrong
       // plugin/database/type fails closed here, never silently reused.
       const slotRecord = await describePostgresSlot({ ref, credentialBroker, slotName });
@@ -877,7 +895,16 @@ export async function applyCdcTransaction({
     // but processing the old image must not perturb the row accounting/state
     // used to transform the actual new source event.
     const oldImageAccumulator = engine.createAccumulator(mapOptions.mapping, mapOptions.mappingRevision, mapOptions.targetSchema);
-    const compiledKeyMapping = compileMapping(mapOptions.mapping);
+    const keyEntries = mapOptions.mapping.filter(entry => primaryKey.includes(entry?.target));
+    if (keyEntries.length !== primaryKey.length) {
+      fail('CDC_TARGET_KEY_MAPPING_MISSING', 'Every target primary-key field requires a mapping expression', {
+        primaryKey,
+        mappedTargets: keyEntries.map(entry => entry.target)
+      });
+    }
+    // A pgoutput K tuple is sparse by design. Compile only target-key outputs
+    // so unrelated non-key transforms cannot fail while mapping an old key.
+    const compiledKeyMapping = compileMapping(keyEntries);
     for await (const change of iterateTransactionEvents(transaction, { stagingDir })) {
       const mutations = mapOneCdcEvent({
         change,
