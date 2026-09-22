@@ -4,16 +4,28 @@ import {
   WRITE_BARRIER_KINDS,
   describeBarrierKind,
   barrierIdentity,
-  attestOperatorBarrier
+  attestOperatorBarrier,
+  acquireDatabaseReadOnlyBarrier
 } from '../src/cutover/write-barrier.js';
 
-test('barrier kinds are explicit: unimplemented routers fail, never stub', () => {
-  assert.deepEqual([...WRITE_BARRIER_KINDS], ['DATABASE_READ_ONLY', 'EXTERNAL_OPERATOR_BARRIER']);
-  assert.equal(describeBarrierKind('DATABASE_READ_ONLY'), 'DATABASE_READ_ONLY');
+test('barrier kinds expose only mechanisms that can actually fence writes', () => {
+  assert.deepEqual([...WRITE_BARRIER_KINDS], ['POSTGRES_TABLE_SHARE_LOCK', 'EXTERNAL_OPERATOR_BARRIER']);
+  assert.equal(describeBarrierKind('POSTGRES_TABLE_SHARE_LOCK'), 'POSTGRES_TABLE_SHARE_LOCK');
   assert.equal(describeBarrierKind('EXTERNAL_OPERATOR_BARRIER'), 'EXTERNAL_OPERATOR_BARRIER');
+  assert.throws(
+    () => describeBarrierKind('DATABASE_READ_ONLY'),
+    error => error?.code === 'WRITE_BARRIER_UNSAFE'
+  );
   assert.throws(() => describeBarrierKind('APPLICATION_GATE'), /WRITE_BARRIER_UNSUPPORTED/);
   assert.throws(() => describeBarrierKind('PROXY_ROUTER'), /WRITE_BARRIER_UNSUPPORTED/);
   assert.throws(() => describeBarrierKind('MAGIC'), /WRITE_BARRIER_UNKNOWN/);
+});
+
+test('legacy DATABASE_READ_ONLY acquisition is disabled fail-closed', async () => {
+  await assert.rejects(
+    () => acquireDatabaseReadOnlyBarrier(),
+    error => error?.code === 'WRITE_BARRIER_UNSAFE'
+  );
 });
 
 test('operator attestation requires every field and never claims zero-downtime', () => {
@@ -36,11 +48,18 @@ test('operator attestation requires every field and never claims zero-downtime',
 });
 
 test('barrier identity binds migration, kind, time, LSN and attestation', () => {
-  const base = { migrationId: 'mig-1', kind: 'EXTERNAL_OPERATOR_BARRIER', acquiredAt: '2026-09-21T00:00:00.000Z', finalLsn: '0/4A1B2C0', attestation: { a: 1 } };
+  const base = {
+    migrationId: 'mig-1',
+    kind: 'POSTGRES_TABLE_SHARE_LOCK',
+    acquiredAt: '2026-09-21T00:00:00.000Z',
+    finalLsn: '0/4A1B2C0',
+    attestation: { schema: 'public', table: 'orders', backendPid: 42 }
+  };
   const first = barrierIdentity(base);
   assert.equal(first, barrierIdentity(structuredClone(base)));
   assert.notEqual(barrierIdentity({ ...base, finalLsn: '0/4A1B2D0' }), first);
-  assert.notEqual(barrierIdentity({ ...base, kind: 'DATABASE_READ_ONLY' }), first);
+  assert.notEqual(barrierIdentity({ ...base, kind: 'EXTERNAL_OPERATOR_BARRIER' }), first);
   assert.notEqual(barrierIdentity({ ...base, migrationId: 'mig-2' }), first);
+  assert.notEqual(barrierIdentity({ ...base, attestation: { ...base.attestation, table: 'customers' } }), first);
   assert.throws(() => barrierIdentity({ ...base, finalLsn: 'nope' }), /INVALID_BARRIER_REQUEST/);
 });
