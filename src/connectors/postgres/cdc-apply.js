@@ -872,9 +872,22 @@ export async function applyCdcTransaction({
     let index = 0;
     const engine = new MigrationEngine();
     const accumulator = engine.createAccumulator(mapOptions.mapping, mapOptions.mappingRevision, mapOptions.targetSchema);
+    // Old-row/key mapping is intentionally isolated from the new-row
+    // accumulator. A key-changing UPDATE can require both old and new images,
+    // but processing the old image must not perturb the row accounting/state
+    // used to transform the actual new source event.
+    const oldImageAccumulator = engine.createAccumulator(mapOptions.mapping, mapOptions.mappingRevision, mapOptions.targetSchema);
     const compiledKeyMapping = compileMapping(mapOptions.mapping);
     for await (const change of iterateTransactionEvents(transaction, { stagingDir })) {
-      yield mapOneCdcEvent({ change, accumulator, compiledKeyMapping, index, ...mapOptions });
+      const mutations = mapOneCdcEvent({
+        change,
+        accumulator,
+        oldImageAccumulator,
+        compiledKeyMapping,
+        index,
+        ...mapOptions
+      });
+      for (const mutation of mutations) yield mutation;
       index += 1;
     }
   };
@@ -933,24 +946,56 @@ export async function applyCdcTransaction({
 // buffering the transaction. Returned mutations are frozen and carry an
 // explicit op: upsert mutations carry the full mapped row, delete mutations
 // carry the mapped key plus precondition evidence.
-function mapOneCdcEvent({ change, accumulator, compiledKeyMapping, primaryKey, sourceTable, commitLsn, index }) {
+function samePrimaryKey(left, right) {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+function deleteMutation(mapped) {
+  return Object.freeze({
+    op: 'delete',
+    key: mapped.key,
+    expectedRowHash: mapped.expectedRowHash,
+    precondition: mapped.precondition
+  });
+}
+
+// Map ONE source event to ONE OR MORE ordered target mutations. Most events
+// remain one mutation. A source UPDATE carrying a K/O image can prove that
+// the mapped target primary key changed; that case MUST delete the old target
+// key before upserting the new row. Both mutations remain inside the single
+// source-transaction target commit and therefore share one atomic ledger
+// identity/checkpoint boundary.
+function mapOneCdcEvent({
+  change,
+  accumulator,
+  oldImageAccumulator,
+  compiledKeyMapping,
+  primaryKey,
+  sourceTable,
+  commitLsn,
+  index
+}) {
   if (change.table !== sourceTable.table || change.schema !== sourceTable.schema) {
     fail('CDC_UNEXPECTED_TABLE', 'CDC event is for a table outside the bound publication set; the publication may have been altered mid-migration', {
       schema: change.schema ?? null, table: change.table ?? null, commitLsn
     });
   }
   if (change.tag === 'truncate') {
-    // A source TRUNCATE empties the table, but the target truncate path
-    // requires a bound truncate approval which CDC cannot mint. Refusing
-    // closed with an operator-actionable code beats silent divergence.
     fail('CDC_TRUNCATE_REQUIRES_OPERATOR', 'Source TRUNCATE requires an explicit operator decision; CDC apply refuses to truncate without a bound approval', {
       schema: change.schema, table: change.table, commitLsn
     });
   }
   if (change.tag === 'delete') {
-    const mapped = mapDeleteKey({ change, accumulator, compiledKeyMapping, primaryKey, commitLsn });
-    return Object.freeze({ op: 'delete', key: mapped.key, expectedRowHash: mapped.expectedRowHash, precondition: mapped.precondition });
+    const mapped = mapDeleteKey({
+      change,
+      accumulator: oldImageAccumulator ?? accumulator,
+      compiledKeyMapping,
+      primaryKey,
+      commitLsn
+    });
+    return Object.freeze([deleteMutation(mapped)]);
   }
+
   const sourceRow = change.row ?? change.new;
   if (!sourceRow || typeof sourceRow !== 'object') {
     fail('CDC_ROW_UNMAPPABLE', `CDC ${change.tag} event carries no mappable row`, { commitLsn });
@@ -961,7 +1006,26 @@ function mapOneCdcEvent({ change, accumulator, compiledKeyMapping, primaryKey, s
       code: transformed.code ?? null, commitLsn
     });
   }
-  return Object.freeze({ op: 'upsert', row: Object.freeze({ ...transformed.row }) });
+
+  const upsert = Object.freeze({ op: 'upsert', row: Object.freeze({ ...transformed.row }) });
+  if (change.tag !== 'update' || (change.old == null && change.key == null)) {
+    return Object.freeze([upsert]);
+  }
+
+  // pgoutput supplies either O (FULL old row) or K (old replica-identity
+  // tuple when an identity column changed), never both. If an old image is
+  // present, compare keys after the SAME migration mapping used by the target.
+  const oldMapped = mapDeleteKey({
+    change,
+    accumulator: oldImageAccumulator ?? accumulator,
+    compiledKeyMapping,
+    primaryKey,
+    commitLsn
+  });
+  const newKey = Object.freeze({ ...pickKey(transformed.row, primaryKey) });
+  if (samePrimaryKey(oldMapped.key, newKey)) return Object.freeze([upsert]);
+
+  return Object.freeze([deleteMutation(oldMapped), upsert]);
 }
 
 // Map a delete to its target key. With a full old row (REPLICA IDENTITY
