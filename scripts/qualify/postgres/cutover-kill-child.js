@@ -13,7 +13,7 @@
 // before the boundary hook.
 
 import { readFile } from 'node:fs/promises';
-import { SpoolCommandService } from '../../src/daemon/command-service.js';
+import { SpoolCommandService } from '../../../src/daemon/command-service.js';
 
 function configPath() {
   const index = process.argv.indexOf('--config');
