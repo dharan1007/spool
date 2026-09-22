@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { fail } from '../../core/errors.js';
 
 const TLS_MODES = new Set(['disable', 'require', 'verify-full']);
+export const MAX_POSTGRES_POOL_IDENTITIES = 64;
 
 function requireText(value, label) {
   if (typeof value !== 'string' || !value.trim()) fail('INVALID_POSTGRES_CONFIG', `${label} must be a non-empty string`);
@@ -71,7 +72,29 @@ export function postgresConnectionConfig(targetRef, password) {
 // callback's duration, so BEGIN/COMMIT, advisory locks, FOR UPDATE rows and
 // temp objects behave exactly as with a fresh client. allowExitOnIdle keeps
 // short-lived test processes from hanging on idle sockets.
+// Registry records are bounded independently from pg's per-pool idle socket
+// timeout. Without this bound, rotating credentials or tenant/endpoint churn
+// leaves an unbounded number of empty Pool objects in a long-running daemon.
 const pools = new Map();
+
+function evictablePoolRecord(record) {
+  return record
+    && record.pool.totalCount === record.pool.idleCount
+    && record.pool.waitingCount === 0;
+}
+
+export function selectPostgresPoolEvictionKey(entries) {
+  let candidate = null;
+  for (const [key, record] of entries ?? []) {
+    if (!evictablePoolRecord(record)) continue;
+    if (candidate == null
+      || record.lastUsedAt < candidate.lastUsedAt
+      || (record.lastUsedAt === candidate.lastUsedAt && key < candidate.key)) {
+      candidate = { key, lastUsedAt: record.lastUsedAt };
+    }
+  }
+  return candidate?.key ?? null;
+}
 
 function tlsPolicyIdentity(ssl) {
   if (ssl === false) return 'disable';
@@ -105,24 +128,48 @@ function poolKey(config) {
 
 function poolFor(config) {
   const key = poolKey(config);
-  let pool = pools.get(key);
-  if (!pool) {
-    pool = new Pool({ ...config, max: 20, idleTimeoutMillis: 10_000, allowExitOnIdle: true });
-    pool.on('error', () => { /* idle-client errors surface on checkout, never here */ });
-    pools.set(key, pool);
+  const now = Date.now();
+  let record = pools.get(key);
+  if (record) {
+    record.lastUsedAt = now;
+    return record.pool;
   }
+
+  if (pools.size >= MAX_POSTGRES_POOL_IDENTITIES) {
+    const evictKey = selectPostgresPoolEvictionKey(pools.entries());
+    if (evictKey == null) {
+      fail('POSTGRES_POOL_REGISTRY_EXHAUSTED', 'PostgreSQL connection-pool identity limit reached and every pool is active', {
+        maxPoolIdentities: MAX_POSTGRES_POOL_IDENTITIES,
+        activePoolIdentities: pools.size
+      });
+    }
+    const evicted = pools.get(evictKey);
+    pools.delete(evictKey);
+    // The candidate is provably idle/no-waiters. Do not block connection
+    // acquisition on network teardown; Pool.end() closes its idle clients and
+    // the rejection is intentionally contained.
+    void evicted.pool.end().catch(() => {});
+  }
+
+  const pool = new Pool({ ...config, max: 20, idleTimeoutMillis: 10_000, allowExitOnIdle: true });
+  pool.on('error', () => { /* idle-client errors surface on checkout, never here */ });
+  record = { pool, lastUsedAt: now };
+  pools.set(key, record);
   return pool;
 }
 
 export function poolStats() {
-  return Object.freeze([...pools.entries()].map(([key, pool]) => Object.freeze({
+  return Object.freeze([...pools.entries()].map(([key, record]) => Object.freeze({
     key: `sha256:${key}`,
-    totalCount: pool.totalCount, idleCount: pool.idleCount, waitingCount: pool.waitingCount
+    totalCount: record.pool.totalCount,
+    idleCount: record.pool.idleCount,
+    waitingCount: record.pool.waitingCount,
+    lastUsedAt: record.lastUsedAt
   })));
 }
 
 export async function closePostgresPools() {
-  const open = [...pools.values()];
+  const open = [...pools.values()].map(record => record.pool);
   pools.clear();
   await Promise.all(open.map(pool => pool.end().catch(() => {})));
 }
