@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { Client } from 'pg';
 import { SpoolCommandService } from '../../src/daemon/command-service.js';
 import { CredentialBroker } from '../../src/daemon/credential-broker.js';
+import { attestOperatorBarrier } from '../../src/cutover/write-barrier.js';
 
 // Cutover crash matrix: kill (service close = process-equivalent death; no
 // in-memory state survives) at every recovery window, resume with a FRESH
@@ -87,6 +88,22 @@ async function reset() {
   } finally { await client.end(); }
 }
 
+async function operatorBarrier(migrationId) {
+  const client = await adminClient();
+  try {
+    const lsn = await client.query('SELECT pg_catalog.pg_current_wal_flush_lsn()::text AS lsn');
+    return attestOperatorBarrier({
+      migrationId,
+      principal: 'operator:cutover-crash-matrix',
+      statement: 'Crash-matrix fixture has no active source writers during the cutover attempt.',
+      finalLsn: String(lsn.rows[0].lsn).toUpperCase(),
+      routingDecision: 'fixture keeps source writes disabled through cutover completion'
+    });
+  } finally {
+    await client.end();
+  }
+}
+
 async function tableRows(table) {
   const client = await adminClient();
   try {
@@ -153,7 +170,7 @@ test('crash after arm resumes with the same attempt identity and commits once', 
       const resumed = second.cutover(migrationId);
       assert.equal(resumed.cutoverAttemptId, attemptId);
       assert.equal(resumed.status, 'ARMED');
-      const committed = await second.commitCutover(request);
+      const committed = await second.commitCutover(request, { sourceBarrier: await operatorBarrier(migrationId) });
       assert.equal(committed.status, 'COMMITTED');
       assert.equal(committed.cutoverAttemptId, attemptId);
       // Idempotent replay: committing again returns the same decision.
@@ -184,7 +201,7 @@ test('aborted attempt requires rearm with a fresh attempt identity', { skip: !en
       const rearmed = await second.rearmCutover(request, { receipt, reason: 'resume after abort' });
       assert.equal(rearmed.status, 'ARMED');
       assert.notEqual(rearmed.cutoverAttemptId, attemptId);
-      const committed = await second.commitCutover(request);
+      const committed = await second.commitCutover(request, { sourceBarrier: await operatorBarrier(migrationId) });
       assert.equal(committed.status, 'COMMITTED');
       assert.equal(committed.cutoverAttemptId, rearmed.cutoverAttemptId);
       assert.deepEqual(await tableRows(TARGET_TABLE), await tableRows(SOURCE_TABLE));
