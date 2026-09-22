@@ -410,6 +410,82 @@ export async function acquirePostgresTableShareLockBarrier({
   }
 }
 
+// Strong PostgreSQL TARGET write barrier.
+//
+// This deliberately wraps the proven table-scoped SHARE-lock primitive rather
+// than inventing a second locking protocol. It is acquired only after the
+// final CDC drain (so SPOOL itself no longer needs target DML) and is retained
+// across FINAL_PRE_CUTOVER verification -> CUTOVER_COMMITTED ->
+// POST_CUTOVER verification -> COMPLETED. PostgreSQL ordinary DML acquires
+// ROW EXCLUSIVE, which conflicts with SHARE, closing the target-side TOCTOU
+// window between proof and irreversible decision.
+//
+// The wrapped primitive obtains an otherwise-unused WAL position as part of
+// its generic proof. Target safety is based on the held table lock and the
+// independent ROW EXCLUSIVE rejection probe, not that WAL value.
+export async function acquirePostgresTargetTableShareLockBarrier({
+  migrationId,
+  targetRef,
+  credentialBroker,
+  lockTimeoutMs = 60_000,
+  probeTimeoutMs = 500
+} = {}) {
+  if (!targetRef || typeof targetRef !== 'object' || Array.isArray(targetRef)) {
+    fail('INVALID_BARRIER_REQUEST', 'targetRef is required');
+  }
+  if (targetRef.connector !== 'postgres') {
+    fail('INVALID_BARRIER_REQUEST', 'POSTGRES_TARGET_TABLE_SHARE_LOCK requires a PostgreSQL targetRef');
+  }
+
+  const inner = await acquirePostgresTableShareLockBarrier({
+    migrationId,
+    sourceRef: targetRef,
+    credentialBroker,
+    lockTimeoutMs,
+    probeTimeoutMs
+  });
+
+  const proof = Object.freeze({
+    ...inner.proof,
+    role: 'target',
+    purpose: 'freeze-target-dml-between-verification-and-cutover-decision'
+  });
+  const barrierId = barrierIdentity({
+    migrationId,
+    kind: 'POSTGRES_TARGET_TABLE_SHARE_LOCK',
+    acquiredAt: inner.acquiredAt,
+    finalLsn: inner.finalLsn,
+    attestation: proof
+  });
+
+  return Object.freeze({
+    barrierId,
+    kind: 'POSTGRES_TARGET_TABLE_SHARE_LOCK',
+    migrationId,
+    acquiredAt: inner.acquiredAt,
+    proof,
+    zeroDowntime: false,
+    async verifyHeld() {
+      const held = await inner.verifyHeld();
+      return Object.freeze({
+        barrierId,
+        held: held.held === true,
+        backendPid: held.backendPid,
+        verifiedAt: held.verifiedAt
+      });
+    },
+    async release() {
+      const result = await inner.release();
+      return Object.freeze({
+        barrierId,
+        released: result.released === true,
+        repeated: result.repeated === true,
+        releasedAt: result.releasedAt ?? null
+      });
+    }
+  });
+}
+
 // Kept only as an explicit fail-closed compatibility trap. Older callers must
 // not silently retain the unsafe semantics.
 export async function acquireDatabaseReadOnlyBarrier() {
