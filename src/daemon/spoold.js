@@ -72,7 +72,7 @@ async function dispatch(service, body) {
     case 'repair-receipt': return service.repairReceipt(body.migrationId);
     case 'begin-cutover': return service.beginCutover(body.request, body.options ?? {});
     case 'rearm-cutover': return service.rearmCutover(body.request, body.options ?? {});
-    case 'commit-cutover': return service.commitCutover(body.request);
+    case 'commit-cutover': return service.commitCutover(body.request, body.options ?? {});
     case 'abort-cutover': return service.abortCutover(body.migrationId, body.options ?? {});
     case 'cutover': return service.cutover(body.migrationId);
     case 'begin-recovery': return service.beginRecovery(body.request, body.options ?? {});
