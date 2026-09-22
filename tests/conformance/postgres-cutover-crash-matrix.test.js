@@ -106,6 +106,40 @@ async function tableRows(table) {
   } finally { await client.end(); }
 }
 
+async function overwriteTargetRow(id, name) {
+  const client = await adminClient();
+  try {
+    const changed = await client.query(
+      `UPDATE public."${TARGET_TABLE}" SET name = $2 WHERE id = $1 RETURNING id,name`,
+      [id, name]
+    );
+    assert.equal(changed.rowCount, 1, `expected target row ${id} to exist`);
+  } finally { await client.end(); }
+}
+
+async function commitAfterKilledLeaseExpectingFailure(service, request, expectedCode, { timeoutMs = 10_000 } = {}) {
+  const started = Date.now();
+  let leaseHeldRefusals = 0;
+  let lastError = null;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const barrier = await operatorBarrier(service, request);
+      await service.commitCutover(request, { sourceBarrier: barrier });
+      assert.fail(`expected cutover recovery to fail with ${expectedCode}`);
+    } catch (error) {
+      lastError = error;
+      if (error?.code === 'LEASE_HELD') {
+        leaseHeldRefusals += 1;
+        await new Promise(resolve => setTimeout(resolve, 50));
+        continue;
+      }
+      assert.equal(error?.code, expectedCode, error?.stack ?? error?.message ?? String(error));
+      return { error, leaseHeldRefusals, waitMs: Date.now() - started };
+    }
+  }
+  throw lastError ?? new Error(`timed out waiting for recovery failure ${expectedCode}`);
+}
+
 async function fixtureDir() {
   const dir = await mkdtemp(join(tmpdir(), 'spool-pg-cutover-crash-'));
   const sourceRoot = join(dir, 'source-root');
@@ -468,5 +502,109 @@ test('real SIGKILL at every durable cutover boundary recovers from disk-only sta
       try { recovered?.close(); } catch {}
       await removeDirTree(f.dir);
     }
+  }
+});
+
+
+test('SIGKILL after final verification does not let stale pre-crash proof authorize cutover after target tampering', { skip: !enabled || process.platform === 'win32', timeout: 300_000 }, async () => {
+  await reset();
+  const f = await fixtureDir();
+  const migrationId = 'pg_cutover_sigkill_stale_final_proof';
+  let preparer = null;
+  let recovered = null;
+  try {
+    preparer = await SpoolCommandService.create(serviceOptions(f));
+    const { request, attemptId } = await loadAndArm(preparer, migrationId);
+    preparer.close();
+    preparer = null;
+
+    await spawnAndKillAtBoundary({
+      f,
+      request,
+      point: 'CUTOVER_AFTER_FINAL_VERIFY_BEFORE_COMMIT'
+    });
+
+    // External SQL is intentionally outside SPOOL fencing. If the process
+    // restarts and merely reuses the persisted FINAL_PRE_CUTOVER proof, this
+    // mutation would slip across the irreversible cutover decision.
+    await overwriteTargetRow(1, 'tampered-while-spool-dead');
+
+    recovered = await reopenAfterKill(f);
+    assert.equal(recovered.runs.getMigrationState(migrationId).currentState, 'FINAL_VERIFY');
+    assert.equal(recovered.cutover(migrationId).status, 'ARMED');
+    assert.equal(recovered.cutover(migrationId).cutoverAttemptId, attemptId);
+
+    const refused = await commitAfterKilledLeaseExpectingFailure(
+      recovered,
+      request,
+      'VERIFICATION_REQUIRED'
+    );
+    assert.ok(refused.leaseHeldRefusals >= 1, 'recovery must first respect the killed owner lease');
+    assert.equal(recovered.runs.getMigrationState(migrationId).currentState, 'FINAL_VERIFY');
+    assert.equal(recovered.cutover(migrationId).status, 'ARMED');
+
+    // Once an operator repairs the target, a NEW live observation may
+    // authorize the same durable cutover attempt.
+    await overwriteTargetRow(1, 'source-1');
+    const committed = await recovered.commitCutover(request, {
+      sourceBarrier: await operatorBarrier(recovered, request)
+    });
+    assert.equal(committed.status, 'COMMITTED');
+    assert.equal(committed.cutoverAttemptId, attemptId);
+    assert.equal(recovered.runs.getMigrationState(migrationId).currentState, 'COMPLETED');
+    assert.deepEqual(await tableRows(TARGET_TABLE), await tableRows(SOURCE_TABLE));
+  } finally {
+    try { preparer?.close(); } catch {}
+    try { recovered?.close(); } catch {}
+    await removeDirTree(f.dir);
+  }
+});
+
+test('SIGKILL after post-cutover verification does not let stale pre-crash proof authorize completion after target tampering', { skip: !enabled || process.platform === 'win32', timeout: 300_000 }, async () => {
+  await reset();
+  const f = await fixtureDir();
+  const migrationId = 'pg_cutover_sigkill_stale_post_proof';
+  let preparer = null;
+  let recovered = null;
+  try {
+    preparer = await SpoolCommandService.create(serviceOptions(f));
+    const { request, attemptId } = await loadAndArm(preparer, migrationId);
+    preparer.close();
+    preparer = null;
+
+    await spawnAndKillAtBoundary({
+      f,
+      request,
+      point: 'CUTOVER_AFTER_POST_VERIFY_BEFORE_COMPLETE'
+    });
+
+    await overwriteTargetRow(1, 'tampered-after-post-proof');
+
+    recovered = await reopenAfterKill(f);
+    assert.equal(recovered.runs.getMigrationState(migrationId).currentState, 'POST_CUTOVER_VERIFY');
+    assert.equal(recovered.cutover(migrationId).status, 'COMMITTED');
+    assert.equal(recovered.cutover(migrationId).cutoverAttemptId, attemptId);
+
+    const refused = await commitAfterKilledLeaseExpectingFailure(
+      recovered,
+      request,
+      'VERIFICATION_REQUIRED'
+    );
+    assert.ok(refused.leaseHeldRefusals >= 1, 'recovery must first respect the killed owner lease');
+    assert.equal(recovered.runs.getMigrationState(migrationId).currentState, 'POST_CUTOVER_VERIFY');
+    assert.equal(recovered.cutover(migrationId).status, 'COMMITTED');
+
+    await overwriteTargetRow(1, 'source-1');
+    const completed = await recovered.commitCutover(request, {
+      sourceBarrier: await operatorBarrier(recovered, request)
+    });
+    assert.equal(completed.status, 'COMMITTED');
+    assert.equal(completed.cutoverAttemptId, attemptId);
+    assert.equal(recovered.runs.getMigrationState(migrationId).currentState, 'COMPLETED');
+    assert.deepEqual(await tableRows(TARGET_TABLE), await tableRows(SOURCE_TABLE));
+  } finally {
+    try { preparer?.close(); } catch {}
+    try { recovered?.close(); } catch {}
+    await removeDirTree(f.dir);
   }
 });
