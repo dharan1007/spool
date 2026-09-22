@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 import { SpoolCommandService } from '../../src/daemon/command-service.js';
 import { CredentialBroker } from '../../src/daemon/credential-broker.js';
@@ -30,6 +32,7 @@ const broker = new CredentialBroker();
 
 const SOURCE_TABLE = 'spool_cutover_crash_src';
 const TARGET_TABLE = 'spool_cutover_crash_dst';
+const CUTOVER_KILL_CHILD = fileURLToPath(new URL('../../scripts/qualify/postgres/cutover-kill-child.js', import.meta.url));
 
 async function adminClient() {
   const url = new URL(endpoint);
@@ -147,6 +150,87 @@ function oneShotFault(point) {
       return false;
     }
   };
+}
+
+async function spawnAndKillAtBoundary({ f, request, point, timeoutMs = 60_000 }) {
+  const configPath = join(f.dir, `cutover-kill-${point}.json`);
+  await writeFile(configPath, JSON.stringify({
+    sourceRoot: f.sourceRoot,
+    targetRoot: f.targetRoot,
+    snapshotDir: f.snapshotDir,
+    statePath: f.statePath,
+    approvalSigningKey: '0123456789abcdef0123456789abcdef',
+    release: { version: '1.2.0-test', commitSha: '2123456789abcdef0123456789abcdef01234567' },
+    request,
+    faultPoint: point
+  }), 'utf8');
+
+  const child = spawn(process.execPath, [CUTOVER_KILL_CHILD, '--config', configPath], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: process.env
+  });
+
+  let stdout = '';
+  let stderr = '';
+  let boundaryReached = false;
+  let exited = false;
+  let exitInfo = null;
+
+  child.stdout.on('data', chunk => {
+    stdout += chunk.toString();
+    if (stdout.includes(`CUTOVER_BOUNDARY_REACHED ${point}`)) boundaryReached = true;
+  });
+  child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  const exitedPromise = new Promise(resolve => {
+    child.once('exit', (code, signal) => {
+      exited = true;
+      exitInfo = { code, signal };
+      resolve(exitInfo);
+    });
+    child.once('error', error => {
+      exited = true;
+      exitInfo = { code: null, signal: null, error: error.message };
+      resolve(exitInfo);
+    });
+  });
+
+  const deadline = Date.now() + timeoutMs;
+  while (!boundaryReached && !exited && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+
+  if (!boundaryReached) {
+    try { child.kill('SIGKILL'); } catch {}
+    await Promise.race([exitedPromise, new Promise(resolve => setTimeout(resolve, 2_000))]);
+    assert.fail(`child did not reach ${point}; exit=${JSON.stringify(exitInfo)} stdout=${stdout.slice(-1000)} stderr=${stderr.slice(-2000)}`);
+  }
+
+  // The evidence predicate is the boundary hook itself, not a timer. Once the
+  // child reports it, kill without allowing application-level cleanup.
+  const sent = child.kill('SIGKILL');
+  assert.equal(sent, true, `failed to send SIGKILL at ${point}`);
+  const killed = await Promise.race([
+    exitedPromise,
+    new Promise(resolve => setTimeout(() => resolve({ code: null, signal: 'TIMEOUT' }), 5_000))
+  ]);
+  assert.notEqual(killed.signal, 'TIMEOUT', `child did not exit after SIGKILL at ${point}`);
+  if (process.platform !== 'win32') assert.equal(killed.signal, 'SIGKILL', point);
+  return { ...killed, stdout, stderr };
+}
+
+async function reopenAfterKill(f) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      return await SpoolCommandService.create(serviceOptions(f));
+    } catch (error) {
+      lastError = error;
+      const retryable = ['SQLITE_BUSY', 'SQLITE_LOCKED', 'EBUSY', 'EPERM'].includes(String(error?.code ?? ''));
+      if (!retryable) throw error;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  throw lastError ?? new Error('failed to reopen service after process death');
 }
 
 async function loadAndArm(service, migrationId) {
@@ -285,6 +369,73 @@ test('crash matrix resumes deterministically from every durable cutover boundary
     } finally {
       try { first?.close(); } catch {}
       try { second?.close(); } catch {}
+      await removeDirTree(f.dir);
+    }
+  }
+});
+
+
+test('real SIGKILL at every durable cutover boundary recovers from disk-only state', { skip: !enabled || process.platform === 'win32', timeout: 900_000 }, async () => {
+  const cases = [
+    {
+      point: 'CUTOVER_AFTER_FINAL_VERIFY_BEFORE_COMMIT',
+      expectedState: 'FINAL_VERIFY',
+      expectedCutoverStatus: 'ARMED'
+    },
+    {
+      point: 'CUTOVER_AFTER_COMMIT_BEFORE_POST_VERIFY',
+      expectedState: 'CUTOVER_COMMITTED',
+      expectedCutoverStatus: 'COMMITTED'
+    },
+    {
+      point: 'CUTOVER_AFTER_POST_VERIFY_BEFORE_COMPLETE',
+      expectedState: 'POST_CUTOVER_VERIFY',
+      expectedCutoverStatus: 'COMMITTED'
+    }
+  ];
+
+  for (const entry of cases) {
+    await reset();
+    const f = await fixtureDir();
+    const migrationId = `pg_cutover_sigkill_${entry.point.toLowerCase()}`;
+    let preparer = null;
+    let recovered = null;
+    try {
+      // Prepare only through the durable ARMED state in the parent. The
+      // irreversible cutover path itself runs exclusively in the child that
+      // will be SIGKILLed.
+      preparer = await SpoolCommandService.create(serviceOptions(f));
+      const { request, attemptId } = await loadAndArm(preparer, migrationId);
+      preparer.close();
+      preparer = null;
+
+      const killed = await spawnAndKillAtBoundary({ f, request, point: entry.point });
+      assert.equal(killed.code, null, entry.point);
+
+      recovered = await reopenAfterKill(f);
+      const durable = recovered.runs.getMigrationState(migrationId);
+      assert.equal(durable.currentState, entry.expectedState, entry.point);
+      const interrupted = recovered.cutover(migrationId);
+      assert.equal(interrupted.status, entry.expectedCutoverStatus, entry.point);
+      assert.equal(interrupted.cutoverAttemptId, attemptId, entry.point);
+
+      // No source-freeze proof is trusted across process death. Mint fresh
+      // evidence for the same durable attempt, then resume idempotently.
+      const recoveryBarrier = await operatorBarrier(recovered, request);
+      const committed = await recovered.commitCutover(request, { sourceBarrier: recoveryBarrier });
+      assert.equal(committed.status, 'COMMITTED', entry.point);
+      assert.equal(committed.cutoverAttemptId, attemptId, entry.point);
+      assert.equal(recovered.runs.getMigrationState(migrationId).currentState, 'COMPLETED', entry.point);
+      assert.deepEqual(await tableRows(TARGET_TABLE), await tableRows(SOURCE_TABLE), entry.point);
+
+      // An additional replay after recovery must return the same irreversible
+      // decision, never create a second cutover attempt or duplicate effects.
+      const replay = await recovered.commitCutover(request);
+      assert.equal(replay.status, 'COMMITTED', entry.point);
+      assert.equal(replay.cutoverAttemptId, attemptId, entry.point);
+    } finally {
+      try { preparer?.close(); } catch {}
+      try { recovered?.close(); } catch {}
       await removeDirTree(f.dir);
     }
   }
