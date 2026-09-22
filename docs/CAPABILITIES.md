@@ -334,7 +334,7 @@ _Unit-proven with per-field tamper tests; not yet bound into migration completio
 - integrationTests: tests/write-barrier.test.js, tests/conformance/postgres-write-barrier-conformance.test.js, tests/conformance/postgres-cdc-lifecycle.test.js
 - faultTests: tests/conformance/postgres-write-barrier-conformance.test.js, tests/conformance/postgres-cutover-crash-matrix.test.js
 
-_`DATABASE_READ_ONLY` is disabled because it cannot fence already-connected PostgreSQL writers. `POSTGRES_TABLE_SHARE_LOCK` holds a real PostgreSQL `SHARE` lock, independently proves `ROW EXCLUSIVE` refusal, captures the final LSN while fenced, and is re-verified before the cutover decision. PostgreSQL `commitCutover` also requires an `EXTERNAL_OPERATOR_BARRIER` attestation with an explicit routing decision; no zero-downtime claim is made. EXPERIMENTAL until the current live conformance/qualification gates pass._
+_`DATABASE_READ_ONLY` is disabled because it cannot fence already-connected PostgreSQL writers. `POSTGRES_TABLE_SHARE_LOCK` holds a real PostgreSQL `SHARE` lock, independently proves `ROW EXCLUSIVE` refusal, captures the final LSN while fenced, and is re-verified before the cutover decision. PostgreSQL `commitCutover` also requires a server-minted HMAC-authenticated `EXTERNAL_OPERATOR_BARRIER` attestation bound to the exact cutover attempt, request principal, live WAL position and explicit routing decision; no zero-downtime claim is made. EXPERIMENTAL until the current live conformance/qualification gates pass._
 
 ## PLANNED (9)
 
