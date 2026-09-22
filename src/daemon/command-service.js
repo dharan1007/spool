@@ -1294,6 +1294,10 @@ export class SpoolCommandService {
     if (armed.status !== 'ARMED' && armed.status !== 'COMMITTED') fail('CUTOVER_NOT_ARMED', 'Cutover commit requires an armed cutover');
     const run = this.runs.get(request.migrationId);
     if (!run || (run.status !== 'COMPLETE' && run.status !== 'REPAIR_COMPLETE')) fail('CUTOVER_NOT_ALLOWED', 'Cutover requires a completed verified run');
+    const durableBeforePrepare = this.#durableState(request.migrationId);
+    if (durableBeforePrepare?.currentState === MIGRATION_STATES.COMPLETED) {
+      return this.runs.cutover(request.migrationId);
+    }
     // Drain evidence binds the full-load snapshot from the slot-bound binding
     // (see #applyCdcToWaterline); the prepare itself is live refs + plan, as
     // with every other post-run operation.
