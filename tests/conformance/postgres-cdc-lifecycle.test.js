@@ -7,6 +7,7 @@ import { Client } from 'pg';
 import { SpoolCommandService } from '../../src/daemon/command-service.js';
 import { describePostgresSlot } from '../../src/connectors/postgres/cdc.js';
 import { CredentialBroker } from '../../src/daemon/credential-broker.js';
+import { attestOperatorBarrier } from '../../src/cutover/write-barrier.js';
 
 const endpoint = process.env.SPOOL_TEST_POSTGRES_ENDPOINT ?? '';
 const database = process.env.SPOOL_TEST_POSTGRES_DATABASE ?? 'spooltest';
@@ -189,9 +190,18 @@ test('CDC lifecycle: boundary before approval, catch-up converges, drain commits
     // stream, fresh live-source proofs authorize commit and completion.
     const armed = await service.beginCutover(request, { receipt: result.receipt });
     assert.equal(armed.status, 'ARMED');
-    const committed = await service.commitCutover(request);
+    const sourceBarrier = attestOperatorBarrier({
+      migrationId: request.migrationId,
+      principal: 'operator:postgres-cdc-lifecycle',
+      statement: 'Test writer has stopped and no source writer will restart during cutover.',
+      finalLsn: await flushLsn(),
+      routingDecision: 'test harness keeps source writers disabled after the cutover decision'
+    });
+    const committed = await service.commitCutover(request, { sourceBarrier });
     assert.equal(committed.status, 'COMMITTED');
     assert.equal(committed.commitEvidence.fenced, true);
+    assert.equal(committed.commitEvidence.sourceWriteBarrier.kind, 'POSTGRES_TABLE_SHARE_LOCK');
+    assert.equal(committed.commitEvidence.sourceWriteBarrier.externalBarrierId, sourceBarrier.barrierId);
     assert.deepEqual(await tableRows(TARGET_TABLE), await tableRows(SOURCE_TABLE));
 
     // 8. Release drops the migration-owned slot; the record is gone.
