@@ -103,7 +103,42 @@ class PostgresTargetExecution {
 
   async renewLease() {
     this.#assertOpen();
-    this.lease = await acquirePostgresLease({ targetRef: this.targetRef, credentialBroker: this.credentialBroker, resource: this.leaseResource, owner: this.leaseOwner, ttlMs: this.leaseTtlMs });
+    const previous = this.lease;
+    const renewed = await acquirePostgresLease({
+      targetRef: this.targetRef,
+      credentialBroker: this.credentialBroker,
+      resource: this.leaseResource,
+      owner: this.leaseOwner,
+      ttlMs: this.leaseTtlMs
+    });
+
+    // One execution is one fencing lineage. If this owner lost the lease and
+    // another owner acquired the resource, PostgreSQL increments the fencing
+    // token. A later re-acquire by this still-live JS object MUST NOT silently
+    // adopt that newer token: work/proofs produced under the old token may
+    // have raced with the intervening owner. Force the caller to abandon this
+    // execution and rebuild/re-verify from durable state.
+    if (previous && renewed.fencingToken !== previous.fencingToken) {
+      try {
+        await releasePostgresLease({
+          targetRef: this.targetRef,
+          credentialBroker: this.credentialBroker,
+          resource: renewed.resource,
+          owner: renewed.owner,
+          fencingToken: renewed.fencingToken
+        });
+      } catch {
+        // Releasing the accidentally re-acquired lease is best-effort. The
+        // primary safety property is refusal to continue on a changed token.
+      }
+      fail('FENCING_LINEAGE_CHANGED', 'PostgreSQL execution lost lease ownership and cannot continue on a new fencing token', {
+        resource: this.leaseResource,
+        previousFencingToken: previous.fencingToken,
+        renewedFencingToken: renewed.fencingToken
+      });
+    }
+
+    this.lease = renewed;
     return this.lease;
   }
 
