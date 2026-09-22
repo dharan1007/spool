@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   parsePostgresEndpoint,
   postgresConnectionConfig,
-  postgresPoolIdentity
+  postgresPoolIdentity,
+  selectPostgresPoolEvictionKey,
+  MAX_POSTGRES_POOL_IDENTITIES
 } from '../src/connectors/postgres/connection.js';
 
 function ref(sslmode) {
@@ -54,4 +56,26 @@ test('PostgreSQL endpoint refuses embedded credentials and unknown TLS modes', (
     () => parsePostgresEndpoint('postgresql://db.example.internal/?sslmode=prefer'),
     /INVALID_POSTGRES_TLS_MODE/
   );
+});
+
+
+test('PostgreSQL pool registry eviction selects only the least-recently-used fully idle identity', () => {
+  const fake = (totalCount, idleCount, waitingCount, lastUsedAt) => ({
+    pool: { totalCount, idleCount, waitingCount },
+    lastUsedAt
+  });
+  const entries = new Map([
+    ['busy-oldest', fake(2, 1, 0, 1)],
+    ['waiting', fake(1, 1, 1, 2)],
+    ['idle-newer', fake(1, 1, 0, 20)],
+    ['idle-oldest', fake(0, 0, 0, 10)]
+  ]);
+  assert.equal(selectPostgresPoolEvictionKey(entries.entries()), 'idle-oldest');
+
+  const none = new Map([
+    ['checked-out', fake(1, 0, 0, 1)],
+    ['has-waiter', fake(1, 1, 1, 2)]
+  ]);
+  assert.equal(selectPostgresPoolEvictionKey(none.entries()), null);
+  assert.equal(MAX_POSTGRES_POOL_IDENTITIES, 64);
 });
