@@ -190,6 +190,11 @@ test('CDC lifecycle: boundary before approval, catch-up converges, drain commits
     // stream, fresh live-source proofs authorize commit and completion.
     const armed = await service.beginCutover(request, { receipt: result.receipt });
     assert.equal(armed.status, 'ARMED');
+    await assert.rejects(
+      () => service.commitCutover(request),
+      error => error?.code === 'CUTOVER_SOURCE_BARRIER_REQUIRED'
+    );
+
     const sourceBarrier = attestOperatorBarrier({
       migrationId: request.migrationId,
       principal: 'operator:postgres-cdc-lifecycle',
@@ -197,6 +202,13 @@ test('CDC lifecycle: boundary before approval, catch-up converges, drain commits
       finalLsn: await flushLsn(),
       routingDecision: 'test harness keeps source writers disabled after the cutover decision'
     });
+    await assert.rejects(
+      () => service.commitCutover(request, {
+        sourceBarrier: { ...sourceBarrier, barrierId: 'sha256:' + '0'.repeat(64) }
+      }),
+      error => error?.code === 'CUTOVER_SOURCE_BARRIER_INVALID'
+    );
+
     const committed = await service.commitCutover(request, { sourceBarrier });
     assert.equal(committed.status, 'COMMITTED');
     assert.equal(committed.commitEvidence.fenced, true);
