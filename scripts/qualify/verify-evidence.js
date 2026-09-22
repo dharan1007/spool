@@ -5,8 +5,9 @@
 //   1. sha256sums.txt pins every file's contents (except itself).
 //   2. The directory file set (minus sha256sums.txt) exactly equals the
 //      manifest's pinned set: no added, removed, or renamed files.
-//   3. Manifest schema version is supported (v3: v2 set-pinning plus
-//      requested/effective configuration for anti-downscale enforcement).
+//   3. Manifest schema version is supported (v3: set-pinning plus
+//      requested/effective anti-downscale enforcement; v4 additionally
+//      separates release integrity from immutable INDUSTRIAL-scale proof).
 //   4. failures.json is consistent with the manifest summary.
 //   5. The manifest result follows from the failures (PASS only with zero
 //      unexpected failures and a complete scenario set; releaseGrade only on
@@ -53,7 +54,9 @@ async function main() {
   } catch (e) {
     fail(`manifest.json is missing or invalid: ${e.message}`);
   }
-  if (manifest.schemaVersion !== 3) fail(`unsupported manifest schemaVersion ${manifest.schemaVersion}; expected 3`);
+  if (![3, 4].includes(manifest.schemaVersion)) {
+    fail(`unsupported manifest schemaVersion ${manifest.schemaVersion}; expected 3 or 4`);
+  }
   const pinned = Array.isArray(manifest.evidence?.files) ? [...manifest.evidence.files].sort() : null;
   if (!pinned || pinned.length !== onDisk.length || pinned.some((file, index) => file !== onDisk[index])) {
     fail(`file set mismatch: on disk [${onDisk.join(', ')}] vs manifest [${(pinned ?? []).join(', ')}]`);
@@ -107,13 +110,17 @@ async function main() {
   if (manifest.releaseGrade === true && (manifest.result !== 'PASS' || manifest.dirty === true)) {
     fail('releaseGrade=true requires result PASS on a clean tree');
   }
-  if (typeof manifest.industrialScaleGrade !== 'boolean') fail('manifest industrialScaleGrade must be boolean');
-  const expectedIndustrialScaleGrade = manifest.result === 'PASS'
-    && manifest.dirty !== true
-    && manifest.profile === 'INDUSTRIAL'
-    && manifest.requestedProfile === 'INDUSTRIAL';
-  if (manifest.industrialScaleGrade !== expectedIndustrialScaleGrade) {
-    fail(`industrialScaleGrade=${manifest.industrialScaleGrade} is inconsistent with result/profile/tree; expected ${expectedIndustrialScaleGrade}`);
+  if (manifest.schemaVersion >= 4) {
+    if (typeof manifest.industrialScaleGrade !== 'boolean') fail('v4 manifest industrialScaleGrade must be boolean');
+    const expectedIndustrialScaleGrade = manifest.result === 'PASS'
+      && manifest.dirty !== true
+      && manifest.profile === 'INDUSTRIAL'
+      && manifest.requestedProfile === 'INDUSTRIAL';
+    if (manifest.industrialScaleGrade !== expectedIndustrialScaleGrade) {
+      fail(`industrialScaleGrade=${manifest.industrialScaleGrade} is inconsistent with result/profile/tree; expected ${expectedIndustrialScaleGrade}`);
+    }
+  } else if (manifest.industrialScaleGrade != null) {
+    fail('v3 evidence must not retroactively carry industrialScaleGrade; use schemaVersion 4');
   }
 
   // 7. Requested == effective for immutable names.
@@ -175,7 +182,7 @@ async function main() {
 
   console.log(`Evidence verified: ${dir}`);
   console.log(`Run: ${manifest.qualificationRunId} Profile: ${manifest.profile} Result: ${manifest.result}`);
-  console.log(`Release integrity grade: ${manifest.releaseGrade} Industrial scale grade: ${manifest.industrialScaleGrade}`);
+  console.log(`Release integrity grade: ${manifest.releaseGrade} Industrial scale grade: ${manifest.schemaVersion >= 4 ? manifest.industrialScaleGrade : 'not-claimed-v3'}`);
   console.log(`Files: ${pinned.length} Checksums: OK Scenarios: ${requiredScenarioNames().length} Failures: ${failures.length} (unexpected: ${unexpected.length})`);
   if (manifest.dirty) console.log(`Warning: dirty worktree, releaseGrade=false`);
   process.exit(0);
