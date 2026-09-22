@@ -163,8 +163,30 @@ export function assertCdcTargetKeyReplicaSafe({ mapping, targetPrimaryKey, repli
     fail('INVALID_CDC_APPLY_CONFIG', 'CDC key safety requires source replica identity metadata');
   }
 
+  // Mapping completeness is independent of source observability: FULL can
+  // provide every old source column, but SPOOL still needs an expression for
+  // every TARGET primary-key field.
+  const keyEntries = new Map();
+  for (const targetField of targetPrimaryKey) {
+    const entry = mapping.find(item => item?.target === targetField);
+    if (!entry) {
+      fail('CDC_TARGET_KEY_MAPPING_MISSING', 'Target primary-key field has no mapping expression', { targetField });
+    }
+    keyEntries.set(targetField, entry);
+  }
+
   if (replicaIdentity.mode === 'FULL') {
-    return Object.freeze({ safe: true, mode: 'FULL', targetPrimaryKey: Object.freeze([...targetPrimaryKey]) });
+    return Object.freeze({
+      safe: true,
+      mode: 'FULL',
+      targetPrimaryKey: Object.freeze([...targetPrimaryKey]),
+      dependencies: Object.freeze(Object.fromEntries(
+        [...keyEntries.entries()].map(([targetField, entry]) => [
+          targetField,
+          Object.freeze([...expressionSourceFields(entry.expr)])
+        ])
+      ))
+    });
   }
   if (replicaIdentity.mode === 'NOTHING') {
     fail('CDC_REPLICA_IDENTITY_UNUSABLE', 'Source table uses REPLICA IDENTITY NOTHING; UPDATE/DELETE CDC cannot be applied safely', {
@@ -188,10 +210,7 @@ export function assertCdcTargetKeyReplicaSafe({ mapping, targetPrimaryKey, repli
   const dependencies = {};
   const unsafe = [];
   for (const targetField of targetPrimaryKey) {
-    const entry = mapping.find(item => item?.target === targetField);
-    if (!entry) {
-      fail('CDC_TARGET_KEY_MAPPING_MISSING', 'Target primary-key field has no mapping expression', { targetField });
-    }
+    const entry = keyEntries.get(targetField);
     const fields = expressionSourceFields(entry.expr);
     dependencies[targetField] = fields;
     for (const sourceField of fields) {
