@@ -33,6 +33,7 @@ const broker = new CredentialBroker();
 const SOURCE_TABLE = 'spool_cutover_crash_src';
 const TARGET_TABLE = 'spool_cutover_crash_dst';
 const CUTOVER_KILL_CHILD = fileURLToPath(new URL('../../scripts/qualify/postgres/cutover-kill-child.js', import.meta.url));
+const SIGKILL_TEST_LEASE_TTL_MS = 2_000;
 
 async function adminClient() {
   const url = new URL(endpoint);
@@ -135,6 +136,10 @@ function serviceOptions(f, faultInjector = null) {
     sourceRoot: f.sourceRoot, targetRoot: f.targetRoot, snapshotDir: f.snapshotDir, statePath: f.statePath,
     approvalSigningKey: '0123456789abcdef0123456789abcdef',
     release: { version: '1.2.0-test', commitSha: '2123456789abcdef0123456789abcdef01234567' },
+    // Real crash recovery must wait for a killed owner's lease to expire; the
+    // production default is five minutes. Use a short but real TTL here so the
+    // conformance test proves safe expiry/takeover without deleting lease rows.
+    postgresLeaseTtlMs: SIGKILL_TEST_LEASE_TTL_MS,
     faultInjector
   };
 }
@@ -161,6 +166,7 @@ async function spawnAndKillAtBoundary({ f, request, point, timeoutMs = 60_000 })
     statePath: f.statePath,
     approvalSigningKey: '0123456789abcdef0123456789abcdef',
     release: { version: '1.2.0-test', commitSha: '2123456789abcdef0123456789abcdef01234567' },
+    postgresLeaseTtlMs: SIGKILL_TEST_LEASE_TTL_MS,
     request,
     faultPoint: point
   }), 'utf8');
@@ -232,6 +238,25 @@ async function reopenAfterKill(f) {
   }
   throw lastError ?? new Error('failed to reopen service after process death');
 }
+async function resumeAfterKilledLeaseExpires(service, request, { timeoutMs = 10_000 } = {}) {
+  const started = Date.now();
+  let leaseHeldRefusals = 0;
+  let lastError = null;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const barrier = await operatorBarrier(service, request);
+      const committed = await service.commitCutover(request, { sourceBarrier: barrier });
+      return { committed, leaseHeldRefusals, waitMs: Date.now() - started };
+    } catch (error) {
+      lastError = error;
+      if (error?.code !== 'LEASE_HELD') throw error;
+      leaseHeldRefusals += 1;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+  throw lastError ?? new Error('cutover recovery lease did not become available');
+}
+
 
 async function loadAndArm(service, migrationId) {
   const request = migrationRequest(migrationId);
@@ -421,8 +446,13 @@ test('real SIGKILL at every durable cutover boundary recovers from disk-only sta
 
       // No source-freeze proof is trusted across process death. Mint fresh
       // evidence for the same durable attempt, then resume idempotently.
-      const recoveryBarrier = await operatorBarrier(recovered, request);
-      const committed = await recovered.commitCutover(request, { sourceBarrier: recoveryBarrier });
+      const takeover = await resumeAfterKilledLeaseExpires(recovered, request);
+      // A SIGKILL must not bypass the old owner's still-live fence. At least
+      // one safe refusal proves recovery waited for legitimate expiry rather
+      // than deleting or stealing the active lease.
+      assert.ok(takeover.leaseHeldRefusals >= 1, `expected active lease refusal after SIGKILL at ${entry.point}`);
+      assert.ok(takeover.waitMs >= 0 && takeover.waitMs <= 10_000, entry.point);
+      const committed = takeover.committed;
       assert.equal(committed.status, 'COMMITTED', entry.point);
       assert.equal(committed.cutoverAttemptId, attemptId, entry.point);
       assert.equal(recovered.runs.getMigrationState(migrationId).currentState, 'COMPLETED', entry.point);
