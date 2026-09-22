@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { sha256Canonical, canonicalJson } from '../platform/canonical-json.js';
 import { fail } from '../core/errors.js';
 import { MigrationEngine } from '../core/migration.js';
@@ -74,22 +75,23 @@ function requiredLevels(plan) {
   return Object.freeze(levels);
 }
 
-// Semantic identity of a verification: hash over the semantic evidence ONLY.
-// Wall-clock timestamps (startedAt/completedAt) are metadata and are excluded
-// so that the same semantic evidence always yields the same identity — this is
-// what makes idempotent retry recognition and tamper detection possible:
-// same evidence -> same ID; any semantic change -> different ID.
+// Semantic identity of a verification: hash over the evidence semantics.
+// Wall-clock timestamps remain metadata. Schema-v2 cutover proofs additionally
+// bind an observationId: for an irreversible decision, "the same data was
+// observed again later" is a distinct authorization event and must therefore
+// have a distinct immutable identity. Historical schema-v1 evidence without
+// observationId retains its original deterministic identity.
 export function verificationSemanticId(record) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) fail('INVALID_VERIFICATION', 'Verification record is required');
   const {
     schemaVersion, migrationId, mode, planId, mappingRevision,
-    sourceStateId, targetContractId, cutoverAttemptId,
+    sourceStateId, targetContractId, cutoverAttemptId, observationId,
     sourceBoundary, targetBoundary, cdc,
     counts, contentRoot, levels, invariants, release
   } = record;
   const semantic = {
     schemaVersion, migrationId, mode, planId, mappingRevision,
-    sourceStateId, targetContractId, cutoverAttemptId,
+    sourceStateId, targetContractId, cutoverAttemptId, observationId,
     sourceBoundary, targetBoundary, cdc,
     counts, contentRoot, levels, invariants, release
   };
@@ -125,6 +127,11 @@ export function assertVerificationIdentity(record) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) fail('INVALID_VERIFICATION', 'Verification record is required');
   if (typeof record.verificationId !== 'string' || !HASH_ID.test(record.verificationId)) {
     fail('VERIFICATION_ID_MISMATCH', 'Persisted verification has no valid verificationId');
+  }
+  if (record.schemaVersion >= 2
+    && [VERIFICATION_MODE.FINAL_PRE_CUTOVER, VERIFICATION_MODE.POST_CUTOVER].includes(record.mode)
+    && (typeof record.observationId !== 'string' || !HASH_ID.test(record.observationId))) {
+    fail('VERIFICATION_ID_MISMATCH', 'Schema-v2 cutover verification requires a valid observationId');
   }
   const {
     verificationId, fenceToken, startedAt, completedAt, contentProof, status,
@@ -176,6 +183,19 @@ export class VerificationCoordinator {
 
     const levels = requiredLevels(plan);
     const startedAt = new Date().toISOString();
+    // Freshness is authorization-significant only for irreversible cutover
+    // proofs. A cryptographic observation identity lets a recovery re-run
+    // persist separately even when counts/content are byte-for-byte equal to
+    // the pre-crash proof.
+    const cutoverObservationId = [VERIFICATION_MODE.FINAL_PRE_CUTOVER, VERIFICATION_MODE.POST_CUTOVER].includes(mode)
+      ? sha256Canonical('spool-verification-observation-v1', {
+          migrationId,
+          mode,
+          cutoverAttemptId,
+          startedAt,
+          nonce: randomUUID()
+        })
+      : null;
     const completedLevels = [];
     const invariants = [];
 
@@ -382,7 +402,7 @@ export class VerificationCoordinator {
       }
       const completedAt = new Date().toISOString();
       const semanticRecord = {
-        schemaVersion: 1,
+        schemaVersion: cutoverObservationId ? 2 : 1,
         migrationId,
         mode,
         planId: plan.planId,
@@ -390,6 +410,7 @@ export class VerificationCoordinator {
         sourceStateId,
         targetContractId: targetContract.targetContractId,
         cutoverAttemptId,
+        ...(cutoverObservationId ? { observationId: cutoverObservationId } : {}),
         sourceBoundary: Object.freeze({ snapshotId: sourceStateId }),
         targetBoundary: Object.freeze({ contractId: targetContract.targetContractId }),
         cdc: snapshotCdcBoundary ? Object.freeze({
@@ -408,11 +429,11 @@ export class VerificationCoordinator {
       return Object.freeze({
         ...semanticRecord,
         verificationId,
-        // Execution metadata below is NOT part of the semantic identity: the
-        // fence token and wall-clock timestamps describe when/how this evidence
-        // was produced, not what it proves. Retrying the same semantic
-        // verification therefore yields the same verificationId, which is what
-        // makes idempotent retry recognition and tamper detection possible.
+        // The fence token and wall-clock timestamps remain execution metadata.
+        // Cutover freshness itself is bound separately by observationId in
+        // schema v2, so two successful observations of unchanged data are
+        // independently immutable/auditable without making clock text part of
+        // the cryptographic semantic record.
         fenceToken,
         startedAt,
         completedAt,
