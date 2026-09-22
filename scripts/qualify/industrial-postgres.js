@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { randomUUID } from 'node:crypto';
-import { resolveProfile, formatProfile } from './profiles.js';
+import { resolveProfile, formatProfile, qualifiesIndustrialScale } from './profiles.js';
 import { captureEnvironment } from './environment.js';
 import { EvidenceWriter } from './evidence-writer.js';
 import { ResourceSampler } from './sampler.js';
@@ -337,11 +337,12 @@ async function main() {
     // CI/SMALL/MEDIUM/LARGE can produce release-grade evidence, but only the
     // immutable 1B-row / 24h INDUSTRIAL profile may claim industrial scale.
     releaseGrade: overallResult === 'PASS' && releaseGrade,
-    industrialScaleGrade: overallResult === 'PASS'
-      && releaseGrade
-      && profile.name === 'INDUSTRIAL'
-      && profile.customized === false
-      && config.requestedProfile === 'INDUSTRIAL',
+    industrialScaleGrade: qualifiesIndustrialScale({
+      result: overallResult,
+      dirty: gitDirty,
+      profile: profile.name,
+      requestedProfile: config.requestedProfile
+    }),
     evidence: {
       files: evidenceFiles
     },
