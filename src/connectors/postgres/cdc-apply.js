@@ -179,13 +179,18 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
     async feed(change) {
       if (!change || typeof change !== 'object') fail('CDC_PROTOCOL_VIOLATION', 'CDC change must be an object');
       if (change.tag === 'begin') {
-        if (current) fail('CDC_PROTOCOL_VIOLATION', 'Nested BEGIN inside an open CDC transaction', { xid: current.xid });
+        if (current) fail('CDC_PROTOCOL_VIOLATION', 'Nested BEGIN inside an open CDC transaction', {
+          openXid: current.xid, openBeginLsn: current.beginLsn, openBufferedEvents: current.events.length + stagedCount,
+          incomingXid: change.xid ?? null, incomingLsn: change.lsn ?? null, lastCommitLsn
+        });
         current = { xid: change.xid ?? 0, beginLsn: change.lsn, events: [], bytes: 0, spilled: false, spillBytes: 0 };
         stagedCount = 0;
         return null;
       }
       if (change.tag === 'commit') {
-        if (!current) fail('CDC_PROTOCOL_VIOLATION', 'COMMIT without an open CDC transaction');
+        if (!current) fail('CDC_PROTOCOL_VIOLATION', 'COMMIT without an open CDC transaction', {
+          incomingLsn: change.lsn ?? null, lastCommitLsn
+        });
         if (lastCommitLsn && comparePostgresLsn(change.lsn, lastCommitLsn) < 0) {
           fail('CDC_ORDER_VIOLATION', 'CDC commit LSN moved backwards; transaction order is broken', {
             previous: lastCommitLsn, current: change.lsn
@@ -465,6 +470,9 @@ export function createCdcApplier({
   if (maxTransactions != null && (!Number.isSafeInteger(maxTransactions) || maxTransactions < 1)) {
     fail('INVALID_CDC_APPLY_CONFIG', 'maxTransactions must be a positive safe integer');
   }
+  if (!Number.isSafeInteger(maxQueueMessages) || maxQueueMessages < 1) {
+    fail('INVALID_CDC_APPLY_CONFIG', 'maxQueueMessages must be a positive safe integer');
+  }
 
   const assembler = createCdcTransactionAssembler({ ...assemblerOptions, stagingDir });
   // Shared server-ack state (applier scope, visible to both the per-
@@ -687,9 +695,19 @@ export function createCdcApplier({
       );
       const queue = [];
       let streamError = null;
+      let stopped = false;
+      let roomWaiters = [];
       let notify;
       let notified = new Promise(resolve => { notify = resolve; });
       const wake = () => { const n = notify; notified = new Promise(resolve => { notify = resolve; }); n(); };
+      // Release listeners parked for room. Called by the pump after every
+      // shift (queue only shrinks there) and by stopService on shutdown.
+      const wakeRoom = () => {
+        if (roomWaiters.length === 0) return;
+        const waiters = roomWaiters;
+        roomWaiters = [];
+        for (const resolve of waiters) resolve();
+      };
       // Waterline tracking across every stream position, including primary
       // keepalive heartbeats (which carry the server WAL position but no
       // change; they arrive as 'heartbeat' events, never as 'data'). A
@@ -722,21 +740,27 @@ export function createCdcApplier({
         trackPosition(lsn);
         wake();
       });
-      service.on('data', (lsn, message) => {
-        // Synchronous enqueue only: async EventEmitter listeners do NOT
-        // serialize, so all ordering is enforced by the single pump below.
-        // The queue is bounded: an overwhelmed consumer fails closed with an
-        // actionable code instead of growing memory without limit.
-        if (queue.length >= maxQueueMessages) {
-          streamError = Object.assign(new Error(`CDC inbound queue exceeded ${maxQueueMessages} buffered messages; consumer cannot keep up`), { code: 'CDC_QUEUE_OVERFLOW' });
-          wake();
-          return;
+      service.on('data', async (lsn, message) => {
+        // Backpressure, never drops: when the queue is full this listener
+        // parks until the pump drains room. With flowControl the library
+        // awaits listeners (emitAsync) and keeps the socket paused while
+        // parked, so the server stops sending instead of outrunning memory.
+        // The pump only waits when the queue is EMPTY and this gate only
+        // waits when it is FULL — mutually exclusive, so no deadlock. A
+        // dropped message (even one COMMIT) would split a transaction and
+        // surface later as a misleading Nested BEGIN, so dropping is never
+        // an option: overload slows the producer, it never loses data.
+        while (queue.length >= maxQueueMessages && !stopped) {
+          await new Promise(resolve => { roomWaiters.push(resolve); });
         }
+        if (stopped) return;
         const lsnText = typeof lsn === 'string' ? lsn : String(lsn ?? '');
         queue.push({ lsn: lsnText, message });
         wake();
       });
       const stopService = async () => {
+        stopped = true;
+        wakeRoom();
         try { await service.stop(); } catch { /* stopping wins over stop errors */ }
         try { await service.destroy(); } catch { /* shutdown must not mask results */ }
       };
@@ -810,6 +834,22 @@ export function createCdcApplier({
             continue;
           }
           const { lsn, message } = queue.shift();
+          // Draining creates room: release one parked producer, if any.
+          wakeRoom();
+          // Fail fast on a broken stream BEFORE feeding: anything queued
+          // after the failure point may sit on the far side of a gap, and
+          // feeding it would convert the true cause (transport loss) into
+          // a misleading downstream artifact (e.g. Nested BEGIN from a
+          // lost COMMIT). Unapplied work replays after reconnect and
+          // reconciles through the ledger — never loss, never duplication.
+          if (streamError) {
+            try { classifyCdcStreamError(streamError, { slotName }); } catch (classified) {
+              await stopService();
+              throw classified;
+            }
+            await stopService();
+            throw streamError;
+          }
           trackPosition(lsn);
           let change;
           try {
