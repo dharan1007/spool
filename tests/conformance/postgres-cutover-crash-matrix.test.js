@@ -127,11 +127,25 @@ async function removeDirTree(dir) {
   }
 }
 
-function serviceOptions(f) {
+function serviceOptions(f, faultInjector = null) {
   return {
     sourceRoot: f.sourceRoot, targetRoot: f.targetRoot, snapshotDir: f.snapshotDir, statePath: f.statePath,
     approvalSigningKey: '0123456789abcdef0123456789abcdef',
-    release: { version: '1.2.0-test', commitSha: '2123456789abcdef0123456789abcdef01234567' }
+    release: { version: '1.2.0-test', commitSha: '2123456789abcdef0123456789abcdef01234567' },
+    faultInjector
+  };
+}
+
+function oneShotFault(point) {
+  let fired = false;
+  return {
+    hit: async current => {
+      if (!fired && current === point) {
+        fired = true;
+        return true;
+      }
+      return false;
+    }
   };
 }
 
@@ -202,4 +216,76 @@ test('aborted attempt requires rearm with a fresh attempt identity', { skip: !en
       assert.deepEqual(await tableRows(TARGET_TABLE), await tableRows(SOURCE_TABLE));
     } finally { second.close(); }
   } finally { await removeDirTree(f.dir); }
+});
+
+
+test('crash matrix resumes deterministically from every durable cutover boundary', { skip: !enabled, timeout: 900_000 }, async () => {
+  const cases = [
+    {
+      point: 'CUTOVER_AFTER_FINAL_VERIFY_BEFORE_COMMIT',
+      code: 'FAULT_CUTOVER_AFTER_FINAL_VERIFY_BEFORE_COMMIT',
+      expectedState: 'FINAL_VERIFY',
+      expectedCutoverStatus: 'ARMED'
+    },
+    {
+      point: 'CUTOVER_AFTER_COMMIT_BEFORE_POST_VERIFY',
+      code: 'FAULT_CUTOVER_AFTER_COMMIT_BEFORE_POST_VERIFY',
+      expectedState: 'CUTOVER_COMMITTED',
+      expectedCutoverStatus: 'COMMITTED'
+    },
+    {
+      point: 'CUTOVER_AFTER_POST_VERIFY_BEFORE_COMPLETE',
+      code: 'FAULT_CUTOVER_AFTER_POST_VERIFY_BEFORE_COMPLETE',
+      expectedState: 'POST_CUTOVER_VERIFY',
+      expectedCutoverStatus: 'COMMITTED'
+    }
+  ];
+
+  for (const entry of cases) {
+    await reset();
+    const f = await fixtureDir();
+    const migrationId = `pg_cutover_boundary_${entry.point.toLowerCase()}`;
+    let first = null;
+    let second = null;
+    try {
+      first = await SpoolCommandService.create(serviceOptions(f, oneShotFault(entry.point)));
+      const { request, attemptId } = await loadAndArm(first, migrationId);
+      const sourceBarrier = await operatorBarrier(first, request);
+
+      await assert.rejects(
+        () => first.commitCutover(request, { sourceBarrier }),
+        error => error?.code === entry.code
+      );
+
+      const durable = first.runs.getMigrationState(migrationId);
+      assert.equal(durable.currentState, entry.expectedState, entry.point);
+      const interrupted = first.cutover(migrationId);
+      assert.equal(interrupted.status, entry.expectedCutoverStatus, entry.point);
+      assert.equal(interrupted.cutoverAttemptId, attemptId, entry.point);
+
+      // Process-equivalent restart: all in-memory locks, clients and service
+      // objects are discarded. The same durable state file is reopened by a
+      // clean service with no fault injector.
+      first.close();
+      first = null;
+
+      second = await SpoolCommandService.create(serviceOptions(f));
+      const resumedBefore = second.runs.getMigrationState(migrationId);
+      assert.equal(resumedBefore.currentState, entry.expectedState, entry.point);
+
+      // Recovery must mint fresh freeze evidence. This is especially
+      // important after CUTOVER_COMMITTED: retaining a stale in-memory barrier
+      // is not a recovery requirement.
+      const recoveryBarrier = await operatorBarrier(second, request);
+      const recovered = await second.commitCutover(request, { sourceBarrier: recoveryBarrier });
+      assert.equal(recovered.status, 'COMMITTED', entry.point);
+      assert.equal(recovered.cutoverAttemptId, attemptId, entry.point);
+      assert.equal(second.runs.getMigrationState(migrationId).currentState, 'COMPLETED', entry.point);
+      assert.deepEqual(await tableRows(TARGET_TABLE), await tableRows(SOURCE_TABLE), entry.point);
+    } finally {
+      try { first?.close(); } catch {}
+      try { second?.close(); } catch {}
+      await removeDirTree(f.dir);
+    }
+  }
 });
