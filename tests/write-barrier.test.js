@@ -5,6 +5,7 @@ import {
   describeBarrierKind,
   barrierIdentity,
   attestOperatorBarrier,
+  assertOperatorBarrier,
   acquireDatabaseReadOnlyBarrier
 } from '../src/cutover/write-barrier.js';
 
@@ -28,23 +29,53 @@ test('legacy DATABASE_READ_ONLY acquisition is disabled fail-closed', async () =
   );
 });
 
-test('operator attestation requires every field and never claims zero-downtime', () => {
+test('operator attestation is attempt-bound, HMAC-authenticated and never claims zero-downtime', () => {
+  const signingKey = '0123456789abcdef0123456789abcdef';
+  const cutoverAttemptId = 'sha256:' + 'a'.repeat(64);
   const barrier = attestOperatorBarrier({
     migrationId: 'mig-1',
+    cutoverAttemptId,
     principal: 'operator:oncall',
     statement: 'Application writes frozen at deploy freeze-4821; source quiesced.',
     finalLsn: '0/4A1B2C0',
     routingDecision: 'traffic stays on source until cutover commit'
-  });
+  }, { signingKey });
   assert.equal(barrier.kind, 'EXTERNAL_OPERATOR_BARRIER');
   assert.equal(barrier.zeroDowntime, false);
   assert.match(barrier.barrierId, /^sha256:[a-f0-9]{64}$/);
   assert.equal(barrier.finalLsn, '0/4A1B2C0');
   assert.equal(barrier.attestation.principal, 'operator:oncall');
-  assert.throws(() => attestOperatorBarrier({ migrationId: 'm', principal: '', statement: 'x', finalLsn: '0/1' }), /INVALID_BARRIER_ATTESTATION/);
-  assert.throws(() => attestOperatorBarrier({ migrationId: 'm', principal: 'p', statement: '   ', finalLsn: '0/1' }), /INVALID_BARRIER_ATTESTATION/);
-  assert.throws(() => attestOperatorBarrier({ migrationId: 'm', principal: 'p', statement: 'x', finalLsn: 'bogus' }), /INVALID_BARRIER_ATTESTATION/);
-  assert.throws(() => attestOperatorBarrier({ migrationId: '', principal: 'p', statement: 'x', finalLsn: '0/1' }), /INVALID_BARRIER_REQUEST/);
+  assert.equal(barrier.attestation.cutoverAttemptId, cutoverAttemptId);
+  assert.match(barrier.signature, /^hmac-sha256:[a-f0-9]{64}$/);
+  assert.equal(assertOperatorBarrier(barrier, {
+    signingKey, migrationId: 'mig-1', cutoverAttemptId, principal: 'operator:oncall'
+  }), true);
+  assert.throws(
+    () => assertOperatorBarrier(barrier, {
+      signingKey: 'fedcba9876543210fedcba9876543210',
+      migrationId: 'mig-1',
+      cutoverAttemptId,
+      principal: 'operator:oncall'
+    }),
+    error => error?.code === 'CUTOVER_SOURCE_BARRIER_SIGNATURE_INVALID'
+  );
+  assert.throws(
+    () => assertOperatorBarrier({ ...barrier, attestation: { ...barrier.attestation, routingDecision: 'tampered' } }, {
+      signingKey, migrationId: 'mig-1', cutoverAttemptId, principal: 'operator:oncall'
+    }),
+    error => error?.code === 'CUTOVER_SOURCE_BARRIER_INVALID'
+  );
+  assert.throws(
+    () => assertOperatorBarrier(barrier, {
+      signingKey, migrationId: 'mig-1', cutoverAttemptId: 'sha256:' + 'b'.repeat(64), principal: 'operator:oncall'
+    }),
+    error => error?.code === 'CUTOVER_SOURCE_BARRIER_ATTEMPT_MISMATCH'
+  );
+  assert.throws(() => attestOperatorBarrier({ migrationId: 'm', cutoverAttemptId, principal: '', statement: 'x', finalLsn: '0/1', routingDecision: 'freeze' }, { signingKey }), /INVALID_BARRIER_ATTESTATION/);
+  assert.throws(() => attestOperatorBarrier({ migrationId: 'm', cutoverAttemptId, principal: 'p', statement: '   ', finalLsn: '0/1', routingDecision: 'freeze' }, { signingKey }), /INVALID_BARRIER_ATTESTATION/);
+  assert.throws(() => attestOperatorBarrier({ migrationId: 'm', cutoverAttemptId, principal: 'p', statement: 'x', finalLsn: 'bogus', routingDecision: 'freeze' }, { signingKey }), /INVALID_BARRIER_ATTESTATION/);
+  assert.throws(() => attestOperatorBarrier({ migrationId: 'm', cutoverAttemptId, principal: 'p', statement: 'x', finalLsn: '0/1', routingDecision: '' }, { signingKey }), /INVALID_BARRIER_ATTESTATION/);
+  assert.throws(() => attestOperatorBarrier({ migrationId: '', cutoverAttemptId, principal: 'p', statement: 'x', finalLsn: '0/1', routingDecision: 'freeze' }, { signingKey }), /INVALID_BARRIER_REQUEST/);
 });
 
 test('barrier identity binds migration, kind, time, LSN and attestation', () => {
