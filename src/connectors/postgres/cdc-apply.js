@@ -1,5 +1,5 @@
-import { createWriteStream, createReadStream } from 'node:fs';
-import { mkdir, rm, readdir } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { mkdir, rm, readdir, open } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import { createInterface } from 'node:readline';
 import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
@@ -112,17 +112,32 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
     return join(stagingDir, `cdc-tx-${xid}.jsonl`);
   }
 
-  async function spillEvent(tx, change) {
+  async function ensureSpillHandle(tx) {
     await mkdir(stagingDir, { recursive: true });
-    const stream = createWriteStream(spillPath(tx.xid), { flags: 'a', encoding: 'utf8' });
-    await new Promise((resolve, reject) => {
-      stream.on('error', reject);
-      stream.write(`${canonicalJson(change)}\n`, 'utf8', error => {
-        if (error) reject(error);
-        else resolve();
-      });
-      stream.end();
-    });
+    if (!tx.spillHandle) tx.spillHandle = await open(spillPath(tx.xid), 'a');
+    return tx.spillHandle;
+  }
+
+  async function closeSpillHandle(tx, { sync = false } = {}) {
+    const handle = tx?.spillHandle ?? null;
+    if (!handle) return;
+    tx.spillHandle = null;
+    try {
+      if (sync) await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  async function spillEvent(tx, change) {
+    // Reuse one append handle for the whole source transaction. The previous
+    // implementation opened and closed the staging file for every spilled
+    // row, which preserved correctness but turned a 1M-row transaction into
+    // roughly 1M filesystem open/close cycles. Staging is replay-disposable:
+    // the durable WAL/checkpoint protocol is authoritative, so one handle per
+    // in-flight transaction is both safe and dramatically cheaper.
+    const handle = await ensureSpillHandle(tx);
+    await handle.appendFile(`${canonicalJson(change)}\n`, 'utf8');
     tx.spilled = true;
     tx.spillBytes = (tx.spillBytes ?? 0) + eventBytes(change);
   }
@@ -156,6 +171,11 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
             previous: lastCommitLsn, current: change.lsn
           });
         }
+        // Flush and close the single staging handle before exposing the
+        // finalized transaction to readers. The staging file is not the
+        // authoritative durability boundary (the source WAL is), but a
+        // complete committed transaction handle must be fully readable.
+        await closeSpillHandle(current, { sync: true });
         // The finalized value is a HANDLE, not the event array: memory holds
         // at most maxInMemoryEvents oldest events, the staging file the
         // newest. Consumers stream arrival order via iterateTransactionEvents
@@ -183,9 +203,9 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
       const size = eventBytes(change);
       current.bytes += size;
       if (current.bytes > maxInMemoryBytes || current.events.length + stagedCount >= maxInMemoryEvents) {
-        // Spill OLDEST buffered events first to keep memory bounded, newest
-        // stay in memory for locality. Simplest correct scheme: spill the
-        // incoming event and keep counting; finalize merges staged+memory.
+        // Keep the oldest bounded prefix in memory and spill every incoming
+        // event after the threshold. This preserves arrival order as
+        // memoryEvents followed by the sequential staging file.
         await spillEvent(current, change);
         stagedCount += 1;
       } else {
@@ -195,6 +215,10 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
     },
     async finish() {
       if (current) {
+        // Release the descriptor before failing closed. The partial staging
+        // file intentionally remains for crash/restart cleanup; no watermark
+        // advanced, so the source transaction will be replayed from WAL.
+        await closeSpillHandle(current, { sync: true });
         fail('CDC_TRANSACTION_INCOMPLETE', 'CDC stream ended with an uncommitted open transaction; refusing to silently drop it', {
           xid: current.xid, bufferedEvents: current.events.length + stagedCount
         });
@@ -209,6 +233,7 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
     },
     async discardStaged(xid) {
       if (!stagingDir) return;
+      if (current?.xid === xid) await closeSpillHandle(current);
       try { await rm(spillPath(xid), { force: true }); } catch {}
     },
     // Abort the in-flight transaction (forgotten on reconnect): the durable
@@ -221,7 +246,10 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
     async abortOpenTransaction() {
       if (!current) return null;
       const abandoned = { xid: current.xid, spilled: current.spilled, bufferedEvents: current.events.length + stagedCount };
-      if (current.spilled) await this.discardStaged(current.xid);
+      await closeSpillHandle(current);
+      if (current.spilled) {
+        try { await rm(spillPath(current.xid), { force: true }); } catch {}
+      }
       current = null;
       stagedCount = 0;
       return Object.freeze({ ...abandoned });
