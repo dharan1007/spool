@@ -7,7 +7,6 @@ import { Client } from 'pg';
 import { SpoolCommandService } from '../../src/daemon/command-service.js';
 import { describePostgresSlot } from '../../src/connectors/postgres/cdc.js';
 import { CredentialBroker } from '../../src/daemon/credential-broker.js';
-import { attestOperatorBarrier } from '../../src/cutover/write-barrier.js';
 
 const endpoint = process.env.SPOOL_TEST_POSTGRES_ENDPOINT ?? '';
 const database = process.env.SPOOL_TEST_POSTGRES_DATABASE ?? 'spooltest';
@@ -195,11 +194,8 @@ test('CDC lifecycle: boundary before approval, catch-up converges, drain commits
       error => error?.code === 'CUTOVER_SOURCE_BARRIER_REQUIRED'
     );
 
-    const sourceBarrier = attestOperatorBarrier({
-      migrationId: request.migrationId,
-      principal: 'operator:postgres-cdc-lifecycle',
+    const sourceBarrier = await service.attestCutoverBarrier(request, {
       statement: 'Test writer has stopped and no source writer will restart during cutover.',
-      finalLsn: await flushLsn(),
       routingDecision: 'test harness keeps source writers disabled after the cutover decision'
     });
     await assert.rejects(
