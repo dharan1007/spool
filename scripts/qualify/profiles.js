@@ -115,6 +115,16 @@ export function resolveProfile(name, overrides = {}) {
   });
 }
 
+// Industrial-scale evidence is deliberately narrower than release integrity.
+// A clean CI/SMALL/MEDIUM/LARGE run can be release-grade for that workload,
+// but only the exact immutable INDUSTRIAL workload may claim scale proof.
+export function qualifiesIndustrialScale({ result, dirty, profile, requestedProfile } = {}) {
+  return result === 'PASS'
+    && dirty === false
+    && profile === 'INDUSTRIAL'
+    && requestedProfile === 'INDUSTRIAL';
+}
+
 export function formatProfile(profile) {
   return `${profile.name} rows=${profile.rows} payload=${profile.payloadBytes}B batch=${profile.batchSize} writers=${profile.writers} workers=${profile.workers} cdc=${profile.cdcDurationSeconds}s`;
 }
