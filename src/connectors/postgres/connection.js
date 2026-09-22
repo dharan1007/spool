@@ -73,24 +73,50 @@ export function postgresConnectionConfig(targetRef, password) {
 // short-lived test processes from hanging on idle sockets.
 const pools = new Map();
 
-function poolKey(config, password) {
-  const digest = createHash('sha256').update(password, 'utf8').digest('hex').slice(0, 16);
-  return `${config.host}:${config.port}/${config.database}/${config.user}/${digest}`;
+function tlsPolicyIdentity(ssl) {
+  if (ssl === false) return 'disable';
+  if (ssl && ssl.rejectUnauthorized === true) return 'verify-full';
+  return 'require';
+}
+
+// Pool identity is part of the transport-security boundary. Two refs that
+// differ only by TLS policy MUST NOT share a pg Pool: otherwise a pool first
+// created for sslmode=disable could later satisfy a verify-full request.
+// Exported as a pure opaque identity so the invariant can be regression-tested
+// without opening a network connection or exposing raw credentials.
+export function postgresPoolIdentity(config, password = config?.password) {
+  if (!config || typeof config !== 'object') fail('INVALID_POSTGRES_CONFIG', 'PostgreSQL pool config is required');
+  if (typeof password !== 'string' || !password) fail('SECRET_NOT_FOUND', 'PostgreSQL password is required');
+  const passwordDigest = createHash('sha256').update(password, 'utf8').digest('hex');
+  const material = JSON.stringify({
+    host: config.host,
+    port: config.port,
+    database: config.database,
+    user: config.user,
+    tlsPolicy: tlsPolicyIdentity(config.ssl),
+    passwordDigest
+  });
+  return createHash('sha256').update(material, 'utf8').digest('hex');
+}
+
+function poolKey(config) {
+  return postgresPoolIdentity(config, config.password);
 }
 
 function poolFor(config) {
-  let pool = pools.get(poolKey(config, config.password));
+  const key = poolKey(config);
+  let pool = pools.get(key);
   if (!pool) {
     pool = new Pool({ ...config, max: 20, idleTimeoutMillis: 10_000, allowExitOnIdle: true });
     pool.on('error', () => { /* idle-client errors surface on checkout, never here */ });
-    pools.set(poolKey(config, config.password), pool);
+    pools.set(key, pool);
   }
   return pool;
 }
 
 export function poolStats() {
   return Object.freeze([...pools.entries()].map(([key, pool]) => Object.freeze({
-    key: key.replace(/\/[a-f0-9]{16}$/, '/<redacted>'),
+    key: `sha256:${key}`,
     totalCount: pool.totalCount, idleCount: pool.idleCount, waitingCount: pool.waitingCount
   })));
 }
