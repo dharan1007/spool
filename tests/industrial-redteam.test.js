@@ -120,3 +120,31 @@ test('CDC assembler rejects path-capable transaction ids before staging', async 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+
+test('CDC COMMITTED_EXACT must prove every upsert in each SQL piece affected one row', async () => {
+  const code = await source('src/connectors/postgres/target.js');
+  const start = code.indexOf('async commitCdcTransaction(');
+  const end = code.indexOf('async truncateTarget(', start);
+  assert.ok(start >= 0 && end > start, 'commitCdcTransaction source was not found');
+  const cdc = code.slice(start, end);
+  assert.match(
+    cdc,
+    /written\.rowCount\s*!==\s*piece\.length|inserted\s*\+\s*updated\s*!==\s*piece\.length/,
+    'COMMITTED_EXACT does not prove every row in each CDC upsert SQL piece produced an exact effect'
+  );
+  assert.doesNotMatch(
+    cdc,
+    /inserted\s*\+\s*updated\s*<\s*1/,
+    'at-least-one affected row is insufficient evidence for a multi-row COMMITTED_EXACT transaction'
+  );
+});
+
+test('target-contract proof cache must not act as a 10-second correctness bypass', async () => {
+  const code = await source('src/connectors/postgres/target.js');
+  assert.doesNotMatch(
+    code,
+    /CONTRACT_CACHE_TTL_MS\s*=\s*10_000[\s\S]{0,2500}?Date\.now\(\)\s*-\s*cached\.at\s*<\s*CONTRACT_CACHE_TTL_MS\)\s*return/,
+    'mutations may trust a stale target schema/trigger/rule contract for 10 seconds'
+  );
+});
