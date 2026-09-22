@@ -271,6 +271,11 @@ export class SpoolCommandService {
 
   #open() { if (this.closed) fail('COMMAND_SERVICE_CLOSED', 'Command service is closed'); }
 
+  async #hitFault(point, context = {}) {
+    if (!this.faultInjector || typeof this.faultInjector.hit !== 'function') return false;
+    return Boolean(await this.faultInjector.hit(point, context));
+  }
+
   #migrationSnapshotDir(migrationId) {
     return join(this.snapshotRoot, encodeURIComponent(migrationId));
   }
@@ -1449,6 +1454,16 @@ export class SpoolCommandService {
             commandId: commandIdFor('final-verify')
           });
           state = this.#durableState(request.migrationId);
+          if (await this.#hitFault('CUTOVER_AFTER_FINAL_VERIFY_BEFORE_COMMIT', {
+            migrationId: request.migrationId,
+            cutoverAttemptId: attemptId,
+            state: state.currentState
+          })) {
+            fail('FAULT_CUTOVER_AFTER_FINAL_VERIFY_BEFORE_COMMIT', 'Injected crash after durable final verification and before cutover commit', {
+              migrationId: request.migrationId,
+              cutoverAttemptId: attemptId
+            });
+          }
         }
         if (state.currentState === MIGRATION_STATES.FINAL_VERIFY) {
           const decidedAt = new Date().toISOString();
@@ -1488,6 +1503,16 @@ export class SpoolCommandService {
             commandId: commandIdFor('commit')
           });
           state = this.#durableState(request.migrationId);
+          if (await this.#hitFault('CUTOVER_AFTER_COMMIT_BEFORE_POST_VERIFY', {
+            migrationId: request.migrationId,
+            cutoverAttemptId: attemptId,
+            state: state.currentState
+          })) {
+            fail('FAULT_CUTOVER_AFTER_COMMIT_BEFORE_POST_VERIFY', 'Injected crash after durable cutover commit and before post-cutover verification', {
+              migrationId: request.migrationId,
+              cutoverAttemptId: attemptId
+            });
+          }
         }
       }
       if (state.currentState !== MIGRATION_STATES.CUTOVER_COMMITTED) {
@@ -1517,6 +1542,16 @@ export class SpoolCommandService {
             migrationId: request.migrationId, principal: request.principal, verification: post,
             commandId: commandIdFor('post-verify')
           });
+          if (await this.#hitFault('CUTOVER_AFTER_POST_VERIFY_BEFORE_COMPLETE', {
+            migrationId: request.migrationId,
+            cutoverAttemptId: attemptId,
+            state: MIGRATION_STATES.POST_CUTOVER_VERIFY
+          })) {
+            fail('FAULT_CUTOVER_AFTER_POST_VERIFY_BEFORE_COMPLETE', 'Injected crash after durable post-cutover verification and before completion', {
+              migrationId: request.migrationId,
+              cutoverAttemptId: attemptId
+            });
+          }
         }
         // No unauthorized SPOOL mutation may have occurred between the cutover
         // decision and this check: only the post-verification path transitions
