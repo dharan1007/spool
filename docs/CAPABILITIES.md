@@ -331,9 +331,10 @@ _Unit-proven with per-field tamper tests; not yet bound into migration completio
 ### `cutover.write-barrier` — Source write barriers for cutover
 
 - implementation: src/cutover/write-barrier.js
-- integrationTests: tests/write-barrier.test.js
+- integrationTests: tests/write-barrier.test.js, tests/conformance/postgres-write-barrier-conformance.test.js, tests/conformance/postgres-cdc-lifecycle.test.js
+- faultTests: tests/conformance/postgres-write-barrier-conformance.test.js, tests/conformance/postgres-cutover-crash-matrix.test.js
 
-_Module and attestation validation are unit-tested; DATABASE_READ_ONLY proof (rejected-write + final LSN) is unproven live and commitCutover binding is pending. APPLICATION_GATE/PROXY_ROUTER explicitly unsupported. EXPERIMENTAL until live proof._
+_`DATABASE_READ_ONLY` is disabled because it cannot fence already-connected PostgreSQL writers. `POSTGRES_TABLE_SHARE_LOCK` holds a real PostgreSQL `SHARE` lock, independently proves `ROW EXCLUSIVE` refusal, captures the final LSN while fenced, and is re-verified before the cutover decision. PostgreSQL `commitCutover` also requires an `EXTERNAL_OPERATOR_BARRIER` attestation with an explicit routing decision; no zero-downtime claim is made. EXPERIMENTAL until the current live conformance/qualification gates pass._
 
 ## PLANNED (9)
 
