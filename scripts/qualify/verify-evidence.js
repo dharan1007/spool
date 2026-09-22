@@ -10,7 +10,8 @@
 //   4. failures.json is consistent with the manifest summary.
 //   5. The manifest result follows from the failures (PASS only with zero
 //      unexpected failures and a complete scenario set; releaseGrade only on
-//      PASS with a clean tree).
+//      PASS with a clean tree; industrialScaleGrade only on a clean immutable
+//      INDUSTRIAL-profile PASS).
 //   6. Every required scenario reported a terminal status; no stubs recorded.
 //   7. Requested configuration equals effective configuration for immutable
 //      profile names (CI/SMALL/MEDIUM/LARGE/INDUSTRIAL): runs carrying a
@@ -102,8 +103,17 @@ async function main() {
   } else {
     fail(`unknown manifest result ${manifest.result}`);
   }
+  if (typeof manifest.releaseGrade !== 'boolean') fail('manifest releaseGrade must be boolean');
   if (manifest.releaseGrade === true && (manifest.result !== 'PASS' || manifest.dirty === true)) {
     fail('releaseGrade=true requires result PASS on a clean tree');
+  }
+  if (typeof manifest.industrialScaleGrade !== 'boolean') fail('manifest industrialScaleGrade must be boolean');
+  const expectedIndustrialScaleGrade = manifest.result === 'PASS'
+    && manifest.dirty !== true
+    && manifest.profile === 'INDUSTRIAL'
+    && manifest.requestedProfile === 'INDUSTRIAL';
+  if (manifest.industrialScaleGrade !== expectedIndustrialScaleGrade) {
+    fail(`industrialScaleGrade=${manifest.industrialScaleGrade} is inconsistent with result/profile/tree; expected ${expectedIndustrialScaleGrade}`);
   }
 
   // 7. Requested == effective for immutable names.
@@ -165,6 +175,7 @@ async function main() {
 
   console.log(`Evidence verified: ${dir}`);
   console.log(`Run: ${manifest.qualificationRunId} Profile: ${manifest.profile} Result: ${manifest.result}`);
+  console.log(`Release integrity grade: ${manifest.releaseGrade} Industrial scale grade: ${manifest.industrialScaleGrade}`);
   console.log(`Files: ${pinned.length} Checksums: OK Scenarios: ${requiredScenarioNames().length} Failures: ${failures.length} (unexpected: ${unexpected.length})`);
   if (manifest.dirty) console.log(`Warning: dirty worktree, releaseGrade=false`);
   process.exit(0);
