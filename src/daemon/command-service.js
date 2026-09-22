@@ -1524,11 +1524,22 @@ export class SpoolCommandService {
       // transition together with the evidence save.
       const commitSeq = this.#cutoverCommitSequence(request.migrationId);
       state = this.#durableState(request.migrationId);
-      if (state.currentState === MIGRATION_STATES.POST_CUTOVER_VERIFY) {
+      if ([MIGRATION_STATES.CUTOVER_COMMITTED, MIGRATION_STATES.POST_CUTOVER_VERIFY].includes(state.currentState)) {
         let post = this.runs.findVerification({
           migrationId: request.migrationId, mode: VERIFICATION_MODE.POST_CUTOVER, cutoverAttemptId: attemptId
         });
-        if (!post) {
+
+        // CUTOVER_COMMITTED is the normal entry to Phase 2. Persisting the
+        // post-cutover proof atomically advances it to POST_CUTOVER_VERIFY.
+        // A restart already in POST_CUTOVER_VERIFY reuses the immutable proof
+        // saved by that same atomic transition.
+        if (state.currentState === MIGRATION_STATES.CUTOVER_COMMITTED) {
+          if (post) {
+            fail('CUTOVER_STATE_CONFLICT', 'POST_CUTOVER verification exists while durable state is still CUTOVER_COMMITTED', {
+              migrationId: request.migrationId,
+              verificationId: post.verificationId
+            });
+          }
           if (sourceLockBarrier) await sourceLockBarrier.verifyHeld();
           post = await verifier.verify({
             ...verifyInput,
@@ -1542,17 +1553,33 @@ export class SpoolCommandService {
             migrationId: request.migrationId, principal: request.principal, verification: post,
             commandId: commandIdFor('post-verify')
           });
+          state = this.#durableState(request.migrationId);
+          if (state.currentState !== MIGRATION_STATES.POST_CUTOVER_VERIFY) {
+            fail('CUTOVER_STATE_CONFLICT', 'Atomic post-cutover verification did not advance durable state', {
+              migrationId: request.migrationId,
+              actualState: state.currentState
+            });
+          }
           if (await this.#hitFault('CUTOVER_AFTER_POST_VERIFY_BEFORE_COMPLETE', {
             migrationId: request.migrationId,
             cutoverAttemptId: attemptId,
-            state: MIGRATION_STATES.POST_CUTOVER_VERIFY
+            state: state.currentState
           })) {
             fail('FAULT_CUTOVER_AFTER_POST_VERIFY_BEFORE_COMPLETE', 'Injected crash after durable post-cutover verification and before completion', {
               migrationId: request.migrationId,
               cutoverAttemptId: attemptId
             });
           }
+        } else if (!post) {
+          // saveVerification + transition are one SQLite transaction, so this
+          // is durable-state corruption rather than a reason to silently mint
+          // replacement evidence.
+          fail('VERIFICATION_REQUIRED', 'POST_CUTOVER_VERIFY has no persisted POST_CUTOVER verification for this attempt', {
+            migrationId: request.migrationId,
+            cutoverAttemptId: attemptId
+          });
         }
+
         // No unauthorized SPOOL mutation may have occurred between the cutover
         // decision and this check: only the post-verification path transitions
         // are legal after the commit sequence.
