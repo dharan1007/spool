@@ -73,15 +73,66 @@ export async function runWorkerLoad({ profile, seed, evidenceWriter, pgConfig, r
       const plan = await service.plan(request);
       const approval = await service.approve(request, { expiresAt: new Date(Date.now() + 3600_000).toISOString(), nonce: `worker-${runId}-${idx}` });
       const r = await service.run(request, { approval });
-      // Capture state BEFORE close (close invalidates the service)
+      // Capture state BEFORE close (close invalidates the service).
       const state = service.migrationState(request.migrationId);
       const transitions = service.transitions(request.migrationId);
       service.close();
-      return { table, rows: perWorkerRows, status: r.status, state: state.currentState, transitions: transitions.length };
+
+      // Verify the real target independently from command-service state.
+      // A worker result is not accepted merely because the service returned:
+      // the table must contain exactly the declared worker partition.
+      const verifier = new Client({
+        host: pgConfig.host, port: pgConfig.port, database: pgConfig.database,
+        user: pgConfig.user, password: pgConfig.password, ssl: false
+      });
+      await verifier.connect();
+      let targetRows;
+      try {
+        const counted = await verifier.query(`SELECT count(*)::int AS n FROM public."${table}"`);
+        targetRows = Number(counted.rows[0]?.n ?? -1);
+      } finally {
+        await verifier.end();
+      }
+      return {
+        table, rows: perWorkerRows, targetRows,
+        status: r.status, state: state.currentState, transitions: transitions.length
+      };
     }));
 
     const ms = Number(process.hrtime.bigint() - start) / 1e6;
     const totalRows = results.reduce((a, b) => a + b.rows, 0);
+    for (const result of results) {
+      if (result.status !== 'COMPLETE') {
+        failures.push({
+          scenario,
+          code: 'WORKER_RUN_INCOMPLETE',
+          message: `${result.table}: command service ended with status ${result.status}`,
+          expected: false,
+          classification: 'CORRECTNESS',
+          timestamp: new Date().toISOString()
+        });
+      }
+      if (result.state !== 'READY_FOR_CUTOVER') {
+        failures.push({
+          scenario,
+          code: 'WORKER_STATE_NOT_READY',
+          message: `${result.table}: durable state is ${result.state}, expected READY_FOR_CUTOVER`,
+          expected: false,
+          classification: 'CORRECTNESS',
+          timestamp: new Date().toISOString()
+        });
+      }
+      if (result.targetRows !== result.rows) {
+        failures.push({
+          scenario,
+          code: 'WORKER_TARGET_ROW_MISMATCH',
+          message: `${result.table}: target has ${result.targetRows} rows, expected ${result.rows}`,
+          expected: false,
+          classification: 'CORRECTNESS',
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
     const metrics = {
       scenario,
       requestedConfig: { rows: profile.rows, workers: profile.workers },
@@ -92,10 +143,14 @@ export async function runWorkerLoad({ profile, seed, evidenceWriter, pgConfig, r
       durationMs: ms,
       rowsPerSec: rowsPerSecond(totalRows, ms),
       results,
-      verification: 'VERIFIED'
+      // This scenario proves parallel independent services only. It is not
+      // evidence of a shared durable scheduler, leader failover or quorum HA.
+      executionModel: 'independent-services-independent-state-independent-targets',
+      haProven: false,
+      verification: failures.length ? 'FAILED' : 'VERIFIED'
     };
     evidenceWriter.appendRaw({ scenario, event: 'worker_load_completed', ...metrics });
-    return { metrics, failures: [] };
+    return { metrics, failures };
   } finally {
     try { if (client) await client.end(); } catch {}
     try { await rm(sourceRoot, { recursive: true, force: true }); } catch {}
