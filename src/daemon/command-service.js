@@ -823,7 +823,6 @@ export class SpoolCommandService {
       }
       throw error;
     } finally {
-      if (sourceLockBarrier) await sourceLockBarrier.release().catch(() => {});
       await targetExecution.close();
     }
   }
@@ -1507,6 +1506,7 @@ export class SpoolCommandService {
       }
       return this.runs.cutover(request.migrationId);
     } finally {
+      if (sourceLockBarrier) await sourceLockBarrier.release().catch(() => {});
       await targetExecution.close();
     }
   }
