@@ -179,6 +179,7 @@ test('aborted attempt requires rearm with a fresh attempt identity', { skip: !en
     const migrationId = 'pg_cutover_crash_rearm';
     const first = await SpoolCommandService.create(serviceOptions(f));
     const { request, attemptId } = await loadAndArm(first, migrationId);
+    const staleBarrier = await operatorBarrier(first, request);
     const aborted = await first.abortCutover(migrationId, { reason: 'simulated operator abort before commit' });
     assert.equal(aborted.status, 'ABORTED');
     first.close();
@@ -191,6 +192,10 @@ test('aborted attempt requires rearm with a fresh attempt identity', { skip: !en
       const rearmed = await second.rearmCutover(request, { receipt, reason: 'resume after abort' });
       assert.equal(rearmed.status, 'ARMED');
       assert.notEqual(rearmed.cutoverAttemptId, attemptId);
+      await assert.rejects(
+        () => second.commitCutover(request, { sourceBarrier: staleBarrier }),
+        error => error?.code === 'CUTOVER_SOURCE_BARRIER_ATTEMPT_MISMATCH'
+      );
       const committed = await second.commitCutover(request, { sourceBarrier: await operatorBarrier(second, request) });
       assert.equal(committed.status, 'COMMITTED');
       assert.equal(committed.cutoverAttemptId, rearmed.cutoverAttemptId);
