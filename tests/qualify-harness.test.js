@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveProfile, PROFILE_DEFINITIONS } from '../scripts/qualify/profiles.js';
+import { resolveProfile, PROFILE_DEFINITIONS, qualifiesIndustrialScale } from '../scripts/qualify/profiles.js';
 import { generateRow, datasetId, writeDatasetCsv } from '../scripts/qualify/dataset.js';
 import { LatencyHistogram, rowsPerSecond, mibPerSecond, calculateRpo, calculateRto } from '../scripts/qualify/metrics.js';
 import { EvidenceWriter } from '../scripts/qualify/evidence-writer.js';
@@ -34,6 +34,24 @@ test('profile overrides appear in config', () => {
   const p = resolveProfile('CI', { batchSize: 1234 });
   assert.equal(p.batchSize, 1234);
   assert.equal(p.name, 'CI_CUSTOM');
+});
+
+test('industrial scale grade requires a clean immutable INDUSTRIAL PASS', () => {
+  assert.equal(qualifiesIndustrialScale({
+    result: 'PASS', dirty: false, profile: 'INDUSTRIAL', requestedProfile: 'INDUSTRIAL'
+  }), true);
+  assert.equal(qualifiesIndustrialScale({
+    result: 'PASS', dirty: false, profile: 'CI', requestedProfile: 'CI'
+  }), false);
+  assert.equal(qualifiesIndustrialScale({
+    result: 'PASS', dirty: false, profile: 'INDUSTRIAL_CUSTOM', requestedProfile: 'INDUSTRIAL'
+  }), false);
+  assert.equal(qualifiesIndustrialScale({
+    result: 'PASS', dirty: true, profile: 'INDUSTRIAL', requestedProfile: 'INDUSTRIAL'
+  }), false);
+  assert.equal(qualifiesIndustrialScale({
+    result: 'FAIL', dirty: false, profile: 'INDUSTRIAL', requestedProfile: 'INDUSTRIAL'
+  }), false);
 });
 
 test('profile consistency validation fails closed', () => {
