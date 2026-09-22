@@ -138,10 +138,24 @@ export function createCdcTransactionAssembler({ maxInMemoryBytes = 4 * 1024 * 10
     // roughly 1M filesystem open/close cycles. Staging is replay-disposable:
     // the durable WAL/checkpoint protocol is authoritative, so one handle per
     // in-flight transaction is both safe and dramatically cheaper.
-    const handle = await ensureSpillHandle(tx);
-    await handle.appendFile(`${canonicalJson(change)}\n`, 'utf8');
-    tx.spilled = true;
-    tx.spillBytes = (tx.spillBytes ?? 0) + eventBytes(change);
+    try {
+      const handle = await ensureSpillHandle(tx);
+      await handle.appendFile(`${canonicalJson(change)}\n`, 'utf8');
+      tx.spilled = true;
+      tx.spillBytes = (tx.spillBytes ?? 0) + eventBytes(change);
+    } catch (error) {
+      // Disk/quota/fd failures are terminal for this attempt. No source
+      // checkpoint has advanced, so replay from WAL remains the recovery
+      // mechanism. Surface an operator-actionable CDC code rather than a raw
+      // fs exception; preserve the OS code for diagnosis.
+      try { await closeSpillHandle(tx); } catch {}
+      fail('CDC_STAGING_IO_ERROR', 'CDC transaction staging failed; source WAL/checkpoint position was not advanced', {
+        xid: tx.xid,
+        stagingDir,
+        osCode: error?.code ?? null,
+        cause: error?.message ?? String(error)
+      });
+    }
   }
 
   // Streaming staged reader: yields spilled events one line at a time so a
@@ -598,8 +612,14 @@ export function createCdcApplier({
           if (outcome.finished) break;
         } catch (error) {
           // Slot loss and WAL loss are operator decisions, never retried:
-          // silently recreating a slot would skip source history.
-          if (error?.code === 'CDC_SLOT_LOST' || error?.code === 'CDC_WAL_UNAVAILABLE') throw error;
+          // silently recreating a slot would skip source history. Even on a
+          // terminal failure, close/remove any partial local staging state so
+          // the failed run does not leak descriptors; WAL remains authoritative
+          // because the durable applied watermark did not advance.
+          if (error?.code === 'CDC_SLOT_LOST' || error?.code === 'CDC_WAL_UNAVAILABLE') {
+            await assembler.abortOpenTransaction();
+            throw error;
+          }
           if (isRetryableCdcTransportError(error) && reconnectsLeft > 0) {
             reconnectsLeft -= 1;
             metrics.reconnects += 1;
@@ -618,6 +638,7 @@ export function createCdcApplier({
             await assembler.abortOpenTransaction();
             continue;
           }
+          await assembler.abortOpenTransaction();
           throw error;
         }
         break;
