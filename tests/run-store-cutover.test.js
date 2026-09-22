@@ -99,7 +99,18 @@ test('cutover arms, commits and aborts atomically with durable evidence across r
     });
     const committed = store.commitCutoverAtomic({
       migrationId: 'cutover-1', principal: 'alice',
-      commitEvidence: { targetContractId: hash('3'), fencingToken: 9, fenced: true, committedAt: AT },
+      commitEvidence: {
+        targetContractId: hash('3'), fencingToken: 9, fenced: true, committedAt: AT,
+        sourceWriteBarrier: {
+          barrierId: hash('b'), kind: 'POSTGRES_TABLE_SHARE_LOCK',
+          acquiredAt: AT, finalLsn: '0/4A1B2C0',
+          proof: { backendPid: 4242, heldLockMode: 'ShareLock' },
+          externalBarrierId: hash('e'),
+          externalPrincipal: 'operator:oncall',
+          externalRoutingDecision: 'source traffic frozen',
+          zeroDowntime: false
+        }
+      },
       decidedAt: AT, finalVerificationId: finalRecord.verificationId,
       fenceToken: 9, planId: hash('1'), sourceStateId: hash('2'), targetContractId: hash('3')
     });
@@ -111,6 +122,10 @@ test('cutover arms, commits and aborts atomically with durable evidence across r
     const run = store.cutover('cutover-1');
     assert.equal(run.status, 'COMMITTED');
     assert.equal(run.decidedAt, AT);
+    assert.equal(run.commitEvidence.sourceWriteBarrier.kind, 'POSTGRES_TABLE_SHARE_LOCK');
+    assert.equal(run.commitEvidence.sourceWriteBarrier.proof.backendPid, 4242);
+    assert.equal(run.commitEvidence.sourceWriteBarrier.externalPrincipal, 'operator:oncall');
+    assert.equal(run.commitEvidence.sourceWriteBarrier.zeroDowntime, false);
     assert.throws(() => store.armCutoverAtomic(armInput('cutover-1')), /CUTOVER_STATE_CONFLICT/);
     assert.throws(
       () => store.commitCutoverAtomic({
