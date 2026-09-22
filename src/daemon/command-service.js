@@ -1216,8 +1216,19 @@ export class SpoolCommandService {
   async attestCutoverBarrier(request, { statement, routingDecision } = {}) {
     this.#open(); requireRequest(request);
     const armed = this.runs.cutover(request.migrationId);
-    if (!armed || armed.status !== 'ARMED' || !armed.cutoverAttemptId) {
-      fail('CUTOVER_NOT_ARMED', 'Source-write freeze attestation requires an armed cutover attempt');
+    if (!armed || !['ARMED', 'COMMITTED'].includes(armed.status) || !armed.cutoverAttemptId) {
+      fail('CUTOVER_NOT_ARMED', 'Source-write freeze attestation requires an active cutover attempt');
+    }
+    const durable = this.#durableState(request.migrationId);
+    const attestableStates = new Set([
+      MIGRATION_STATES.CUTOVER_ARMED,
+      MIGRATION_STATES.FINAL_DRAIN,
+      MIGRATION_STATES.FINAL_VERIFY,
+      MIGRATION_STATES.CUTOVER_COMMITTED,
+      MIGRATION_STATES.POST_CUTOVER_VERIFY
+    ]);
+    if (!durable || !attestableStates.has(durable.currentState)) {
+      fail('CUTOVER_NOT_ARMED', `Source-write freeze attestation is not valid in durable state ${durable?.currentState ?? 'absent'}`);
     }
     if (typeof statement !== 'string' || !statement.trim() || statement.length > 2000) {
       fail('INVALID_BARRIER_ATTESTATION', 'statement must be a non-empty bounded string');
