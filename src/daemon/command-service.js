@@ -23,7 +23,7 @@ import {
   establishPostgresSnapshotCdcBoundary,
   getPostgresFlushLsn
 } from '../connectors/postgres/cdc.js';
-import { acquirePostgresTableShareLockBarrier, barrierIdentity } from '../cutover/write-barrier.js';
+import { acquirePostgresTableShareLockBarrier, attestOperatorBarrier, assertOperatorBarrier } from '../cutover/write-barrier.js';
 
 // Snapshot-pinned repair replays the approved snapshot ranges; after CDC
 // transactions advanced the target beyond the snapshot, replaying those
@@ -85,41 +85,13 @@ const MIGRATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const DEFAULT_MAX_SOURCE_BYTES = 256 * 1024 * 1024;
 const INFERENCE_SAMPLE_SIZE = 1000;
 
-function requireExternalSourceBarrier(barrier, migrationId) {
-  if (!barrier || typeof barrier !== 'object' || Array.isArray(barrier)) {
-    fail('CUTOVER_SOURCE_BARRIER_REQUIRED', 'PostgreSQL cutover requires an explicit externally enforced source-write freeze attestation');
-  }
-  if (barrier.kind !== 'EXTERNAL_OPERATOR_BARRIER') {
-    fail('CUTOVER_SOURCE_BARRIER_REQUIRED', 'PostgreSQL cutover requires EXTERNAL_OPERATOR_BARRIER attestation in addition to the database lock fence', {
-      kind: barrier.kind ?? null
-    });
-  }
-  if (barrier.migrationId !== migrationId) {
-    fail('CUTOVER_SOURCE_BARRIER_MISMATCH', 'Source-write barrier is bound to a different migration', {
-      expectedMigrationId: migrationId,
-      barrierMigrationId: barrier.migrationId ?? null
-    });
-  }
-  if (barrier.zeroDowntime !== false) {
-    fail('CUTOVER_SOURCE_BARRIER_INVALID', 'External source-write barrier must not claim zero-downtime');
-  }
-  const attestation = barrier.attestation;
-  if (!attestation || typeof attestation !== 'object'
-    || typeof attestation.principal !== 'string' || !attestation.principal
-    || typeof attestation.statement !== 'string' || !attestation.statement.trim()
-    || typeof attestation.routingDecision !== 'string' || !attestation.routingDecision.trim()) {
-    fail('CUTOVER_SOURCE_BARRIER_INVALID', 'External source-write barrier requires principal, statement, and routingDecision evidence');
-  }
-  const expectedId = barrierIdentity({
-    migrationId,
-    kind: barrier.kind,
-    acquiredAt: barrier.acquiredAt,
-    finalLsn: barrier.finalLsn,
-    attestation
-  });
-  if (expectedId !== barrier.barrierId) {
-    fail('CUTOVER_SOURCE_BARRIER_INVALID', 'External source-write barrier identity does not match its evidence payload');
-  }
+function requireExternalSourceBarrier(barrier, {
+  migrationId,
+  cutoverAttemptId,
+  principal,
+  signingKey
+}) {
+  assertOperatorBarrier(barrier, { signingKey, migrationId, cutoverAttemptId, principal });
   return barrier;
 }
 
@@ -1235,6 +1207,46 @@ export class SpoolCommandService {
     });
   }
 
+  // Mint server-authenticated evidence that the operator/routing layer has
+  // frozen source writes for this exact cutover attempt. The caller supplies
+  // the operational statement and routing decision; SPOOL captures the live
+  // source WAL position and HMAC-signs the evidence with the service approval
+  // trust root. Re-arming creates a new attempt id, so old attestations cannot
+  // authorize a later attempt.
+  async attestCutoverBarrier(request, { statement, routingDecision } = {}) {
+    this.#open(); requireRequest(request);
+    const armed = this.runs.cutover(request.migrationId);
+    if (!armed || armed.status !== 'ARMED' || !armed.cutoverAttemptId) {
+      fail('CUTOVER_NOT_ARMED', 'Source-write freeze attestation requires an armed cutover attempt');
+    }
+    if (typeof statement !== 'string' || !statement.trim() || statement.length > 2000) {
+      fail('INVALID_BARRIER_ATTESTATION', 'statement must be a non-empty bounded string');
+    }
+    if (typeof routingDecision !== 'string' || !routingDecision.trim() || routingDecision.length > 2000) {
+      fail('INVALID_BARRIER_ATTESTATION', 'routingDecision must be a non-empty bounded string');
+    }
+    const prepared = await this.#prepare(request);
+    if (prepared.plan.planId !== armed.planId) {
+      fail('CUTOVER_PLAN_CHANGED', 'Migration plan changed before source-write freeze attestation');
+    }
+    if (prepared.source?.connector !== 'postgres' || !prepared.source?.sourceRef) {
+      fail('WRITE_BARRIER_UNSUPPORTED', 'Server-authenticated source-write freeze attestation is currently implemented for PostgreSQL sources');
+    }
+    const finalLsn = await getPostgresFlushLsn({
+      ref: prepared.source.sourceRef,
+      credentialBroker: this.credentialBroker
+    });
+    return attestOperatorBarrier({
+      migrationId: request.migrationId,
+      cutoverAttemptId: armed.cutoverAttemptId,
+      principal: request.principal,
+      statement: statement.trim(),
+      finalLsn,
+      routingDecision: routingDecision.trim()
+    }, { signingKey: this.approvalSigningKey });
+  }
+
+
   // Explicit re-arm after abort. Re-validates the receipt against the recorded
   // run AND the live plan/target contract (freshness proof), then opens a new
   // attempt. The aborted attempt identity is never reused.
@@ -1305,7 +1317,12 @@ export class SpoolCommandService {
       ? prepared.source.sourceRef
       : null;
     const externalSourceBarrier = postgresSource
-      ? requireExternalSourceBarrier(sourceBarrier, request.migrationId)
+      ? requireExternalSourceBarrier(sourceBarrier, {
+          migrationId: request.migrationId,
+          cutoverAttemptId: armed.cutoverAttemptId,
+          principal: request.principal,
+          signingKey: this.approvalSigningKey
+        })
       : null;
     if (prepared.plan.planId !== armed.planId) fail('CUTOVER_PLAN_CHANGED', 'Migration plan changed since cutover arming');
     if (prepared.targetPreflight.targetContractId !== armed.targetContractId) {
