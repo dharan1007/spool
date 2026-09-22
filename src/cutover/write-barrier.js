@@ -1,7 +1,7 @@
 import { Client } from 'pg';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { fail } from '../core/errors.js';
-import { sha256Canonical } from '../platform/canonical-json.js';
+import { canonicalJson, sha256Canonical } from '../platform/canonical-json.js';
 import { postgresConnectionConfig } from '../connectors/postgres/connection.js';
 
 const BARRIER_DOMAIN = 'spool-source-write-barrier-v2';
@@ -59,7 +59,7 @@ function signingBytes(signingKey) {
 function operatorSignature(record, signingKey) {
   const digest = createHmac('sha256', signingBytes(signingKey))
     .update(`SPOOL\0${OPERATOR_SIGNATURE_DOMAIN}\0`, 'utf8')
-    .update(JSON.stringify(record), 'utf8')
+    .update(canonicalJson(record), 'utf8')
     .digest('hex');
   return `hmac-sha256:${digest}`;
 }
