@@ -23,6 +23,7 @@ import {
   establishPostgresSnapshotCdcBoundary,
   getPostgresFlushLsn
 } from '../connectors/postgres/cdc.js';
+import { acquirePostgresTableShareLockBarrier, barrierIdentity } from '../cutover/write-barrier.js';
 
 // Snapshot-pinned repair replays the approved snapshot ranges; after CDC
 // transactions advanced the target beyond the snapshot, replaying those
@@ -83,6 +84,44 @@ export { migrationRequestSemanticId } from './request-semantics.js';
 const MIGRATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const DEFAULT_MAX_SOURCE_BYTES = 256 * 1024 * 1024;
 const INFERENCE_SAMPLE_SIZE = 1000;
+
+function requireExternalSourceBarrier(barrier, migrationId) {
+  if (!barrier || typeof barrier !== 'object' || Array.isArray(barrier)) {
+    fail('CUTOVER_SOURCE_BARRIER_REQUIRED', 'PostgreSQL cutover requires an explicit externally enforced source-write freeze attestation');
+  }
+  if (barrier.kind !== 'EXTERNAL_OPERATOR_BARRIER') {
+    fail('CUTOVER_SOURCE_BARRIER_REQUIRED', 'PostgreSQL cutover requires EXTERNAL_OPERATOR_BARRIER attestation in addition to the database lock fence', {
+      kind: barrier.kind ?? null
+    });
+  }
+  if (barrier.migrationId !== migrationId) {
+    fail('CUTOVER_SOURCE_BARRIER_MISMATCH', 'Source-write barrier is bound to a different migration', {
+      expectedMigrationId: migrationId,
+      barrierMigrationId: barrier.migrationId ?? null
+    });
+  }
+  if (barrier.zeroDowntime !== false) {
+    fail('CUTOVER_SOURCE_BARRIER_INVALID', 'External source-write barrier must not claim zero-downtime');
+  }
+  const attestation = barrier.attestation;
+  if (!attestation || typeof attestation !== 'object'
+    || typeof attestation.principal !== 'string' || !attestation.principal
+    || typeof attestation.statement !== 'string' || !attestation.statement.trim()
+    || typeof attestation.routingDecision !== 'string' || !attestation.routingDecision.trim()) {
+    fail('CUTOVER_SOURCE_BARRIER_INVALID', 'External source-write barrier requires principal, statement, and routingDecision evidence');
+  }
+  const expectedId = barrierIdentity({
+    migrationId,
+    kind: barrier.kind,
+    acquiredAt: barrier.acquiredAt,
+    finalLsn: barrier.finalLsn,
+    attestation
+  });
+  if (expectedId !== barrier.barrierId) {
+    fail('CUTOVER_SOURCE_BARRIER_INVALID', 'External source-write barrier identity does not match its evidence payload');
+  }
+  return barrier;
+}
 
 function requireRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) fail('INVALID_MIGRATION_REQUEST', 'Migration request must be an object');
@@ -784,6 +823,7 @@ export class SpoolCommandService {
       }
       throw error;
     } finally {
+      if (sourceLockBarrier) await sourceLockBarrier.release().catch(() => {});
       await targetExecution.close();
     }
   }
@@ -1246,7 +1286,7 @@ export class SpoolCommandService {
   // - CUTOVER_ARMED/FINAL_DRAIN -> run final verification, then commit
   // Anything else -> CUTOVER_NOT_ARMED. No protocol error is swallowed: every
   // SpoolError propagates to the caller.
-  async commitCutover(request) {
+  async commitCutover(request, { sourceBarrier = null } = {}) {
     this.#open(); requireRequest(request);
     const armed = this.runs.cutover(request.migrationId);
     if (!armed) fail('CUTOVER_NOT_ARMED', 'Cutover commit requires an armed cutover');
@@ -1258,6 +1298,12 @@ export class SpoolCommandService {
     // (see #applyCdcToWaterline); the prepare itself is live refs + plan, as
     // with every other post-run operation.
     const prepared = await this.#prepare(request);
+    const postgresSource = prepared.source?.connector === 'postgres' && prepared.source?.sourceRef
+      ? prepared.source.sourceRef
+      : null;
+    const externalSourceBarrier = postgresSource
+      ? requireExternalSourceBarrier(sourceBarrier, request.migrationId)
+      : null;
     if (prepared.plan.planId !== armed.planId) fail('CUTOVER_PLAN_CHANGED', 'Migration plan changed since cutover arming');
     if (prepared.targetPreflight.targetContractId !== armed.targetContractId) {
       fail('CUTOVER_CONTRACT_CHANGED', 'Target contract changed since cutover arming', {
@@ -1267,7 +1313,15 @@ export class SpoolCommandService {
     }
     if (!armed.cutoverAttemptId) fail('CUTOVER_ATTEMPT_MISMATCH', 'Armed cutover has no attempt identity; re-arm before committing');
     const targetExecution = await prepared.targetRuntime.createExecution({ migrationId: request.migrationId, targetRef: prepared.plan.targetRef });
+    let sourceLockBarrier = null;
     try {
+      if (postgresSource) {
+        sourceLockBarrier = await acquirePostgresTableShareLockBarrier({
+          migrationId: request.migrationId,
+          sourceRef: postgresSource,
+          credentialBroker: this.credentialBroker
+        });
+      }
       const lease = await targetExecution.renewLease();
       // Open the shared execution: the coordinator verifies through it
       // (ledger reads and content sessions require an opened target).
@@ -1336,7 +1390,11 @@ export class SpoolCommandService {
           if (!this.credentialBroker || typeof this.credentialBroker.withSecret !== 'function') {
             fail('CDC_BROKER_REQUIRED', 'Final drain requires a credential broker');
           }
-          const waterline = await getPostgresFlushLsn({ ref: prepared.source.sourceRef, credentialBroker: this.credentialBroker });
+          // The final waterline is captured only after the PostgreSQL SHARE
+          // barrier is held. No source-table DML can advance beyond this
+          // point until the cutover decision and post-verification finish.
+          const waterline = sourceLockBarrier?.finalLsn
+            ?? await getPostgresFlushLsn({ ref: prepared.source.sourceRef, credentialBroker: this.credentialBroker });
           await this.#applyCdcToWaterline({
             request, prepared, targetExecution, untilLsn: waterline, ownerEpoch: randomUUID()
           });
@@ -1367,6 +1425,7 @@ export class SpoolCommandService {
             migrationId: request.migrationId, mode: VERIFICATION_MODE.FINAL_PRE_CUTOVER, cutoverAttemptId: attemptId
           });
           if (!persisted) fail('VERIFICATION_REQUIRED', 'FINAL_VERIFY has no persisted final verification for this attempt; re-run final verification');
+          if (sourceLockBarrier) await sourceLockBarrier.verifyHeld();
           this.runs.commitCutoverAtomic({
             migrationId: request.migrationId, principal: request.principal,
             commitEvidence: {
@@ -1374,7 +1433,18 @@ export class SpoolCommandService {
               leaseResource: targetExecution.leaseResource ?? null,
               fencingToken: lease.fencingToken,
               fenced: true,
-              committedAt: decidedAt
+              committedAt: decidedAt,
+              sourceWriteBarrier: sourceLockBarrier ? {
+                barrierId: sourceLockBarrier.barrierId,
+                kind: sourceLockBarrier.kind,
+                acquiredAt: sourceLockBarrier.acquiredAt,
+                finalLsn: sourceLockBarrier.finalLsn,
+                proof: sourceLockBarrier.proof,
+                externalBarrierId: externalSourceBarrier?.barrierId ?? null,
+                externalPrincipal: externalSourceBarrier?.attestation?.principal ?? null,
+                externalRoutingDecision: externalSourceBarrier?.attestation?.routingDecision ?? null,
+                zeroDowntime: false
+              } : null
             },
             decidedAt,
             finalVerificationId: persisted.verificationId,
@@ -1403,6 +1473,7 @@ export class SpoolCommandService {
           migrationId: request.migrationId, mode: VERIFICATION_MODE.POST_CUTOVER, cutoverAttemptId: attemptId
         });
         if (!post) {
+          if (sourceLockBarrier) await sourceLockBarrier.verifyHeld();
           post = await verifier.verify({
             ...verifyInput,
             mode: VERIFICATION_MODE.POST_CUTOVER,
