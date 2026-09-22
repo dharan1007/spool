@@ -1007,7 +1007,7 @@
           "tests/conformance/postgres-cutover-crash-matrix.test.js"
         ]
       },
-      "notes": "DATABASE_READ_ONLY has been disabled because it does not fence pre-existing PostgreSQL sessions. POSTGRES_TABLE_SHARE_LOCK now uses PostgreSQL's lock manager to drain active writers and block new DML while SELECT verification continues; commitCutover also requires an EXTERNAL_OPERATOR_BARRIER attestation with a routing decision. Live conformance includes pre-existing writers, lock-acquisition timeout, barrier loss and cutover/crash paths. Capability remains EXPERIMENTAL until the new live suite and a CI-or-larger qualification bundle pass on the current commit."
+      "notes": "DATABASE_READ_ONLY has been disabled because it does not fence pre-existing PostgreSQL sessions. POSTGRES_TABLE_SHARE_LOCK uses PostgreSQL's lock manager to drain active writers and block new DML while SELECT verification continues. commitCutover additionally requires a server-minted HMAC-authenticated EXTERNAL_OPERATOR_BARRIER attestation bound to the exact cutover attempt, request principal, live WAL position and routing decision; re-arm invalidates old evidence. Live conformance covers pre-existing writers, lock-acquisition timeout, barrier loss, forged/missing evidence and cutover/crash paths. Capability remains EXPERIMENTAL until the new live suite and a CI-or-larger qualification bundle pass on the current commit."
     }
   ]
 }
