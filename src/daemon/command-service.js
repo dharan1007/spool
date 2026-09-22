@@ -1358,12 +1358,18 @@ export class SpoolCommandService {
           credentialBroker: this.credentialBroker
         });
       }
-      const lease = await targetExecution.renewLease();
+      let lease = await targetExecution.renewLease();
+      const renewCutoverLease = async () => {
+        lease = await targetExecution.renewLease();
+        return lease;
+      };
       // Open the shared execution: the coordinator verifies through it
       // (ledger reads and content sessions require an opened target).
       await targetExecution.openTarget();
       const attemptId = armed.cutoverAttemptId;
       const commandIdFor = step => `cutover:${attemptId}:${step}`;
+      let finalVerificationProducedHere = null;
+      let postVerificationProducedHere = null;
       let state = this.#durableState(request.migrationId);
       if (!state) fail('CUTOVER_NOT_ALLOWED', 'Cutover commit requires durable migration state');
       if (state.currentState === MIGRATION_STATES.COMPLETED) return this.runs.cutover(request.migrationId);
@@ -1434,6 +1440,9 @@ export class SpoolCommandService {
           await this.#applyCdcToWaterline({
             request, prepared, targetExecution, untilLsn: waterline, ownerEpoch: randomUUID()
           });
+          // The drain may be long. Do not let a stale owner cross into final
+          // proof/state transitions merely because it once held this lease.
+          await renewCutoverLease();
           state = this.#durableState(request.migrationId);
         }
         if ([MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN].includes(state.currentState)) {
@@ -1446,6 +1455,11 @@ export class SpoolCommandService {
           if (!finalVerification || finalVerification.status !== 'VERIFIED') {
             fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful fresh final verification');
           }
+          // Verification renews the shared execution per batch, but the
+          // irreversible state transition gets its own database-backed
+          // revalidation. FENCING_LINEAGE_CHANGED fails if another owner ever
+          // occupied the lease between our proof and this boundary.
+          await renewCutoverLease();
           this.runs.recordFinalVerificationAtomic({
             migrationId: request.migrationId, principal: request.principal, verification: finalVerification,
             fenceToken: lease.fencingToken, planId: prepared.plan.planId,
@@ -1453,6 +1467,7 @@ export class SpoolCommandService {
             targetContractId: prepared.targetPreflight.targetContractId,
             commandId: commandIdFor('final-verify')
           });
+          finalVerificationProducedHere = finalVerification;
           state = this.#durableState(request.migrationId);
           if (await this.#hitFault('CUTOVER_AFTER_FINAL_VERIFY_BEFORE_COMMIT', {
             migrationId: request.migrationId,
@@ -1466,12 +1481,31 @@ export class SpoolCommandService {
           }
         }
         if (state.currentState === MIGRATION_STATES.FINAL_VERIFY) {
-          const decidedAt = new Date().toISOString();
-          const persisted = this.runs.findVerification({
-            migrationId: request.migrationId, mode: VERIFICATION_MODE.FINAL_PRE_CUTOVER, cutoverAttemptId: attemptId
-          });
-          if (!persisted) fail('VERIFICATION_REQUIRED', 'FINAL_VERIFY has no persisted final verification for this attempt; re-run final verification');
+          let persisted = finalVerificationProducedHere;
+          if (!persisted) {
+            // Recovery entered FINAL_VERIFY from disk. The historical proof
+            // explains how we got here, but cannot authorize a later
+            // irreversible decision: target data may have changed while this
+            // process was dead even though SPOOL fencing remained correct.
+            if (sourceLockBarrier) await sourceLockBarrier.verifyHeld();
+            const refreshed = await verifier.verify({
+              ...verifyInput,
+              mode: VERIFICATION_MODE.FINAL_PRE_CUTOVER,
+              expectedCdcPosition: hasCdcSlot ? (snapshotCdcBinding?.appliedLsn ?? snapshotCdcBinding?.cdcStartLsn ?? null) : null
+            });
+            if (!refreshed || refreshed.status !== 'VERIFIED') {
+              fail('VERIFICATION_REQUIRED', 'Recovered FINAL_VERIFY requires a fresh successful final verification before cutover commit');
+            }
+            await renewCutoverLease();
+            persisted = this.runs.saveVerification(request.migrationId, refreshed);
+          }
+          if (!persisted) fail('VERIFICATION_REQUIRED', 'FINAL_VERIFY has no fresh final verification for this invocation');
           if (sourceLockBarrier) await sourceLockBarrier.verifyHeld();
+          // Last possible fence check before the local irreversible decision.
+          // A token-lineage change aborts instead of carrying a stale proof
+          // across an intervening target owner.
+          await renewCutoverLease();
+          const decidedAt = new Date().toISOString();
           this.runs.commitCutoverAtomic({
             migrationId: request.migrationId, principal: request.principal,
             commitEvidence: {
@@ -1549,10 +1583,12 @@ export class SpoolCommandService {
           if (!post || post.status !== 'VERIFIED') {
             fail('VERIFICATION_REQUIRED', 'COMPLETED requires a successful fresh post-cutover verification');
           }
+          await renewCutoverLease();
           this.runs.recordPostCutoverVerificationAtomic({
             migrationId: request.migrationId, principal: request.principal, verification: post,
             commandId: commandIdFor('post-verify')
           });
+          postVerificationProducedHere = post;
           state = this.#durableState(request.migrationId);
           if (state.currentState !== MIGRATION_STATES.POST_CUTOVER_VERIFY) {
             fail('CUTOVER_STATE_CONFLICT', 'Atomic post-cutover verification did not advance durable state', {
@@ -1570,15 +1606,36 @@ export class SpoolCommandService {
               cutoverAttemptId: attemptId
             });
           }
-        } else if (!post) {
-          // saveVerification + transition are one SQLite transaction, so this
-          // is durable-state corruption rather than a reason to silently mint
-          // replacement evidence.
-          fail('VERIFICATION_REQUIRED', 'POST_CUTOVER_VERIFY has no persisted POST_CUTOVER verification for this attempt', {
-            migrationId: request.migrationId,
-            cutoverAttemptId: attemptId
+        } else {
+          // Recovery entered POST_CUTOVER_VERIFY from disk. Preserve the old
+          // evidence for audit, but completion requires a proof produced in
+          // this live invocation; target data can change while a process is
+          // absent even when the SPOOL state machine itself is immutable.
+          if (!post) {
+            fail('VERIFICATION_REQUIRED', 'POST_CUTOVER_VERIFY has no persisted POST_CUTOVER verification for this attempt', {
+              migrationId: request.migrationId,
+              cutoverAttemptId: attemptId
+            });
+          }
+          if (sourceLockBarrier) await sourceLockBarrier.verifyHeld();
+          const refreshedPost = await verifier.verify({
+            ...verifyInput,
+            mode: VERIFICATION_MODE.POST_CUTOVER,
+            expectedCdcPosition: snapshotCdcBinding?.appliedLsn ?? null
           });
+          if (!refreshedPost || refreshedPost.status !== 'VERIFIED') {
+            fail('VERIFICATION_REQUIRED', 'Recovered POST_CUTOVER_VERIFY requires a fresh successful post-cutover verification before completion');
+          }
+          await renewCutoverLease();
+          post = this.runs.saveVerification(request.migrationId, refreshedPost);
+          postVerificationProducedHere = post;
         }
+
+        if (!postVerificationProducedHere) {
+          fail('VERIFICATION_REQUIRED', 'Migration completion requires post-cutover evidence produced in the current live invocation');
+        }
+        if (sourceLockBarrier) await sourceLockBarrier.verifyHeld();
+        await renewCutoverLease();
 
         // No unauthorized SPOOL mutation may have occurred between the cutover
         // decision and this check: only the post-verification path transitions
