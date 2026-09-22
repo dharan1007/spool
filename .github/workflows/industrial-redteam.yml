@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - audit/industrial-redteam-20260922
+  pull_request:
+    branches:
+      - feat/industrial-postgres-qualification
   workflow_dispatch:
 
 permissions:
@@ -13,13 +16,34 @@ jobs:
   adversarial-node:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: debezium/postgres:17
+        env:
+          POSTGRES_DB: spooltest
+          POSTGRES_USER: spooltest
+          POSTGRES_PASSWORD: spooltest-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U spooltest -d spooltest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - name: Install exact dependency graph
         run: npm ci
-      - name: Run independent industrial red-team tests
+      - name: Run filesystem and qualification-integrity red-team tests
         run: node --test --test-concurrency=1 tests/industrial-redteam.test.js
+      - name: Run live PostgreSQL red-team tests
+        env:
+          SPOOL_TEST_POSTGRES_ENDPOINT: postgresql://127.0.0.1:5432/?sslmode=disable
+          SPOOL_TEST_POSTGRES_DATABASE: spooltest
+          SPOOL_TEST_POSTGRES_USER: spooltest
+          SPOOL_TEST_PG_PASSWORD: spooltest-password
+        run: node --test --test-concurrency=1 tests/industrial-postgres-contract-race.test.js tests/industrial-postgres-lease-recovery.test.js tests/industrial-postgres-toast.test.js
