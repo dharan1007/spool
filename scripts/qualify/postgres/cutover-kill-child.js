@@ -28,7 +28,7 @@ async function main() {
   const cfg = JSON.parse(await readFile(configPath(), 'utf8'));
   const {
     sourceRoot, targetRoot, snapshotDir, statePath,
-    approvalSigningKey, release, request, faultPoint
+    approvalSigningKey, release, request, faultPoint, postgresLeaseTtlMs
   } = cfg;
 
   if (!faultPoint || typeof faultPoint !== 'string') {
@@ -58,6 +58,7 @@ async function main() {
     statePath,
     approvalSigningKey,
     release,
+    postgresLeaseTtlMs,
     faultInjector
   });
 
