@@ -313,7 +313,7 @@ async function main() {
   for (const name of requiredScenarioNames()) scenarioStatus[name] = metrics[name]?.status ?? 'MISSING';
   const unexpectedFailures = failures.filter(f => f.classification !== 'EXPECTED_REFUSAL' && f.expected === false).length;
   const manifest = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     qualificationRunId: runId,
     suiteVersion: 'industrial-postgres-v1',
     repository: 'dharan1007/spool',
