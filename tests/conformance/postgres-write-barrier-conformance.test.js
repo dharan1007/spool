@@ -175,3 +175,61 @@ test('barrier handle reports loss after release and repeated release is idempote
     error => error?.code === 'WRITE_BARRIER_RELEASED'
   );
 });
+
+
+test('PostgreSQL backend termination drops the barrier and writers recover instead of deadlocking forever', { skip: !enabled, timeout: 120_000 }, async () => {
+  const table = 'spool_barrier_backend_termination';
+  await reset(table);
+  const writer = await client();
+  const killer = await client();
+  const barrier = await acquirePostgresTableShareLockBarrier({
+    migrationId: 'barrier-backend-termination',
+    sourceRef: sourceRef(table),
+    credentialBroker: broker,
+    lockTimeoutMs: 5_000,
+    probeTimeoutMs: 100
+  });
+  try {
+    assert.equal((await barrier.verifyHeld()).held, true);
+
+    await writer.query('BEGIN');
+    await writer.query("SET LOCAL lock_timeout = '250ms'");
+    await expectLockTimeout(() =>
+      writer.query(`UPDATE public."${table}" SET value='while-held' WHERE id=1`)
+    );
+    await writer.query('ROLLBACK');
+
+    const killed = await killer.query('SELECT pg_catalog.pg_terminate_backend($1)::boolean AS terminated', [barrier.proof.backendPid]);
+    assert.equal(killed.rows[0].terminated, true);
+
+    // The locker connection is now dead. verifyHeld must fail closed.
+    await assert.rejects(
+      () => barrier.verifyHeld(),
+      error => error?.code === 'WRITE_BARRIER_LOST'
+    );
+
+    // PostgreSQL releases transaction locks when the owning backend dies.
+    const deadline = Date.now() + 10_000;
+    let lastError = null;
+    while (Date.now() < deadline) {
+      try {
+        await writer.query('BEGIN');
+        await writer.query("SET LOCAL lock_timeout = '500ms'");
+        await writer.query(`UPDATE public."${table}" SET value='after-backend-loss' WHERE id=1`);
+        await writer.query('COMMIT');
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        await writer.query('ROLLBACK').catch(() => {});
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+    assert.equal(lastError, null, `write remained blocked after barrier backend termination: ${lastError?.message ?? lastError}`);
+  } finally {
+    await barrier.release().catch(() => {});
+    await writer.query('ROLLBACK').catch(() => {});
+    await writer.end().catch(() => {});
+    await killer.end().catch(() => {});
+  }
+});
