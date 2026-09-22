@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { Client } from 'pg';
 import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
 import { fail } from '../../core/errors.js';
+import { expressionSourceFields } from '../../core/transforms.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
 import { parsePostgresEndpoint, postgresConnectionConfig } from './connection.js';
 import { validateSecretRef } from '../../platform/secrets.js';
@@ -73,6 +74,144 @@ export async function getPostgresFlushLsn({ ref, credentialBroker } = {}) {
     const lsn = result.rows[0]?.lsn ?? null;
     if (typeof lsn !== 'string' || !LSN.test(lsn)) fail('CDC_FLUSH_LSN_UNAVAILABLE', 'Could not read the current WAL flush position');
     return lsn.toUpperCase();
+  });
+}
+
+
+const REPLICA_IDENTITY_MODE = Object.freeze({
+  d: 'DEFAULT',
+  i: 'INDEX',
+  f: 'FULL',
+  n: 'NOTHING'
+});
+
+// Discover the source table's actual replica-identity contract from catalogs.
+// DEFAULT means primary key; INDEX means the explicitly selected replica
+// identity index; FULL carries the complete old row; NOTHING cannot safely
+// drive UPDATE/DELETE CDC.
+export async function describePostgresReplicaIdentity({ ref, credentialBroker, schema, table } = {}) {
+  const databaseRef = requireDatabaseRef(ref);
+  const sourceSchema = requireText(schema, 'schema');
+  const sourceTable = requireText(table, 'table');
+  return withCdcClient({ databaseRef, credentialBroker }, async client => {
+    const relation = await client.query(
+      `SELECT c.oid, c.relreplident AS "mode"
+       FROM pg_catalog.pg_class c
+       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = $1 AND c.relname = $2
+         AND c.relkind IN ('r','p')`,
+      [sourceSchema, sourceTable]
+    );
+    if (relation.rows.length !== 1) {
+      fail('CDC_SOURCE_TABLE_MISSING', 'CDC source table does not exist or is not a table/partitioned table', {
+        schema: sourceSchema,
+        table: sourceTable
+      });
+    }
+
+    const modeCode = relation.rows[0].mode;
+    const mode = REPLICA_IDENTITY_MODE[modeCode];
+    if (!mode) {
+      fail('CDC_REPLICA_IDENTITY_UNKNOWN', 'PostgreSQL returned an unknown replica identity mode', {
+        schema: sourceSchema,
+        table: sourceTable,
+        mode: modeCode ?? null
+      });
+    }
+
+    if (mode === 'FULL') {
+      return Object.freeze({ mode, columns: Object.freeze([]), schema: sourceSchema, table: sourceTable });
+    }
+    if (mode === 'NOTHING') {
+      return Object.freeze({ mode, columns: Object.freeze([]), schema: sourceSchema, table: sourceTable });
+    }
+
+    const indexes = await client.query(
+      `SELECT i.indisprimary AS "primary", i.indisreplident AS "replicaIdentity",
+              array_agg(a.attname ORDER BY ord.ordinality) AS "columns"
+       FROM pg_catalog.pg_index i
+       JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS ord(attnum, ordinality) ON TRUE
+       JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ord.attnum
+       WHERE i.indrelid = $1::oid
+       GROUP BY i.indexrelid, i.indisprimary, i.indisreplident`,
+      [relation.rows[0].oid]
+    );
+    const selected = mode === 'INDEX'
+      ? indexes.rows.find(row => row.replicaIdentity === true)
+      : indexes.rows.find(row => row.primary === true);
+    const columns = Array.isArray(selected?.columns) ? selected.columns.map(String) : [];
+    return Object.freeze({
+      mode,
+      columns: Object.freeze(columns),
+      schema: sourceSchema,
+      table: sourceTable
+    });
+  });
+}
+
+// Prove that every source-field dependency feeding the TARGET primary key is
+// recoverable from pgoutput's old image. Under FULL the complete old row is
+// available. Under DEFAULT/INDEX, only replica-identity columns are guaranteed
+// when an identity-changing update is emitted. Anything else is unobservable
+// and must be rejected before streaming rather than creating stale target keys.
+export function assertCdcTargetKeyReplicaSafe({ mapping, targetPrimaryKey, replicaIdentity } = {}) {
+  if (!Array.isArray(mapping) || mapping.length === 0) fail('INVALID_CDC_APPLY_CONFIG', 'CDC key safety requires a non-empty mapping');
+  if (!Array.isArray(targetPrimaryKey) || targetPrimaryKey.length === 0) {
+    fail('INVALID_CDC_APPLY_CONFIG', 'CDC key safety requires targetPrimaryKey');
+  }
+  if (!replicaIdentity || typeof replicaIdentity !== 'object') {
+    fail('INVALID_CDC_APPLY_CONFIG', 'CDC key safety requires source replica identity metadata');
+  }
+
+  if (replicaIdentity.mode === 'FULL') {
+    return Object.freeze({ safe: true, mode: 'FULL', targetPrimaryKey: Object.freeze([...targetPrimaryKey]) });
+  }
+  if (replicaIdentity.mode === 'NOTHING') {
+    fail('CDC_REPLICA_IDENTITY_UNUSABLE', 'Source table uses REPLICA IDENTITY NOTHING; UPDATE/DELETE CDC cannot be applied safely', {
+      schema: replicaIdentity.schema ?? null,
+      table: replicaIdentity.table ?? null
+    });
+  }
+  if (!['DEFAULT', 'INDEX'].includes(replicaIdentity.mode)) {
+    fail('CDC_REPLICA_IDENTITY_UNKNOWN', 'Unsupported source replica identity mode', { mode: replicaIdentity.mode ?? null });
+  }
+
+  const identityColumns = new Set(replicaIdentity.columns ?? []);
+  if (identityColumns.size === 0) {
+    fail('CDC_REPLICA_IDENTITY_UNUSABLE', 'Source replica identity has no usable key columns', {
+      mode: replicaIdentity.mode,
+      schema: replicaIdentity.schema ?? null,
+      table: replicaIdentity.table ?? null
+    });
+  }
+
+  const dependencies = {};
+  const unsafe = [];
+  for (const targetField of targetPrimaryKey) {
+    const entry = mapping.find(item => item?.target === targetField);
+    if (!entry) {
+      fail('CDC_TARGET_KEY_MAPPING_MISSING', 'Target primary-key field has no mapping expression', { targetField });
+    }
+    const fields = expressionSourceFields(entry.expr);
+    dependencies[targetField] = fields;
+    for (const sourceField of fields) {
+      if (!identityColumns.has(sourceField)) unsafe.push({ targetField, sourceField });
+    }
+  }
+
+  if (unsafe.length > 0) {
+    fail('CDC_TARGET_KEY_NOT_REPLICA_SAFE', 'Mapped target primary key depends on source fields absent from the replica identity; use REPLICA IDENTITY FULL or change the key mapping', {
+      replicaIdentityMode: replicaIdentity.mode,
+      replicaIdentityColumns: [...identityColumns].sort(),
+      unsafeDependencies: unsafe
+    });
+  }
+
+  return Object.freeze({
+    safe: true,
+    mode: replicaIdentity.mode,
+    replicaIdentityColumns: Object.freeze([...identityColumns].sort()),
+    dependencies: Object.freeze(Object.fromEntries(Object.entries(dependencies).map(([key, fields]) => [key, Object.freeze([...fields])])))
   });
 }
 
