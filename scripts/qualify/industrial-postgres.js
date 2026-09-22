@@ -332,7 +332,16 @@ async function main() {
     environmentDigest: envDigest,
     configDigest: `sha256:${configDigest}`,
     result: overallResult,
+    // releaseGrade is an integrity/reproducibility claim for THIS workload.
+    // It is intentionally distinct from industrial-scale qualification:
+    // CI/SMALL/MEDIUM/LARGE can produce release-grade evidence, but only the
+    // immutable 1B-row / 24h INDUSTRIAL profile may claim industrial scale.
     releaseGrade: overallResult === 'PASS' && releaseGrade,
+    industrialScaleGrade: overallResult === 'PASS'
+      && releaseGrade
+      && profile.name === 'INDUSTRIAL'
+      && profile.customized === false
+      && config.requestedProfile === 'INDUSTRIAL',
     evidence: {
       files: evidenceFiles
     },
@@ -352,7 +361,12 @@ async function main() {
   const gradeReason = manifest.result === 'PASS'
     ? (manifest.releaseGrade ? null : (gitDirty ? 'DIRTY_WORKTREE' : 'UNKNOWN'))
     : `RESULT_${manifest.result}`;
-  const report = `# SPOOL Industrial PostgreSQL Qualification
+  const industrialScaleReason = manifest.industrialScaleGrade
+    ? null
+    : (profile.name === 'INDUSTRIAL'
+        ? (manifest.result !== 'PASS' ? `RESULT_${manifest.result}` : (gitDirty ? 'DIRTY_WORKTREE' : 'NOT_IMMUTABLE_INDUSTRIAL'))
+        : `PROFILE_${profile.name}_IS_NOT_INDUSTRIAL_SCALE`);
+  const report = `# SPOOL PostgreSQL Qualification
 
 Run: ${runId}
 Profile: ${formatProfile(profile)} (${profile.description})
@@ -362,7 +376,8 @@ Seed: ${seed}
 Environment: ${env.os.platform} ${env.os.arch} Node ${env.node.version} PG ${env.pg.serverVersion ?? 'unknown'}
 Duration: ${(durationMs / 1000).toFixed(1)}s
 Result: **${overallResult}**
-Release grade: ${manifest.releaseGrade ? 'true' : 'false'}${gradeReason ? ` (${gradeReason})` : ''}
+Release integrity grade: ${manifest.releaseGrade ? 'true' : 'false'}${gradeReason ? ` (${gradeReason})` : ''}
+Industrial scale grade: ${manifest.industrialScaleGrade ? 'true' : 'false'}${industrialScaleReason ? ` (${industrialScaleReason})` : ''}
 
 ## Summary
 - Scenarios: ${manifest.summary.totalScenarios} (run: ${manifest.summary.scenariosRun})
