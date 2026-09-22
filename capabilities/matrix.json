@@ -998,10 +998,16 @@
           "src/cutover/write-barrier.js"
         ],
         "integrationTests": [
-          "tests/write-barrier.test.js"
+          "tests/write-barrier.test.js",
+          "tests/conformance/postgres-write-barrier-conformance.test.js",
+          "tests/conformance/postgres-cdc-lifecycle.test.js"
+        ],
+        "faultTests": [
+          "tests/conformance/postgres-write-barrier-conformance.test.js",
+          "tests/conformance/postgres-cutover-crash-matrix.test.js"
         ]
       },
-      "notes": "Module and attestation validation are unit-tested; DATABASE_READ_ONLY proof (rejected-write + final LSN) is unproven live and commitCutover binding is pending. APPLICATION_GATE/PROXY_ROUTER explicitly unsupported. EXPERIMENTAL until live proof."
+      "notes": "DATABASE_READ_ONLY has been disabled because it does not fence pre-existing PostgreSQL sessions. POSTGRES_TABLE_SHARE_LOCK now uses PostgreSQL's lock manager to drain active writers and block new DML while SELECT verification continues; commitCutover also requires an EXTERNAL_OPERATOR_BARRIER attestation with a routing decision. Live conformance includes pre-existing writers, lock-acquisition timeout, barrier loss and cutover/crash paths. Capability remains EXPERIMENTAL until the new live suite and a CI-or-larger qualification bundle pass on the current commit."
     }
   ]
 }
