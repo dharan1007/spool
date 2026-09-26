@@ -42,7 +42,7 @@ async function main() {
 
   const broker = new CredentialBroker();
   broker.withSecret = async (ref, fn) => fn(pgConfig.password);
-  const runtime = createPostgresTargetRuntime({ credentialBroker: broker });
+  const runtime = createPostgresTargetRuntime({ credentialBroker: broker, leaseTtlMs: cfg.leaseTtlMs });
   const execution = runtime.createExecution({ migrationId, targetRef });
   const lease = await execution.renewLease();
   const target = execution.openTarget();
@@ -72,7 +72,7 @@ async function main() {
   const runner = new MigrationRunner({ target, checkpointStore });
 
   // Signal ready (parent waits for this before polling ledger)
-  process.stdout.write('CRASH_CHILD_READY\n');
+  process.stdout.write(`CRASH_CHILD_READY ${JSON.stringify(lease)}\n`);
 
   const totalBatches = Math.ceil(rowCount / batchSize);
   for (let batchIndex = 0; batchIndex < totalBatches; batchIndex += 1) {
