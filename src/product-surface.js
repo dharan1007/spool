@@ -1,9 +1,8 @@
-const PRODUCT_ROUTES = new Set(['/local-runner', '/examples', '/security', '/services']);
+const PRODUCT_ROUTES = new Set(['/local-runner', '/examples', '/security', '/services', '/start', '/integrations', '/developers']);
 const PRODUCT_NAV = [
-  ['/local-runner', 'Local Runner'],
-  ['/examples', 'Examples'],
-  ['/security', 'Security'],
-  ['/services', 'Services']
+  ['/start', 'Start here'],
+  ['/integrations', 'Integrations'],
+  ['/developers', 'Developers']
 ];
 const REPO = 'https://github.com/dharan1007/spool';
 
@@ -14,10 +13,9 @@ function currentPath() {
 function productTopbar(path) {
   const nav = [
     ['/', 'Overview'],
-    ['/local-runner', 'Local Runner'],
-    ['/examples', 'Examples'],
-    ['/security', 'Security'],
-    ['/services', 'Services'],
+    ['/start', 'Start here'],
+    ['/integrations', 'Integrations'],
+    ['/developers', 'Developers'],
     ['/docs', 'Docs']
   ];
   return `<header class="topbar product-topbar">
@@ -48,9 +46,9 @@ function localRunnerPage() {
   return productShell('/local-runner', `
     <section class="product-hero">
       <div>
-        <span class="eyebrow-chip">GATE B · PRODUCTION-VERIFIED</span>
+        <span class="eyebrow-chip">RELEASED LOCAL RUNNER · VERSION 1.1.1</span>
         <h1>The real local runner: <em>CSV → SQLite with proof.</em></h1>
-        <p class="lede">The Browser Studio prepares and validates data in-browser. The Local Runner is the production mutation path: bounded-memory streaming of approved UTF-8 filesystem CSV migrations into an existing ordinary SQLite table on the customer-controlled machine, with a 256 MiB default source ceiling.</p>
+        <p class="lede">The Browser Studio prepares and validates data in-browser. The released Local Runner is the customer-local mutation path: bounded-memory streaming of approved UTF-8 filesystem CSV migrations into an existing ordinary SQLite table on the customer-controlled machine, with a 256 MiB default source ceiling.</p>
         <div class="hero-actions"><a class="button primary" href="${REPO}/releases/tag/v1.1.1">Install v1.1.1 →</a><a class="button secondary" href="/examples">Inspect the real CRM case</a></div>
       </div>
       <div class="runtime-diagram">
@@ -83,7 +81,8 @@ function localRunnerPage() {
       <div><span class="kicker">NOT CLAIMED</span><h2>Unsupported means unsupported.</h2><ul class="deny-list"><li>PostgreSQL</li><li>MySQL</li><li>Remote hosted database credentials</li><li>upsert / replace / delete / truncate</li><li>Triggered SQLite targets</li><li>Virtual SQLite tables</li><li>Hosted raw-row ingestion</li><li>1-GB / unlimited Local Runner input</li></ul></div>
     </section>
 
-    <section class="section"><div class="code-workflow"><div><span class="kicker">INSTALL + RUN ON YOUR DEVICE</span><h2>Install the versioned CLI, then inspect, approve, run and verify.</h2><p>Node.js 22+ is required. Browser Studio stays capped at 50 MiB; for production SQLite mutation or larger CSV files use this customer-local runner. The Local Runner uses bounded-memory streaming with a 256 MiB default source ceiling. It keeps a durable content-bound snapshot on local disk for approval/recovery, re-scans that snapshot on restart, and cleans it after VERIFIED completion. Budget disk space for the snapshot plus SQLite/WAL growth. The release remains private on the npm registry; install directly from the versioned GitHub source or release artifact.</p></div><pre># Preferred v1.1.1 install — no npm-registry publication required.
+    <section class="section"><div class="guided-panel"><span class="kicker">BEFORE INSTALLING</span><h2>For a SQLite database operator</h2><p>First prepare the CSV and an existing compatible SQLite table. Then install SPOOL locally, create the documented migration request, inspect and dry-run it, authorize the exact plan, execute, verify and save the receipt. The published capability matrix classifies SQLite target support as experimental because sustained-load qualification is still missing; do not interpret a release download as proof of unrestricted enterprise readiness.</p><a href="/start" class="text-link">Return to the guided setup →</a></div></section>
+    <section class="section"><div class="code-workflow"><div><span class="kicker">ADVANCED · INSTALL + RUN ON YOUR DEVICE</span><h2>Install the versioned CLI, then inspect, approve, run and verify.</h2><p>Node.js 22+ is required. Browser Studio stays capped at 50 MiB; for production SQLite mutation or larger CSV files use this customer-local runner. The Local Runner uses bounded-memory streaming with a 256 MiB default source ceiling. It keeps a durable content-bound snapshot on local disk for approval/recovery, re-scans that snapshot on restart, and cleans it after VERIFIED completion. Budget disk space for the snapshot plus SQLite/WAL growth. The release remains private on the npm registry; install directly from the versioned GitHub source or release artifact.</p></div><details class="developer-details"><summary>Show command-line installation and execution steps</summary><pre># Preferred v1.1.1 install — no npm-registry publication required.
 npm install -g github:dharan1007/spool#v1.1.1
 spool --help
 
@@ -102,7 +101,7 @@ spool receipt --migration-id mig_customers_001 --source-root ./data --target-roo
 
 # Source-verification fallback:
 git clone --branch v1.1.1 https://github.com/dharan1007/spool.git
-cd spool && npm ci && npm run check && npm run pack:verify</pre><div class="hero-actions"><a class="button primary" href="${REPO}/releases/tag/v1.1.1">Download / verify v1.1.1 →</a><a class="button secondary" href="${REPO}/blob/main/docs/LOCAL_RUNNER.md">Open migration.json guide</a><a class="button secondary" href="${REPO}/tree/main/examples/crm-export">Use the verified example</a></div></div></section>
+cd spool && npm ci && npm run check && npm run pack:verify</pre></details><div class="hero-actions"><a class="button primary" href="${REPO}/releases/tag/v1.1.1">Download / verify v1.1.1 →</a><a class="button secondary" href="${REPO}/blob/main/docs/LOCAL_RUNNER.md">Open migration.json guide</a><a class="button secondary" href="${REPO}/tree/main/examples/crm-export">Use the verified example</a></div></div></section>
   `);
 }
 
@@ -160,12 +159,41 @@ function servicesPage() {
   `);
 }
 
+function startPage(){return productShell('/start', `
+  <section class="product-hero compact-product-hero"><div><span class="eyebrow-chip">START HERE · NO CODE REQUIRED FOR BROWSER STUDIO</span><h1>What do you need to <em>move or prepare?</em></h1><p class="lede">Choose the outcome first. SPOOL will show the correct interface, what runs on your device, and the evidence you will receive. You do not need to understand API responses to choose a path.</p></div></section>
+  <section class="section"><div class="start-paths" aria-label="Choose a SPOOL workflow">
+    <article><span>01 · NO INSTALL</span><h2>Clean a spreadsheet export</h2><p>You have a CSV, and want a validated CSV or JSON output. Add the file in your browser, choose a cleanup outcome, run Autopilot, review rejected rows and export. Nothing is sent to a SPOOL data server.</p><p class="path-limit">Input: CSV up to 50 MiB · Result: browser-local output, not a live database write.</p><a href="/studio/new" class="button primary">Open the CSV Studio →</a></article>
+    <article><span>02 · LOCAL INSTALL</span><h2>Write CSV into SQLite</h2><p>You have a CSV and an existing SQLite database. Install the released local runner on the computer holding the data. An operator reviews source and destination, runs a dry-run, approves the exact operation, executes it and examines the receipt.</p><p class="path-limit">Default CSV ceiling: 256 MiB · Insert-only, ordinary SQLite targets · Command line and setup required.</p><a href="/local-runner" class="button secondary">See the local setup →</a></article>
+    <article><span>03 · DEVELOPER INTEGRATION</span><h2>Connect an existing application</h2><p>Your application can invoke SPOOL through its local CLI or an authenticated loopback bridge. A developer installs and runs the command service on the customer-controlled machine. This website does not host a remote migration API.</p><p class="path-limit">Execution stays local · Approvals are not bypassed · Requires development work.</p><a href="/integrations" class="button secondary">Explore integration paths →</a></article>
+  </div></section>
+  <section class="section"><div class="guided-panel"><span class="kicker">NOT YET A RELEASED CONNECTOR</span><h2>Need PostgreSQL, MySQL, an enterprise agent or hosted automation?</h2><p>Those are not part of the currently published v1.1.1 PostgreSQL production scope. Do not put production credentials into Browser Studio or assume an experimental connector is qualified.</p><a href="/docs" class="text-link">Read capability and limit explanations →</a></div></section>
+`);}
+
+function integrationPage(){return productShell('/integrations', `
+  <section class="product-hero compact-product-hero"><div><span class="eyebrow-chip">INTEGRATIONS · CHOOSE A TRANSPORT</span><h1>Connect SPOOL without <em>guessing where the API lives.</em></h1><p class="lede">An integration is software running on your device, not a button that uploads your database to this site. Pick the supported execution surface before writing any code.</p><div class="hero-actions"><a class="button primary" href="/start">Choose a workflow →</a><a class="button secondary" href="/developers">Developer reference →</a></div></div></section>
+  <section class="section"><div class="start-paths">
+    <article><span>NO-CODE BROWSER FLOW</span><h2>Prepare data</h2><p>Open Studio, choose your CSV and an outcome, inspect validation, and download the result. No API key, server or integration snippet is necessary.</p><a class="text-link" href="/studio/new">Open Studio →</a></article>
+    <article><span>CLI AUTOMATION</span><h2>Run an approved SQLite migration</h2><p>Install v1.1.1 on the machine holding your existing SQLite table and CSV. A developer can invoke the CLI within local automation, preserving the inspect → plan → dry-run → approve → run → verify → receipt sequence.</p><a class="text-link" href="/local-runner">Local runner instructions →</a></article>
+    <article><span>LOCAL HTTP BRIDGE</span><h2>Integrate a local app or agent</h2><p>The source includes an authenticated loopback command service. It is not a hosted API and is not started merely by opening this website. Configure it with a local command service, a strong bearer token and an approved Origin policy.</p><a class="text-link" href="/developers">Bridge contract and setup →</a></article>
+  </div></section>
+  <section class="section"><div class="guided-panel"><span class="kicker">IMPORTANT BOUNDARY</span><h2>Why a raw API response is not an onboarding screen</h2><p>Machine-readable command responses belong in developer tools; an HTTP endpoint does not provide a human UI. For humans, use Studio or these guides. For applications, use the local CLI or the loopback bridge after provisioning the customer-controlled runtime. This hosted website has no public database-write API, no cloud database connection form and no universal integration token.</p></div></section>
+`);}
+
+function developerPage(){return productShell('/developers', `
+  <section class="product-hero compact-product-hero"><div><span class="eyebrow-chip">DEVELOPER REFERENCE · LOCAL ONLY</span><h1>The correct integration <em>boundary and sequence.</em></h1><p class="lede">Start with the released CLI for production-scoped filesystem CSV to SQLite operations. The loopback HTTP bridge is an integration component, not a remotely hosted SPOOL API. Code examples and machine formats are deliberately kept in the technical section below.</p><div class="hero-actions"><a href="/integrations" class="button primary">Choose an integration →</a><a href="/local-runner" class="button secondary">Released runner setup →</a></div></div></section>
+  <section class="section"><div class="step-flow"><article class="step-card"><span>01</span><h3>Provision locally</h3><p>Install the exact released version on the same customer-controlled system as the source and target. Use a separately configured local bridge only when a client requires HTTP.</p></article><article class="step-card"><span>02</span><h3>Inspect before writing</h3><p>Inspect source and live target, create a plan, then run a dry-run. Stop on source or contract drift.</p></article><article class="step-card"><span>03</span><h3>Authorize explicitly</h3><p>Issue the supported bound approval for the exact operation. An API invocation is not itself permission to mutate.</p></article><article class="step-card"><span>04</span><h3>Execute and check</h3><p>Run only the approved operation, reconcile ambiguous results, verify the supported evidence and retrieve the receipt.</p></article></div></section>
+  <section class="section"><div class="guided-panel"><span class="kicker">LOCAL API FACTS</span><h2>What the bridge actually exposes</h2><p>The current source exports a loopback-only daemon factory. A developer must initialize the local command service, supply a strong bearer token, configure allowed Origins and start the server. It accepts authenticated POST requests to <code>/v1/command</code> on its chosen localhost port; a direct browser navigation or GET is not a valid command call. The daemon returns JSON for programmatic consumers, not a rendered migration dashboard.</p><p>Do not point production tools at this site's <code>/api</code> path or treat a JSON document as an installation wizard. The published CLI is the release-scoped local execution path.</p><details class="developer-details"><summary>Show technical transport contract</summary><div class="developer-detail-inner"><p><strong>Method:</strong> POST. <strong>Host:</strong> customer-controlled loopback IP. <strong>Path:</strong> /v1/command. <strong>Authorization:</strong> Bearer token, at least 32 bytes. <strong>Body:</strong> bounded JSON command envelope. <strong>Response:</strong> structured success or error JSON.</p><p>Supported source commands include inspect, plan, dry-run, approve, run, status, verify and receipt; check the exact released adapter before relying on additional commands. The website itself cannot connect to this bridge because its browser Content Security Policy disallows outbound requests.</p><p><a class="text-link" href="\${REPO}/blob/main/src/daemon/spoold.js">Review the actual daemon contract →</a> <a class="text-link" href="\${REPO}/blob/main/docs/LOCAL_RUNNER.md">See installation and approval instructions →</a></p></div></details></div></section>
+`);}
+
 function productPage(path) {
   return ({
     '/local-runner': localRunnerPage,
     '/examples': examplesPage,
     '/security': securityPage,
-    '/services': servicesPage
+    '/services': servicesPage,
+    '/start': startPage,
+    '/integrations': integrationPage,
+    '/developers': developerPage
   })[path]?.();
 }
 
@@ -193,6 +221,14 @@ function addHomepageProductBand(root) {
   section.className = 'section complete-product-band';
   section.innerHTML = `<div class="section-heading"><span class="kicker">THE COMPLETE PRODUCT</span><h2>Two execution surfaces. One correctness model.</h2><p>Use Browser Studio when you need local CSV preparation and validation. Use the Local Runner when you need a production-verified, bounded-memory write into an existing SQLite table with a durable snapshot, approval, crash reconciliation and a receipt.</p></div><div class="surface-grid"><article><span>BROWSER STUDIO</span><h3>Work entirely in-browser</h3><p>Profile, infer, transform, validate, checkpoint, inspect violations and export without a dataset backend. Browser input limit: 50 MiB.</p><a href="/studio/new">Start in Studio →</a></article><article class="accent"><span>LOCAL RUNNER</span><h3>Write to a real SQLite target</h3><p>Bounded-memory stream + 256 MiB default source ceiling + durable snapshot + live target contract + target_write approval + fencing + atomic ledger + verification + receipt.</p><a href="/local-runner">Open Local Runner →</a></article></div>`;
   finalCta.before(section);
+  const hero = root.querySelector('.hero');
+  if (hero && !root.querySelector('#choose-path')) {
+    const chooser = document.createElement('section');
+    chooser.id = 'choose-path';
+    chooser.className = 'section guided-home-band';
+    chooser.innerHTML = '<div><span class="kicker">START WITH YOUR GOAL</span><h2>No API setup required to begin.</h2><p>Clean a CSV in the browser, prepare a local SQLite migration, or connect an existing app. The supported boundary is different for each path.</p></div><a class="button primary" href="/start">Choose your setup →</a>';
+    hero.after(chooser);
+  }
 }
 
 function syncProductSurface() {
@@ -203,7 +239,7 @@ function syncProductSurface() {
     const current = root.querySelector(`[data-product-route="${path}"]`);
     if (current) return;
     root.innerHTML = productPage(path);
-    document.title = `${({ '/local-runner': 'Local Runner', '/examples': 'Examples', '/security': 'Security', '/services': 'Services' })[path]} — SPOOL`;
+    document.title = `${({ '/local-runner': 'Local Runner', '/examples': 'Examples', '/security': 'Security', '/services': 'Services', '/start': 'Start here', '/integrations': 'Integrations', '/developers': 'Developers' })[path]} — SPOOL`;
     return;
   }
   addProductNav(root, path);
