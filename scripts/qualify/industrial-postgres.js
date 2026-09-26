@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { randomUUID } from 'node:crypto';
-import { resolveProfile, formatProfile, qualifiesIndustrialScale } from './profiles.js';
+import { resolveProfile, formatProfile } from './profiles.js';
+import { developmentQualification } from './qualification-classes.js';
 import { captureEnvironment } from './environment.js';
 import { EvidenceWriter } from './evidence-writer.js';
 import { ResourceSampler } from './sampler.js';
@@ -95,7 +96,6 @@ async function main() {
   // Environment capture
   const { env, digest: envDigest } = await captureEnvironment({ pgConfig: envPgConfig });
   const gitDirty = env.git.dirty;
-  const releaseGrade = !gitDirty;
   const startTime = new Date().toISOString();
   const startMonotonic = process.hrtime.bigint();
   const seed = `qualify-${runId}-${profile.name}`;
@@ -324,7 +324,7 @@ async function main() {
   const endTime = new Date().toISOString();
   const durationMs = Number(process.hrtime.bigint() - startMonotonic) / 1e6;
 
-  // Manifest (schemaVersion 4): evidence.files is the complete sorted file
+  // Manifest (schemaVersion 5): evidence.files is the complete sorted file
   // set excluding only sha256sums.txt itself — a file cannot contain its own
   // checksum, so checksums live in sha256sums.txt alone and the manifest pins
   // the set, never stale embedded sums. The verifier enforces set equality.
@@ -334,7 +334,7 @@ async function main() {
   for (const name of requiredScenarioNames()) scenarioStatus[name] = metrics[name]?.status ?? 'MISSING';
   const unexpectedFailures = failures.filter(isUnexpectedFailure).length;
   const manifest = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     qualificationRunId: runId,
     suiteVersion: 'industrial-postgres-v1',
     repository: 'dharan1007/spool',
@@ -353,16 +353,12 @@ async function main() {
     environmentDigest: envDigest,
     configDigest: `sha256:${configDigest}`,
     result: overallResult,
-    // releaseGrade is an integrity/reproducibility claim for THIS workload.
-    // It is intentionally distinct from industrial-scale qualification:
-    // CI/SMALL/MEDIUM/LARGE can produce release-grade evidence, but only the
-    // immutable 1B-row / 24h INDUSTRIAL profile may claim industrial scale.
-    releaseGrade: overallResult === 'PASS' && releaseGrade,
-    industrialScaleGrade: qualifiesIndustrialScale({
-      result: overallResult,
-      dirty: gitDirty,
-      profile: profile.name,
-      requestedProfile: config.requestedProfile
+    // A workload PASS is NOT a production certification. Qualification
+    // requires independent mandatory CI, adversarial/security evidence and
+    // a trusted class attestation. This producer can only emit NOT_QUALIFIED.
+    qualification: developmentQualification({
+      runId, commitSha: process.env.SPOOL_COMMIT_SHA ?? env.git.sha ?? 'unknown',
+      profile: profile.name
     }),
     evidence: {
       files: evidenceFiles
@@ -380,14 +376,7 @@ async function main() {
   // Report (written before the manifest so the manifest's file set is
   // complete; report content pins the same locals the manifest records).
   const commitSha = process.env.SPOOL_COMMIT_SHA ?? env.git.sha ?? 'unknown';
-  const gradeReason = manifest.result === 'PASS'
-    ? (manifest.releaseGrade ? null : (gitDirty ? 'DIRTY_WORKTREE' : 'UNKNOWN'))
-    : `RESULT_${manifest.result}`;
-  const industrialScaleReason = manifest.industrialScaleGrade
-    ? null
-    : (profile.name === 'INDUSTRIAL'
-        ? (manifest.result !== 'PASS' ? `RESULT_${manifest.result}` : (gitDirty ? 'DIRTY_WORKTREE' : 'NOT_IMMUTABLE_INDUSTRIAL'))
-        : `PROFILE_${profile.name}_IS_NOT_INDUSTRIAL_SCALE`);
+
   const report = `# SPOOL PostgreSQL Qualification
 
 Run: ${runId}
@@ -398,8 +387,10 @@ Seed: ${seed}
 Environment: ${env.os.platform} ${env.os.arch} Node ${env.node.version} PG ${env.pg.serverVersion ?? 'unknown'}
 Duration: ${(durationMs / 1000).toFixed(1)}s
 Result: **${overallResult}**
-Release integrity grade: ${manifest.releaseGrade ? 'true' : 'false'}${gradeReason ? ` (${gradeReason})` : ''}
-Industrial scale grade: ${manifest.industrialScaleGrade ? 'true' : 'false'}${industrialScaleReason ? ` (${industrialScaleReason})` : ''}
+Qualification class: **${manifest.qualification.class}**
+Qualification evidence type: ${manifest.qualification.evidenceType}
+Qualification denial reasons: ${manifest.qualification.reasonCodes.join(', ')}
+Workload PASS and clean worktree alone never authorize promotion.
 
 ## Summary
 - Scenarios: ${manifest.summary.totalScenarios} (run: ${manifest.summary.scenariosRun})
@@ -430,7 +421,7 @@ ${failures.length === 0 ? 'None' : failures.map(f => `- [${f.classification}] ${
 > Generated at ${new Date().toISOString()} by industrial-postgres qualification harness.
 `;
   await writeFile(join(runDir, 'report.md'), report, 'utf8');
-  await writeFile(join(runDir, 'manifest.json'), JSON.stringify({ ...manifest, releaseGradeReason: gradeReason }, null, 2), 'utf8');
+  await writeFile(join(runDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
 
   // Single checksums write, last: covers every evidence file including the
   // manifest and the report. The manifest pins the set; this file pins
@@ -444,6 +435,7 @@ ${failures.length === 0 ? 'None' : failures.map(f => `- [${f.classification}] ${
   console.log(`Duration: ${(durationMs / 1000).toFixed(1)}s`);
   if (failures.length) console.log(`Failures: ${failures.length} (see failures.json)`);
   console.log(`Report: ${join(runDir, 'report.md')}`);
+  console.log(`Qualification class: ${manifest.qualification.class} (development harness only)`);
 
   const exitCode = overallResult === 'PASS' ? 0 : overallResult === 'FAIL' ? 1 : 3;
   process.exit(exitCode);
