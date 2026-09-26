@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isExpectedRefusal, isUnexpectedFailure, foldScenarioFailures,
-  isLogicalWalLevel, scenarioCanPass
+  isLogicalWalLevel, scenarioCanPass, allRequiredScenariosPassed
 } from '../scripts/qualify/failure-classification.js';
 
 const valid = { code: 'SLOT_LOST', expected: true, classification: 'EXPECTED_REFUSAL' };
@@ -50,4 +50,14 @@ test('a failed scenario result cannot be laundered into PASS by empty failures',
   assert.equal(scenarioCanPass({foldedStatus: 'FAIL'}), false);
   assert.equal(scenarioCanPass({foldedStatus: 'PASS',profileFailures:1}), false);
   assert.equal(scenarioCanPass({foldedStatus: 'PASS',profileFailures:undefined}), true);
+});
+
+test('a manifest cannot claim PASS with a failed or missing required scenario', () => {
+  const required = ['postgres.target.load','postgres.cdc.soak'];
+  assert.equal(allRequiredScenariosPassed({ 'postgres.target.load': 'PASS', 'postgres.cdc.soak': 'PASS' }, required), true);
+  assert.equal(allRequiredScenariosPassed({ 'postgres.target.load': 'PASS', 'postgres.cdc.soak': 'FAIL' }, required), false);
+  assert.equal(allRequiredScenariosPassed({ 'postgres.target.load': 'PASS' }, required), false);
+  assert.equal(allRequiredScenariosPassed({ 'postgres.target.load': 'PASS', 'postgres.cdc.soak': null }, required), false);
+  assert.equal(allRequiredScenariosPassed({}, []), false);
+  assert.equal(allRequiredScenariosPassed(null, required), false);
 });
