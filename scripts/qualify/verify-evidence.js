@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { readdir, readFile } from 'node:fs/promises';
 import { verifySha256Sums } from './checksums.js';
 import { REQUIRED_SCENARIOS, requiredScenarioNames, isExpectedRefusal, isUnexpectedFailure } from './scenarios.js';
+import { allRequiredScenariosPassed } from './failure-classification.js';
 import { PROFILE_DEFINITIONS, qualifiesIndustrialScale } from './profiles.js';
 
 function fail(message) {
@@ -103,7 +104,7 @@ async function main() {
   if (manifest.result === 'PASS') {
     if (unexpected.length !== 0) fail('result PASS with unexpected failures present');
     if (!complete) fail('result PASS with an incomplete scenario set');
-    if (requiredScenarioNames().some(name => scenarios[name] !== 'PASS')) {
+    if (!allRequiredScenariosPassed(scenarios, requiredScenarioNames())) {
       fail('result PASS with one or more failed required scenarios');
     }
   } else if (manifest.result === 'FAIL') {
