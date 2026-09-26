@@ -1,0 +1,50 @@
+name: selfhosted-postgres-evidence
+
+# This does not replace the required release-gate / CodeQL checks. It runs
+# development qualification on a dedicated trust-isolated Linux runner.
+on:
+  push:
+    branches:
+      - ci/external-postgres-qualification
+      - feat/industrial-postgres-qualification
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-postgres:
+    runs-on: [self-hosted, linux, x64, spool-industrial]
+    timeout-minutes: 240
+    services:
+      postgres:
+        image: debezium/postgres:17
+        env:
+          POSTGRES_DB: spooltest
+          POSTGRES_USER: spooltest
+          POSTGRES_PASSWORD: spooltest-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U spooltest -d spooltest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 18
+    steps:
+      - name: Checkout exact candidate without persistent GitHub credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+          cache: npm
+      - name: Run full fail-closed PostgreSQL development gate
+        env:
+          SPOOL_TEST_POSTGRES_ENDPOINT: postgresql://127.0.0.1:5432/?sslmode=disable
+          SPOOL_TEST_POSTGRES_DATABASE: spooltest
+          SPOOL_TEST_POSTGRES_USER: spooltest
+          SPOOL_TEST_PG_PASSWORD: spooltest-password
+          SPOOL_EXTERNAL_EVIDENCE_ROOT: /var/lib/spool-qualification/evidence
+        run: bash scripts/qualify/external-ci.sh "$GITHUB_SHA"

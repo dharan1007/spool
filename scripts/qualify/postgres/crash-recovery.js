@@ -5,6 +5,7 @@ import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
+import { PostgresTarget } from '../../../src/connectors/postgres/target.js';
 import { CredentialBroker } from '../../../src/daemon/credential-broker.js';
 import { SpoolCommandService } from '../../../src/daemon/command-service.js';
 import { writeDatasetCsv } from '../dataset.js';
@@ -124,6 +125,9 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
       const killMigrationId = `qualify-crash-kill-${runId}`;
       const killRowCount = Math.min(20_000, Math.max(5000, rowCount));
       const killBatchSize = 1000;
+      // Leave the dead owner's real DB-clock lease intact. A shortened
+      // qualification-only TTL keeps the test bounded without admin DELETE.
+      const killLeaseTtlMs = 8_000;
       const killSeed = `${seed}-crash-kill`;
       const checkpointPath = join(tmpdir(), `spool-qualify-checkpoint-${runId}.json`);
       const childConfigPath = join(tmpdir(), `spool-qualify-child-${runId}.json`);
@@ -152,17 +156,34 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         // Write child config (contains password - temp file, removed after)
         const planId = `sha256:${'a'.repeat(64)}`;
         const sourceSnapshotId = `sha256:${'b'.repeat(64)}`;
-        await writeFile(childConfigPath, JSON.stringify({ pgConfig, table: killTable, migrationId: killMigrationId, planId, sourceSnapshotId, mappingRevision: 1, batchSize: killBatchSize, rowCount: killRowCount, payloadBytes, seed: killSeed, targetContractId, checkpointPath }), 'utf8');
+        await writeFile(childConfigPath, JSON.stringify({ pgConfig, table: killTable, migrationId: killMigrationId, planId, sourceSnapshotId, mappingRevision: 1, batchSize: killBatchSize, rowCount: killRowCount, payloadBytes, seed: killSeed, targetContractId, checkpointPath, leaseTtlMs: killLeaseTtlMs }), { encoding: 'utf8', mode: 0o600 });
 
         const childScript = fileURLToPath(new URL('./crash-child.js', import.meta.url));
         killChild = spawn(process.execPath, [childScript, '--config', childConfigPath], { stdio: ['ignore', 'pipe', 'pipe'] });
         let childReady = false;
+        let childLease = null;
         let childBatches = 0;
+        let stdoutPending = '';
         killChild.stdout.on('data', chunk => {
-          const text = chunk.toString();
-          if (text.includes('CRASH_CHILD_READY')) childReady = true;
-          const matches = text.match(/BATCH_COMMITTED/g);
-          if (matches) childBatches += matches.length;
+          stdoutPending += chunk.toString();
+          let newline;
+          while ((newline = stdoutPending.indexOf('\n')) >= 0) {
+            const line = stdoutPending.slice(0, newline).trim();
+            stdoutPending = stdoutPending.slice(newline + 1);
+            if (line.startsWith('CRASH_CHILD_READY ')) {
+              try {
+                const observed = JSON.parse(line.slice('CRASH_CHILD_READY '.length));
+                if (typeof observed.resource === 'string'
+                    && typeof observed.owner === 'string'
+                    && Number.isSafeInteger(observed.fencingToken)
+                    && Number.isFinite(Date.parse(observed.expiresAt))) {
+                  childLease = observed;
+                  childReady = true;
+                }
+              } catch { /* malformed child evidence never counts as READY */ }
+            }
+            if (line.startsWith('BATCH_COMMITTED ')) childBatches += 1;
+          }
         });
         let childStderr = '';
         killChild.stderr.on('data', chunk => { childStderr += chunk.toString(); });
@@ -181,7 +202,10 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
           try { killChild.kill('SIGKILL'); } catch {}
           throw new Error(`crash child did not become ready (stderr: ${childStderr.slice(0, 500)})`);
         }
-        evidenceWriter.appendRaw({ scenario, event: 'crash_child_ready', pid: killChild.pid });
+        if (childLease.resource !== `postgres:${targetRefKill.endpoint}:${targetRefKill.database}:${targetRefKill.schema}.${targetRefKill.table}`) {
+          throw new Error('Crash child lease resource differs from intended target');
+        }
+        evidenceWriter.appendRaw({ scenario, event: 'crash_child_ready', pid: killChild.pid, lease: childLease });
 
         // Ledger-observed progress: poll batch_ledger until at least one batch committed, then kill mid-flight
         killFaultAt = Date.now();
@@ -207,30 +231,109 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         } catch { checkpointBeforeKill = null; }
         evidenceWriter.appendRaw({ scenario, event: 'crash_kill_ledger_observed', ledgerCount, checkpoint: checkpointBeforeKill, pid: killChild.pid });
 
-        // Real OS kill (predicate-driven: after ledger-observed batch commit)
-        let killed = false;
-        if (killChild.exitCode == null) {
-          try {
-            killChild.kill('SIGKILL');
-            killed = true;
-          } catch {
-            try { killChild.kill('SIGTERM'); killed = true; } catch {}
-          }
-          evidenceWriter.appendRaw({ scenario, event: 'crash_kill_signal', signal: 'SIGKILL', pid: killChild.pid, ledgerCount });
+        // The fault is valid only when an actual SIGKILL kills a still-live
+        // writer after a durable ledger commit and before the last batch.
+        // A graceful stop, already-exited child, or completed workload
+        // cannot silently satisfy this adversarial proof.
+        const totalBatchesBeforeKill = Math.ceil(killRowCount / killBatchSize);
+        if (ledgerBeforeKill < 1 || ledgerBeforeKill >= totalBatchesBeforeKill) {
+          throw new Error(`SIGKILL was not armed mid-flight: ledger=${ledgerBeforeKill}/${totalBatchesBeforeKill}`);
         }
+        if (process.platform !== 'linux' || killChild.exitCode != null || !killChild.kill('SIGKILL')) {
+          throw new Error('Required live Linux SIGKILL could not be delivered');
+        }
+        evidenceWriter.appendRaw({ scenario, event: 'crash_kill_signal', signal: 'SIGKILL', pid: killChild.pid, ledgerCount });
         const exitInfo = await Promise.race([childExit, new Promise(r => setTimeout(() => r({ code: null, signal: 'TIMEOUT' }), 5000))]);
-        evidenceWriter.appendRaw({ scenario, event: 'crash_child_exit', ...exitInfo, killed, ledgerBeforeKill, checkpointBeforeKill });
+        if (exitInfo.signal !== 'SIGKILL') {
+          throw new Error(`SIGKILL was not independently observed at process exit: ${JSON.stringify(exitInfo)}`);
+        }
+        evidenceWriter.appendRaw({ scenario, event: 'crash_child_exit', ...exitInfo, killed: true, ledgerBeforeKill, checkpointBeforeKill });
 
-        // Lease held by killed process would block fresh acquisition for TTL; simulate lease expiry
+        // A fresh contender must be refused WHILE the dead owner's lease
+        // is still active. The PostgreSQL server clock, never a local
+        // sleep assumption, decides when the lease has naturally expired.
+        const broker2 = new CredentialBroker();
+        broker2.withSecret = async (ref, fn) => fn(pgConfig.password);
+        const { createPostgresTargetRuntime: createRt2 } = await import('../../../src/connectors/postgres/runtime.js');
+        const rt2 = createRt2({ credentialBroker: broker2, leaseTtlMs: 30_000 });
+        const exec2 = rt2.createExecution({ migrationId: killMigrationId, targetRef: targetRefKill });
+        const leaseClient = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
+        await leaseClient.connect();
+        const readLease = async () => {
+          const res = await leaseClient.query(
+            'SELECT owner, fencing_token::text AS token, expires_at, expires_at > clock_timestamp() AS active FROM spool_internal.execution_leases WHERE resource = $1',
+            [childLease.resource]
+          );
+          return res.rows[0] ?? null;
+        };
+        let lease2;
         try {
-          const leaseClean = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
-          await leaseClean.connect();
-          await leaseClean.query(`DELETE FROM spool_internal.execution_leases WHERE resource LIKE $1`, [`%${killTable}%`]);
-          await leaseClean.end();
-          evidenceWriter.appendRaw({ scenario, event: 'crash_lease_released_after_kill', table: killTable });
-        } catch {}
+          const initialLease = await readLease();
+          if (!initialLease || initialLease.owner !== childLease.owner
+              || BigInt(initialLease.token) !== BigInt(childLease.fencingToken)
+              || initialLease.active !== true) {
+            throw new Error('Dead-owner lease was missing, already expired, or changed before the refusal test');
+          }
+          let earlyRefused = false;
+          try {
+            await exec2.renewLease();
+          } catch (error) {
+            if (error?.code !== 'LEASE_HELD') throw error;
+            earlyRefused = true;
+          }
+          if (!earlyRefused) throw new Error('New worker acquired the still-active dead-owner lease');
+          evidenceWriter.appendRaw({ scenario, event: 'dead_owner_lease_refused_before_expiry', lease: initialLease });
 
-        // Fresh process must reconstruct durable checkpoint + ledger and complete without duplicates
+          const expiryDeadline = Date.now() + killLeaseTtlMs * 3;
+          let expiredLease = null;
+          while (Date.now() < expiryDeadline) {
+            const observed = await readLease();
+            if (!observed || observed.owner !== childLease.owner
+                || BigInt(observed.token) !== BigInt(childLease.fencingToken)) {
+              throw new Error('Dead-owner lease was altered during natural expiry wait');
+            }
+            if (observed.active === false) { expiredLease = observed; break; }
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          if (!expiredLease) throw new Error('Natural PostgreSQL lease expiry was not observed before deadline');
+          evidenceWriter.appendRaw({ scenario, event: 'dead_owner_lease_expired_naturally', lease: expiredLease });
+
+          lease2 = await exec2.renewLease();
+          if (lease2.resource !== childLease.resource
+              || lease2.owner === childLease.owner
+              || BigInt(lease2.fencingToken) <= BigInt(childLease.fencingToken)) {
+            throw new Error('Natural lease takeover did not advance the fencing token');
+          }
+          evidenceWriter.appendRaw({ scenario, event: 'lease_takeover_after_db_expiry', oldFence: childLease.fencingToken, newFence: lease2.fencingToken });
+        } finally {
+          await leaseClient.end();
+        }
+        // Prove that the old owner cannot use its previously valid fence
+        // after takeover. A raised but unrelated input error is not proof.
+        const staleTarget = new PostgresTarget({
+          targetRef: targetRefKill, credentialBroker: broker2,
+          requireFencing: true, fenceResource: childLease.resource,
+          fenceOwner: childLease.owner
+        });
+        let staleRefused = false;
+        try {
+          await staleTarget.commitBatch({
+            migrationId: killMigrationId, planId, sourceSnapshotId,
+            mappingRevision: 1, targetContractId,
+            batchIdentity: `sha256:${'e'.repeat(64)}`,
+            fencingToken: childLease.fencingToken,
+            rows: [{ id: killRowCount + 1, payload: 'stale-owner-canary' }]
+          });
+        } catch (error) {
+          if (!['STALE_FENCE', 'LEASE_EXPIRED'].includes(error?.code)) throw error;
+          staleRefused = true;
+        } finally {
+          staleTarget.close();
+        }
+        if (!staleRefused) throw new Error('Stale owner was able to mutate after lease takeover');
+        evidenceWriter.appendRaw({ scenario, event: 'old_fence_mutation_refused', oldFence: childLease.fencingToken });
+
+        // Fresh process must reconstruct durable checkpoint + ledger and complete without duplicates.
         killRecoveredAt = Date.now();
         const rtoMsKill = killRecoveredAt - killFaultAt;
         // Verify ledger has at least one entry (atomic batch ledger proved durable)
@@ -244,14 +347,8 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         } catch {}
 
         // Replay remaining batches via fresh runner (reconciles already-committed batches)
-        const { createPostgresTargetRuntime: createRt2 } = await import('../../../src/connectors/postgres/runtime.js');
         const { MigrationRunner: Runner2 } = await import('../../../src/execution/migration-runner.js');
         const { generateRow: genRow } = await import('../dataset.js');
-        const broker2 = new CredentialBroker();
-        broker2.withSecret = async (ref, fn) => fn(pgConfig.password);
-        const rt2 = createRt2({ credentialBroker: broker2 });
-        const exec2 = rt2.createExecution({ migrationId: killMigrationId, targetRef: targetRefKill });
-        const lease2 = await exec2.renewLease();
         const target2 = exec2.openTarget();
         const cpStore2 = {
           async load() {
@@ -294,10 +391,6 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         // Must have killed mid-flight (at least one batch committed, not all)
         if (ledgerBeforeKill < 1) {
           failures.push({ scenario, code: 'CRASH_KILL_NOT_MID_FLIGHT', message: `kill did not land mid-flight: ledger ${ledgerBeforeKill}`, expected: false, classification: 'CORRECTNESS', timestamp: new Date().toISOString() });
-        }
-        if (!killed || (exitInfo.signal !== 'SIGKILL' && exitInfo.signal !== 'SIGTERM' && exitInfo.code !== null)) {
-          // On Windows SIGKILL is emulated as termination; allow null signal with code 1? We already killed, so just warn if not signal
-          evidenceWriter.appendRaw({ scenario, event: 'crash_kill_signal_mismatch', exitInfo });
         }
         rpoRto.push({ faultId: 'os-kill-mid-copy', rtoMs: rtoMsKill, rpoRows: Math.max(0, rpoRows), finalVerification: passed ? 'VERIFIED' : 'MISMATCH', result: passed ? 'PASS' : 'FAIL', ledgerBeforeKill, ledgerFinal: finalLedger, recoveredBatches, checkpointBeforeKill, checkpointAfter });
         evidenceWriter.appendRaw({ scenario, event: 'crash_kill_recovery_completed', rtoMs: rtoMsKill, finalCount, finalLedger, passed, recoveredBatches });

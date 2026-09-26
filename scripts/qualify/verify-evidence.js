@@ -24,8 +24,10 @@
 import { join } from 'node:path';
 import { readdir, readFile } from 'node:fs/promises';
 import { verifySha256Sums } from './checksums.js';
-import { REQUIRED_SCENARIOS, requiredScenarioNames } from './scenarios.js';
+import { REQUIRED_SCENARIOS, requiredScenarioNames, isExpectedRefusal, isUnexpectedFailure } from './scenarios.js';
+import { allRequiredScenariosPassed } from './failure-classification.js';
 import { PROFILE_DEFINITIONS, qualifiesIndustrialScale } from './profiles.js';
+import { assertDevelopmentQualification } from './qualification-classes.js';
 
 function fail(message) {
   console.error(`Evidence verification failed: ${message}`);
@@ -54,8 +56,8 @@ async function main() {
   } catch (e) {
     fail(`manifest.json is missing or invalid: ${e.message}`);
   }
-  if (![3, 4].includes(manifest.schemaVersion)) {
-    fail(`unsupported manifest schemaVersion ${manifest.schemaVersion}; expected 3 or 4`);
+  if (![3, 4, 5].includes(manifest.schemaVersion)) {
+    fail(`unsupported manifest schemaVersion ${manifest.schemaVersion}; expected 3, 4 or 5`);
   }
   const pinned = Array.isArray(manifest.evidence?.files) ? [...manifest.evidence.files].sort() : null;
   if (!pinned || pinned.length !== onDisk.length || pinned.some((file, index) => file !== onDisk[index])) {
@@ -74,9 +76,13 @@ async function main() {
   if (failures.length !== summary.failures) {
     fail(`failures.json has ${failures.length} entries but manifest summary claims ${summary.failures}`);
   }
-  const unexpected = failures.filter(f => f?.classification !== 'EXPECTED_REFUSAL' && f?.expected === false);
+  const unexpected = failures.filter(isUnexpectedFailure);
   if (unexpected.length !== summary.unexpectedFailures) {
     fail(`unexpected failure count ${unexpected.length} disagrees with manifest summary ${summary.unexpectedFailures}`);
+  }
+  const expectedRefusals = failures.filter(isExpectedRefusal).length;
+  if (expectedRefusals !== summary.expectedRefusals) {
+    fail(`expected refusal count ${expectedRefusals} disagrees with manifest summary ${summary.expectedRefusals}`);
   }
 
   // 4. Required scenarios.
@@ -99,6 +105,9 @@ async function main() {
   if (manifest.result === 'PASS') {
     if (unexpected.length !== 0) fail('result PASS with unexpected failures present');
     if (!complete) fail('result PASS with an incomplete scenario set');
+    if (!allRequiredScenariosPassed(scenarios, requiredScenarioNames())) {
+      fail('result PASS with one or more failed required scenarios');
+    }
   } else if (manifest.result === 'FAIL') {
     if (unexpected.length === 0 && complete) fail('result FAIL with no unexpected failures and a complete set');
   } else if (manifest.result === 'INCOMPLETE') {
@@ -106,23 +115,41 @@ async function main() {
   } else {
     fail(`unknown manifest result ${manifest.result}`);
   }
-  if (typeof manifest.releaseGrade !== 'boolean') fail('manifest releaseGrade must be boolean');
-  if (manifest.releaseGrade === true && (manifest.result !== 'PASS' || manifest.dirty === true)) {
-    fail('releaseGrade=true requires result PASS on a clean tree');
-  }
-  if (manifest.schemaVersion >= 4) {
-    if (typeof manifest.industrialScaleGrade !== 'boolean') fail('v4 manifest industrialScaleGrade must be boolean');
-    const expectedIndustrialScaleGrade = qualifiesIndustrialScale({
-      result: manifest.result,
-      dirty: manifest.dirty,
-      profile: manifest.profile,
-      requestedProfile: manifest.requestedProfile
-    });
-    if (manifest.industrialScaleGrade !== expectedIndustrialScaleGrade) {
-      fail(`industrialScaleGrade=${manifest.industrialScaleGrade} is inconsistent with result/profile/tree; expected ${expectedIndustrialScaleGrade}`);
+  if (manifest.schemaVersion === 5) {
+    if (Object.hasOwn(manifest, 'releaseGrade') || Object.hasOwn(manifest, 'industrialScaleGrade')) {
+      fail('v5 evidence must not carry legacy boolean grade claims');
     }
-  } else if (manifest.industrialScaleGrade != null) {
-    fail('v3 evidence must not retroactively carry industrialScaleGrade; use schemaVersion 4');
+    try {
+      assertDevelopmentQualification(manifest.qualification, {
+        runId: manifest.qualificationRunId,
+        commitSha: manifest.commitSha,
+        profile: manifest.profile
+      });
+    } catch (error) {
+      fail(`invalid v5 qualification record: ${error.message}`);
+    }
+  } else {
+    // Legacy v3/v4 is integrity-readable but is ALWAYS NOT_QUALIFIED.
+    // It must not silently inherit a production class from old grade flags.
+    if (manifest.qualification != null) fail('legacy v3/v4 evidence cannot carry a qualification class');
+    if (typeof manifest.releaseGrade !== 'boolean') fail('legacy manifest releaseGrade must be boolean');
+    if (manifest.releaseGrade === true && (manifest.result !== 'PASS' || manifest.dirty === true)) {
+      fail('legacy releaseGrade=true requires result PASS on a clean tree');
+    }
+    if (manifest.schemaVersion === 4) {
+      if (typeof manifest.industrialScaleGrade !== 'boolean') fail('v4 manifest industrialScaleGrade must be boolean');
+      const expectedIndustrialScaleGrade = qualifiesIndustrialScale({
+        result: manifest.result,
+        dirty: manifest.dirty,
+        profile: manifest.profile,
+        requestedProfile: manifest.requestedProfile
+      });
+      if (manifest.industrialScaleGrade !== expectedIndustrialScaleGrade) {
+        fail(`legacy industrialScaleGrade=${manifest.industrialScaleGrade} inconsistent with workload evidence`);
+      }
+    } else if (manifest.industrialScaleGrade != null) {
+      fail('v3 evidence must not retroactively carry industrialScaleGrade');
+    }
   }
 
   // 7. Requested == effective for immutable names.
@@ -171,6 +198,9 @@ async function main() {
   for (const entry of REQUIRED_SCENARIOS) {
     const scenarioMetrics = metrics[entry.name];
     if (!scenarioMetrics || typeof scenarioMetrics !== 'object') fail(`metrics for ${entry.name} are missing`);
+    if (scenarioMetrics.status !== scenarios[entry.name]) {
+      fail(`metrics status for ${entry.name} disagrees with manifest (${scenarioMetrics.status} vs ${scenarios[entry.name]})`);
+    }
     const scenarioEffective = scenarioMetrics.effectiveConfig;
     if (!scenarioEffective || typeof scenarioEffective !== 'object') {
       fail(`${entry.name} did not record effectiveConfig`);
@@ -184,7 +214,7 @@ async function main() {
 
   console.log(`Evidence verified: ${dir}`);
   console.log(`Run: ${manifest.qualificationRunId} Profile: ${manifest.profile} Result: ${manifest.result}`);
-  console.log(`Release integrity grade: ${manifest.releaseGrade} Industrial scale grade: ${manifest.schemaVersion >= 4 ? manifest.industrialScaleGrade : 'not-claimed-v3'}`);
+  console.log(`Qualification class: ${manifest.schemaVersion === 5 ? manifest.qualification.class : 'NOT_QUALIFIED (legacy flags only)'}`);
   console.log(`Files: ${pinned.length} Checksums: OK Scenarios: ${requiredScenarioNames().length} Failures: ${failures.length} (unexpected: ${unexpected.length})`);
   if (manifest.dirty) console.log(`Warning: dirty worktree, releaseGrade=false`);
   process.exit(0);

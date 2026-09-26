@@ -5,13 +5,14 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { randomUUID } from 'node:crypto';
-import { resolveProfile, formatProfile, qualifiesIndustrialScale } from './profiles.js';
+import { resolveProfile, formatProfile } from './profiles.js';
+import { developmentQualification } from './qualification-classes.js';
 import { captureEnvironment } from './environment.js';
 import { EvidenceWriter } from './evidence-writer.js';
 import { ResourceSampler } from './sampler.js';
 import { datasetId } from './dataset.js';
 import { writeSha256Sums } from './checksums.js';
-import { REQUIRED_SCENARIOS, requiredScenarioNames, foldScenarioFailures } from './scenarios.js';
+import { REQUIRED_SCENARIOS, requiredScenarioNames, foldScenarioFailures, isUnexpectedFailure, isExpectedRefusal, isLogicalWalLevel, scenarioCanPass } from './scenarios.js';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -95,7 +96,6 @@ async function main() {
   // Environment capture
   const { env, digest: envDigest } = await captureEnvironment({ pgConfig: envPgConfig });
   const gitDirty = env.git.dirty;
-  const releaseGrade = !gitDirty;
   const startTime = new Date().toISOString();
   const startMonotonic = process.hrtime.bigint();
   const seed = `qualify-${runId}-${profile.name}`;
@@ -145,7 +145,7 @@ async function main() {
     const c = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
     await c.connect();
     const walRes = await c.query(`SHOW wal_level`);
-    if (!['logical', 'replica'].includes(walRes.rows[0].wal_level) && profile.cdcDurationSeconds > 0) {
+    if (!isLogicalWalLevel(walRes.rows[0]?.wal_level) && profile.cdcDurationSeconds > 0) {
       preflightFailures.push({ scenario: 'preflight', code: 'WAL_LEVEL_NOT_LOGICAL', message: `wal_level=${walRes.rows[0].wal_level}, CDC requires logical`, expected: false, classification: 'ENVIRONMENT', timestamp: new Date().toISOString() });
     }
     await c.end();
@@ -221,17 +221,36 @@ async function main() {
         }
       }
       if (downscaled.length) failures.push(...downscaled);
-      const status = folded.status === 'FAIL' || downscaled.length ? 'FAIL' : 'PASS';
+      // A scenario can report FAIL even with an empty failures array. Never
+      // overwrite that signal with a folded PASS.
+      const reportedStatus = result?.status ?? null;
+      const reportedMetricStatus = result?.metrics?.status ?? null;
+      if ((reportedStatus != null && reportedStatus !== 'PASS')
+          || (reportedMetricStatus != null && reportedMetricStatus !== 'PASS')) {
+        const reported = { scenario: name, code: 'SCENARIO_REPORTED_FAILURE',
+          message: `Scenario reported status ${reportedStatus ?? reportedMetricStatus} despite its failure list`,
+          expected: false, classification: 'HARNESS', timestamp: new Date().toISOString() };
+        failures.push(reported);
+      }
+      const status = scenarioCanPass({
+        foldedStatus: folded.status, reportedStatus, reportedMetricStatus,
+        profileFailures: downscaled.length
+      }) ? 'PASS' : 'FAIL';
       metrics[name] = { ...result?.metrics, durationMs: ms, status };
       if (status === 'FAIL') overallResult = 'FAIL';
       return result;
     } catch (e) {
       const ms = Number(process.hrtime.bigint() - start) / 1e6;
       evidenceWriter.appendRaw({ scenario: name, event: 'scenario_failed', durationMs: ms, error: e.message, code: e.code ?? 'UNKNOWN', timestamp: new Date().toISOString() });
-      const classification = e.code === 'ENVIRONMENT_UNQUALIFIED' ? 'ENVIRONMENT' : (e.expected ? 'EXPECTED_REFUSAL' : 'CORRECTNESS');
-      failures.push({ scenario: name, code: e.code ?? 'UNKNOWN', message: e.message, expected: !!e.expected, classification, timestamp: new Date().toISOString() });
-      metrics[name] = { status: e.expected ? 'PASS' : 'FAIL', durationMs: ms, error: e.message, code: e.code };
-      if (!e.expected) overallResult = 'FAIL';
+      // An expected refusal must be asserted inside a *completed* scenario.
+      // A thrown exception aborted the scenario and cannot itself prove PASS.
+      const classification = e.code === 'ENVIRONMENT_UNQUALIFIED' ? 'ENVIRONMENT'
+        : (e.expected === true ? 'HARNESS' : 'CORRECTNESS');
+      failures.push({ scenario: name, code: e.code ?? 'UNKNOWN', message: e.message,
+        expected: false, sourceMarkedExpected: e.expected === true,
+        classification, timestamp: new Date().toISOString() });
+      metrics[name] = { status: 'FAIL', durationMs: ms, error: e.message, code: e.code };
+      overallResult = 'FAIL';
       return null;
     }
   }
@@ -267,7 +286,6 @@ async function main() {
 
   // Write metrics and failures
   await evidenceWriter.writeJson('metrics.json', metrics);
-  await evidenceWriter.writeJson('failures.json', failures);
 
   // Close writer before checksums (ensure raw.jsonl flushed)
   await evidenceWriter.close();
@@ -297,13 +315,16 @@ async function main() {
   if (stubEvents > 0) {
     failures.push({ scenario: 'evidence', code: 'STUB_EVENTS_PRESENT', message: `${stubEvents} stub events recorded; stubs never pass`, expected: false, classification: 'HARNESS', timestamp: new Date().toISOString() });
     overallResult = 'FAIL';
-    await writeFile(join(runDir, 'failures.json'), JSON.stringify(failures, null, 2), 'utf8');
   }
+
+  // The raw-event integrity scan can append new failures. Serialize the
+  // final ledger of failures only AFTER the scan, not before it.
+  await writeFile(join(runDir, 'failures.json'), JSON.stringify(failures, null, 2), 'utf8');
 
   const endTime = new Date().toISOString();
   const durationMs = Number(process.hrtime.bigint() - startMonotonic) / 1e6;
 
-  // Manifest (schemaVersion 4): evidence.files is the complete sorted file
+  // Manifest (schemaVersion 5): evidence.files is the complete sorted file
   // set excluding only sha256sums.txt itself — a file cannot contain its own
   // checksum, so checksums live in sha256sums.txt alone and the manifest pins
   // the set, never stale embedded sums. The verifier enforces set equality.
@@ -311,9 +332,9 @@ async function main() {
   const evidenceFiles = [...(await readdir(runDir)), 'manifest.json', 'report.md'].sort();
   const scenarioStatus = {};
   for (const name of requiredScenarioNames()) scenarioStatus[name] = metrics[name]?.status ?? 'MISSING';
-  const unexpectedFailures = failures.filter(f => f.classification !== 'EXPECTED_REFUSAL' && f.expected === false).length;
+  const unexpectedFailures = failures.filter(isUnexpectedFailure).length;
   const manifest = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     qualificationRunId: runId,
     suiteVersion: 'industrial-postgres-v1',
     repository: 'dharan1007/spool',
@@ -332,16 +353,12 @@ async function main() {
     environmentDigest: envDigest,
     configDigest: `sha256:${configDigest}`,
     result: overallResult,
-    // releaseGrade is an integrity/reproducibility claim for THIS workload.
-    // It is intentionally distinct from industrial-scale qualification:
-    // CI/SMALL/MEDIUM/LARGE can produce release-grade evidence, but only the
-    // immutable 1B-row / 24h INDUSTRIAL profile may claim industrial scale.
-    releaseGrade: overallResult === 'PASS' && releaseGrade,
-    industrialScaleGrade: qualifiesIndustrialScale({
-      result: overallResult,
-      dirty: gitDirty,
-      profile: profile.name,
-      requestedProfile: config.requestedProfile
+    // A workload PASS is NOT a production certification. Qualification
+    // requires independent mandatory CI, adversarial/security evidence and
+    // a trusted class attestation. This producer can only emit NOT_QUALIFIED.
+    qualification: developmentQualification({
+      runId, commitSha: process.env.SPOOL_COMMIT_SHA ?? env.git.sha ?? 'unknown',
+      profile: profile.name
     }),
     evidence: {
       files: evidenceFiles
@@ -351,7 +368,7 @@ async function main() {
       totalScenarios: requiredScenarioNames().length,
       scenariosRun: Object.values(scenarioStatus).filter(status => status === 'PASS' || status === 'FAIL').length,
       failures: failures.length,
-      expectedRefusals: failures.filter(f => f.classification === 'EXPECTED_REFUSAL').length,
+      expectedRefusals: failures.filter(isExpectedRefusal).length,
       unexpectedFailures,
       stubs: stubEvents
     }
@@ -359,14 +376,7 @@ async function main() {
   // Report (written before the manifest so the manifest's file set is
   // complete; report content pins the same locals the manifest records).
   const commitSha = process.env.SPOOL_COMMIT_SHA ?? env.git.sha ?? 'unknown';
-  const gradeReason = manifest.result === 'PASS'
-    ? (manifest.releaseGrade ? null : (gitDirty ? 'DIRTY_WORKTREE' : 'UNKNOWN'))
-    : `RESULT_${manifest.result}`;
-  const industrialScaleReason = manifest.industrialScaleGrade
-    ? null
-    : (profile.name === 'INDUSTRIAL'
-        ? (manifest.result !== 'PASS' ? `RESULT_${manifest.result}` : (gitDirty ? 'DIRTY_WORKTREE' : 'NOT_IMMUTABLE_INDUSTRIAL'))
-        : `PROFILE_${profile.name}_IS_NOT_INDUSTRIAL_SCALE`);
+
   const report = `# SPOOL PostgreSQL Qualification
 
 Run: ${runId}
@@ -377,8 +387,10 @@ Seed: ${seed}
 Environment: ${env.os.platform} ${env.os.arch} Node ${env.node.version} PG ${env.pg.serverVersion ?? 'unknown'}
 Duration: ${(durationMs / 1000).toFixed(1)}s
 Result: **${overallResult}**
-Release integrity grade: ${manifest.releaseGrade ? 'true' : 'false'}${gradeReason ? ` (${gradeReason})` : ''}
-Industrial scale grade: ${manifest.industrialScaleGrade ? 'true' : 'false'}${industrialScaleReason ? ` (${industrialScaleReason})` : ''}
+Qualification class: **${manifest.qualification.class}**
+Qualification evidence type: ${manifest.qualification.evidenceType}
+Qualification denial reasons: ${manifest.qualification.reasonCodes.join(', ')}
+Workload PASS and clean worktree alone never authorize promotion.
 
 ## Summary
 - Scenarios: ${manifest.summary.totalScenarios} (run: ${manifest.summary.scenariosRun})
@@ -409,7 +421,7 @@ ${failures.length === 0 ? 'None' : failures.map(f => `- [${f.classification}] ${
 > Generated at ${new Date().toISOString()} by industrial-postgres qualification harness.
 `;
   await writeFile(join(runDir, 'report.md'), report, 'utf8');
-  await writeFile(join(runDir, 'manifest.json'), JSON.stringify({ ...manifest, releaseGradeReason: gradeReason }, null, 2), 'utf8');
+  await writeFile(join(runDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
 
   // Single checksums write, last: covers every evidence file including the
   // manifest and the report. The manifest pins the set; this file pins
@@ -423,6 +435,7 @@ ${failures.length === 0 ? 'None' : failures.map(f => `- [${f.classification}] ${
   console.log(`Duration: ${(durationMs / 1000).toFixed(1)}s`);
   if (failures.length) console.log(`Failures: ${failures.length} (see failures.json)`);
   console.log(`Report: ${join(runDir, 'report.md')}`);
+  console.log(`Qualification class: ${manifest.qualification.class} (development harness only)`);
 
   const exitCode = overallResult === 'PASS' ? 0 : overallResult === 'FAIL' ? 1 : 3;
   process.exit(exitCode);
