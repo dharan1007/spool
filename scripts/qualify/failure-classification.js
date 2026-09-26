@@ -34,6 +34,14 @@ export function scenarioCanPass({ foldedStatus, reportedStatus = null, reportedM
     && profileFailures === 0;
 }
 
+// Every required scenario must report PASS; terminal FAIL is not a pass,
+// even when a forged/defective failure ledger contains no unexpected entries.
+export function allRequiredScenariosPassed(scenarios, names) {
+  return Array.isArray(names) && names.length > 0
+    && scenarios !== null && typeof scenarios === 'object'
+    && names.every(name => scenarios[name] === 'PASS');
+}
+
 // wal_level=replica can support physical replication but not the logical
 // decoding required by SPOOL's PostgreSQL CDC qualification.
 export function isLogicalWalLevel(value) {
