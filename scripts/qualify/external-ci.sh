@@ -92,6 +92,10 @@ run_gate codeql-findings node --input-type=module -e '
   if (findings.length !== 0) { console.error(`${findings.length} CodeQL findings; refusing a clean gate`); process.exit(1); }
 ' "$evidence/codeql.sarif"
 
+# Qualification evidence must still be bound to the same clean tree after
+# all tools have run; a tool that mutates source invalidates the candidate.
+run_gate source-integrity bash -c '[[ $(git rev-parse HEAD) == "$SPOOL_COMMIT_SHA" && -z $(git status --porcelain --untracked-files=all) ]]'
+
 # Only this exact local Linux/PG configuration ran here. Windows/macOS, true
 # kill/failover, scale and enterprise IAM must be separately qualified.
 printf 'UTC_FINISHED=%s\nLOCAL_LINUX_PG_GATES=PASS\nQUALIFICATION_CLAIM=DEVELOPMENT_EVIDENCE_ONLY\nRELEASE_AUTHORIZED=NO\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$evidence/manifest.txt"
