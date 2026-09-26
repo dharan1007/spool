@@ -38,20 +38,6 @@ export function requiredScenarioNames() {
   return Object.freeze(REQUIRED_SCENARIOS.map(entry => entry.name));
 }
 
-// Central failure-folding rule shared by the harness: a returned failure is
-// unexpected unless it is an explicitly expected refusal. Unexpected folds
-// to FAIL; anything else stays PASS. Unit-tested: this predicate is what
-// stops returned failures from passing silently.
-export function isUnexpectedFailure(failure) {
-  return failure?.expected !== true && failure?.classification !== 'EXPECTED_REFUSAL';
-}
-
-export function foldScenarioFailures(returnedFailures) {
-  const list = Array.isArray(returnedFailures) ? [...returnedFailures] : [];
-  const unexpected = list.filter(isUnexpectedFailure);
-  return Object.freeze({
-    failures: Object.freeze(list),
-    unexpected: Object.freeze([...unexpected]),
-    status: unexpected.length ? 'FAIL' : 'PASS'
-  });
-}
+// The same fail-closed expected-refusal predicate is used by the harness
+// and by the independent evidence verifier. Do not replicate its logic.
+export { isExpectedRefusal, isUnexpectedFailure, foldScenarioFailures, isLogicalWalLevel } from './failure-classification.js';
