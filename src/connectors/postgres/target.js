@@ -3,6 +3,7 @@ import { sha256Canonical } from '../../platform/canonical-json.js';
 import { from as copyFrom } from 'pg-copy-streams';
 import { normalizePostgresRow, normalizePostgresSchema, normalizePostgresValue, postgresContentKeyId, postgresContentRowHash } from './row-codec.js';
 import { withPostgresClient } from './connection.js';
+import { assertExactPostgresAffectedRows, countExactPostgresUpserts } from './exact-cardinality.js';
 import { POSTGRES_METADATA_SCHEMA, postgresTargetContractId } from './preflight.js';
 
 const LEDGER_TABLE = 'batch_ledger';
@@ -432,32 +433,44 @@ async function checkRepairFence(client, target, fencingToken, operation = 'repai
   }
 }
 
-// Live contract re-validation is a catalog scan (~50ms): unusable per CDC
-// transaction at volume. Cache the last proven contract per table for
-// CONTRACT_CACHE_TTL_MS; every commit still validates, against a contract
-// proven fresh within the TTL. A mid-window DDL change is caught at the next
-// refresh, and the cutover proofs re-resolve the contract from scratch — so
-// no commit ever relies on an unboundedly stale contract.
-const CONTRACT_CACHE_TTL_MS = 10_000;
-const provenContracts = new Map();
-
+// The historical cache is no longer an authority source. A target contract
+// must be attested inside each mutating transaction while a DDL-conflicting
+// relation lock is held until COMMIT or ROLLBACK. That sacrifices CDC peak
+// throughput rather than allowing a TOCTOU window to issue COMMITTED_EXACT.
 function contractCacheKey(targetRef) {
-  return `${targetRef.database ?? ''}.${targetRef.schema ?? ''}.${targetRef.table ?? ''}`;
+  return sha256Canonical('spool-postgres-target-identity-v1', {
+    connector: targetRef.connector ?? 'postgres',
+    endpoint: targetRef.endpoint ?? null,
+    connectionId: targetRef.connectionId ?? null,
+    user: targetRef.identity?.user ?? null,
+    database: targetRef.database ?? null,
+    schema: targetRef.schema ?? null,
+    table: targetRef.table ?? null
+  });
 }
 
 async function checkRepairContract(client, target, targetContractId, operation = 'repair') {
-  if (targetContractId == null) return;
+  if (targetContractId == null) {
+    if (target.requireFencing) {
+      fail('TARGET_CONTRACT_REQUIRED', `Fenced PostgreSQL ${operation} requires an approved live target contract`);
+    }
+    return;
+  }
   requiredHash('targetContractId', targetContractId);
-  const key = contractCacheKey(target.targetRef);
-  const cached = provenContracts.get(key);
-  if (cached && cached.contractId === targetContractId && Date.now() - cached.at < CONTRACT_CACHE_TTL_MS) return;
+  const quotedTable = `${quoteIdentifier(target.targetRef.schema)}.${quoteIdentifier(target.targetRef.table)}`;
+  // SHARE UPDATE EXCLUSIVE conflicts with CREATE TRIGGER, index DDL, and
+  // ALTER TABLE; normal ROW EXCLUSIVE DML remains allowed. PostgreSQL retains
+  // this relation lock through the caller's transaction/ledger COMMIT.
+  await client.query(`LOCK TABLE ${quotedTable} IN SHARE UPDATE EXCLUSIVE MODE`);
   const actualTargetContractId = await postgresTargetContractId(client, target.targetRef);
   if (actualTargetContractId !== targetContractId) {
-    provenContracts.delete(key);
     await client.query('ROLLBACK');
-    fail('TARGET_CONTRACT_CHANGED', `Live PostgreSQL target contract changed before ${operation}`, { expectedTargetContractId: targetContractId, actualTargetContractId });
+    fail('TARGET_CONTRACT_CHANGED', `Live PostgreSQL target contract changed before ${operation}`, {
+      expectedTargetContractId: targetContractId,
+      actualTargetContractId,
+      targetIdentityDigest: contractCacheKey(target.targetRef)
+    });
   }
-  provenContracts.set(key, { contractId: actualTargetContractId, at: Date.now() });
 }
 
 async function findLedgerEntry(client, targetRef, batchIdentity) {
@@ -550,7 +563,8 @@ async function insertRows(client, targetRef, columns, rows) {
       });
       return `(${placeholders.join(', ')})`;
     });
-    await client.query(`INSERT INTO ${quotedTable} (${quotedColumns}) VALUES ${groups.join(', ')}`, values);
+    const written = await client.query(`INSERT INTO ${quotedTable} (${quotedColumns}) VALUES ${groups.join(', ')}`, values);
+    assertExactPostgresAffectedRows(written, chunk.length, 'insert');
   }
 }
 
@@ -815,12 +829,11 @@ export class PostgresTarget {
             `INSERT INTO ${quotedTable} (${quotedColumns}) VALUES ${groups.join(', ')} ON CONFLICT ${conflictTarget} ${action} RETURNING (xmax = 0) AS inserted`,
             values
           );
-          for (const row of written.rows) {
-            if (row.inserted === true) inserted += 1;
-            else updated += 1;
-          }
+          const pieceCounts = countExactPostgresUpserts(written, chunk.length);
+          inserted += pieceCounts.inserted;
+          updated += pieceCounts.updated;
         }
-        if (inserted + updated !== keyed.length && updatable.length > 0) {
+        if (inserted + updated !== keyed.length) {
           await client.query('ROLLBACK');
           fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL upsert did not return exact per-row evidence', { inserted, updated, expected: keyed.length });
         }
@@ -1085,14 +1098,9 @@ export class PostgresTarget {
               `INSERT INTO ${quotedTable} (${quotedColumns}) VALUES ${groups.join(', ')} ON CONFLICT ${conflictTarget} ${action} RETURNING (xmax = 0) AS inserted`,
               values
             );
-            for (const row of written.rows) {
-              if (row.inserted === true) inserted += 1;
-              else updated += 1;
-            }
-          }
-          if (updatable.length > 0 && inserted + updated < 1) {
-            await client.query('ROLLBACK');
-            fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL CDC upsert chunk returned no per-row evidence', context);
+            const pieceCounts = countExactPostgresUpserts(written, piece.length);
+            inserted += pieceCounts.inserted;
+            updated += pieceCounts.updated;
           }
         };
 
@@ -1197,6 +1205,11 @@ export class PostgresTarget {
           fail('TARGET_COMMIT_UNPROVEN', 'CDC transaction stream ended before the declared mutation count', { applied: appliedMutations, declared: mutationCount });
         }
         await flushUpserts();
+        if (inserted + updated + deleted + skippedMissing !== mutationCount) {
+          fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL CDC mutation effects do not equal the approved transaction count', {
+            expected: mutationCount, inserted, updated, deleted, skippedMissing
+          });
+        }
 
         if (await this._hitFault('CDC_TX_BEFORE_LEDGER', context)) {
           await client.query('ROLLBACK');
