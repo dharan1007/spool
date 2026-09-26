@@ -46,5 +46,5 @@ jobs:
           SPOOL_TEST_POSTGRES_DATABASE: spooltest
           SPOOL_TEST_POSTGRES_USER: spooltest
           SPOOL_TEST_PG_PASSWORD: spooltest-password
-          SPOOL_EXTERNAL_EVIDENCE_ROOT: ${{ runner.temp }}
+          SPOOL_EXTERNAL_EVIDENCE_ROOT: /var/lib/spool-qualification/evidence
         run: bash scripts/qualify/external-ci.sh "$GITHUB_SHA"
