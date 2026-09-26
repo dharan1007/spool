@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { lstat, readFile, readdir, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const SUMS_FILE = 'sha256sums.txt';
@@ -27,11 +27,16 @@ async function listedEvidenceFiles(dir) {
 // Stream the input: an industrial evidence bundle may contain multi-gigabyte
 // raw event logs, and verification must not materialize them in heap memory.
 export async function computeFileSha256(path) {
-  const info = await lstat(path);
-  if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Not a regular evidence file: ${path}`);
-  const hash = createHash('sha256');
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
-  return hash.digest('hex');
+  // Pin the file descriptor before hashing: a symlink swap between lstat
+  // and createReadStream must never change which inode is authenticated.
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) throw new Error(`Not a regular evidence file: ${path}`);
+    const hash = createHash('sha256');
+    for await (const chunk of file.createReadStream({ autoClose: false })) hash.update(chunk);
+    return hash.digest('hex');
+  } finally { await file.close(); }
 }
 
 export async function writeSha256Sums(dir) {
