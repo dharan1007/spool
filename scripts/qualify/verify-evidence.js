@@ -24,7 +24,8 @@
 import { join } from 'node:path';
 import { readdir, readFile } from 'node:fs/promises';
 import { verifySha256Sums } from './checksums.js';
-import { REQUIRED_SCENARIOS, requiredScenarioNames } from './scenarios.js';
+import { REQUIRED_SCENARIOS, requiredScenarioNames, isExpectedRefusal, isUnexpectedFailure } from './scenarios.js';
+import { allRequiredScenariosPassed } from './failure-classification.js';
 import { PROFILE_DEFINITIONS, qualifiesIndustrialScale } from './profiles.js';
 
 function fail(message) {
@@ -74,9 +75,13 @@ async function main() {
   if (failures.length !== summary.failures) {
     fail(`failures.json has ${failures.length} entries but manifest summary claims ${summary.failures}`);
   }
-  const unexpected = failures.filter(f => f?.classification !== 'EXPECTED_REFUSAL' && f?.expected === false);
+  const unexpected = failures.filter(isUnexpectedFailure);
   if (unexpected.length !== summary.unexpectedFailures) {
     fail(`unexpected failure count ${unexpected.length} disagrees with manifest summary ${summary.unexpectedFailures}`);
+  }
+  const expectedRefusals = failures.filter(isExpectedRefusal).length;
+  if (expectedRefusals !== summary.expectedRefusals) {
+    fail(`expected refusal count ${expectedRefusals} disagrees with manifest summary ${summary.expectedRefusals}`);
   }
 
   // 4. Required scenarios.
@@ -99,6 +104,9 @@ async function main() {
   if (manifest.result === 'PASS') {
     if (unexpected.length !== 0) fail('result PASS with unexpected failures present');
     if (!complete) fail('result PASS with an incomplete scenario set');
+    if (!allRequiredScenariosPassed(scenarios, requiredScenarioNames())) {
+      fail('result PASS with one or more failed required scenarios');
+    }
   } else if (manifest.result === 'FAIL') {
     if (unexpected.length === 0 && complete) fail('result FAIL with no unexpected failures and a complete set');
   } else if (manifest.result === 'INCOMPLETE') {
@@ -171,6 +179,9 @@ async function main() {
   for (const entry of REQUIRED_SCENARIOS) {
     const scenarioMetrics = metrics[entry.name];
     if (!scenarioMetrics || typeof scenarioMetrics !== 'object') fail(`metrics for ${entry.name} are missing`);
+    if (scenarioMetrics.status !== scenarios[entry.name]) {
+      fail(`metrics status for ${entry.name} disagrees with manifest (${scenarioMetrics.status} vs ${scenarios[entry.name]})`);
+    }
     const scenarioEffective = scenarioMetrics.effectiveConfig;
     if (!scenarioEffective || typeof scenarioEffective !== 'object') {
       fail(`${entry.name} did not record effectiveConfig`);

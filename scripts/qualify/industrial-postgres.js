@@ -11,7 +11,7 @@ import { EvidenceWriter } from './evidence-writer.js';
 import { ResourceSampler } from './sampler.js';
 import { datasetId } from './dataset.js';
 import { writeSha256Sums } from './checksums.js';
-import { REQUIRED_SCENARIOS, requiredScenarioNames, foldScenarioFailures } from './scenarios.js';
+import { REQUIRED_SCENARIOS, requiredScenarioNames, foldScenarioFailures, isUnexpectedFailure, isExpectedRefusal, isLogicalWalLevel, scenarioCanPass } from './scenarios.js';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -145,7 +145,7 @@ async function main() {
     const c = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
     await c.connect();
     const walRes = await c.query(`SHOW wal_level`);
-    if (!['logical', 'replica'].includes(walRes.rows[0].wal_level) && profile.cdcDurationSeconds > 0) {
+    if (!isLogicalWalLevel(walRes.rows[0]?.wal_level) && profile.cdcDurationSeconds > 0) {
       preflightFailures.push({ scenario: 'preflight', code: 'WAL_LEVEL_NOT_LOGICAL', message: `wal_level=${walRes.rows[0].wal_level}, CDC requires logical`, expected: false, classification: 'ENVIRONMENT', timestamp: new Date().toISOString() });
     }
     await c.end();
@@ -221,17 +221,36 @@ async function main() {
         }
       }
       if (downscaled.length) failures.push(...downscaled);
-      const status = folded.status === 'FAIL' || downscaled.length ? 'FAIL' : 'PASS';
+      // A scenario can report FAIL even with an empty failures array. Never
+      // overwrite that signal with a folded PASS.
+      const reportedStatus = result?.status ?? null;
+      const reportedMetricStatus = result?.metrics?.status ?? null;
+      if ((reportedStatus != null && reportedStatus !== 'PASS')
+          || (reportedMetricStatus != null && reportedMetricStatus !== 'PASS')) {
+        const reported = { scenario: name, code: 'SCENARIO_REPORTED_FAILURE',
+          message: `Scenario reported status ${reportedStatus ?? reportedMetricStatus} despite its failure list`,
+          expected: false, classification: 'HARNESS', timestamp: new Date().toISOString() };
+        failures.push(reported);
+      }
+      const status = scenarioCanPass({
+        foldedStatus: folded.status, reportedStatus, reportedMetricStatus,
+        profileFailures: downscaled.length
+      }) ? 'PASS' : 'FAIL';
       metrics[name] = { ...result?.metrics, durationMs: ms, status };
       if (status === 'FAIL') overallResult = 'FAIL';
       return result;
     } catch (e) {
       const ms = Number(process.hrtime.bigint() - start) / 1e6;
       evidenceWriter.appendRaw({ scenario: name, event: 'scenario_failed', durationMs: ms, error: e.message, code: e.code ?? 'UNKNOWN', timestamp: new Date().toISOString() });
-      const classification = e.code === 'ENVIRONMENT_UNQUALIFIED' ? 'ENVIRONMENT' : (e.expected ? 'EXPECTED_REFUSAL' : 'CORRECTNESS');
-      failures.push({ scenario: name, code: e.code ?? 'UNKNOWN', message: e.message, expected: !!e.expected, classification, timestamp: new Date().toISOString() });
-      metrics[name] = { status: e.expected ? 'PASS' : 'FAIL', durationMs: ms, error: e.message, code: e.code };
-      if (!e.expected) overallResult = 'FAIL';
+      // An expected refusal must be asserted inside a *completed* scenario.
+      // A thrown exception aborted the scenario and cannot itself prove PASS.
+      const classification = e.code === 'ENVIRONMENT_UNQUALIFIED' ? 'ENVIRONMENT'
+        : (e.expected === true ? 'HARNESS' : 'CORRECTNESS');
+      failures.push({ scenario: name, code: e.code ?? 'UNKNOWN', message: e.message,
+        expected: false, sourceMarkedExpected: e.expected === true,
+        classification, timestamp: new Date().toISOString() });
+      metrics[name] = { status: 'FAIL', durationMs: ms, error: e.message, code: e.code };
+      overallResult = 'FAIL';
       return null;
     }
   }
@@ -267,7 +286,6 @@ async function main() {
 
   // Write metrics and failures
   await evidenceWriter.writeJson('metrics.json', metrics);
-  await evidenceWriter.writeJson('failures.json', failures);
 
   // Close writer before checksums (ensure raw.jsonl flushed)
   await evidenceWriter.close();
@@ -297,8 +315,11 @@ async function main() {
   if (stubEvents > 0) {
     failures.push({ scenario: 'evidence', code: 'STUB_EVENTS_PRESENT', message: `${stubEvents} stub events recorded; stubs never pass`, expected: false, classification: 'HARNESS', timestamp: new Date().toISOString() });
     overallResult = 'FAIL';
-    await writeFile(join(runDir, 'failures.json'), JSON.stringify(failures, null, 2), 'utf8');
   }
+
+  // The raw-event integrity scan can append new failures. Serialize the
+  // final ledger of failures only AFTER the scan, not before it.
+  await writeFile(join(runDir, 'failures.json'), JSON.stringify(failures, null, 2), 'utf8');
 
   const endTime = new Date().toISOString();
   const durationMs = Number(process.hrtime.bigint() - startMonotonic) / 1e6;
@@ -311,7 +332,7 @@ async function main() {
   const evidenceFiles = [...(await readdir(runDir)), 'manifest.json', 'report.md'].sort();
   const scenarioStatus = {};
   for (const name of requiredScenarioNames()) scenarioStatus[name] = metrics[name]?.status ?? 'MISSING';
-  const unexpectedFailures = failures.filter(f => f.classification !== 'EXPECTED_REFUSAL' && f.expected === false).length;
+  const unexpectedFailures = failures.filter(isUnexpectedFailure).length;
   const manifest = {
     schemaVersion: 4,
     qualificationRunId: runId,
@@ -351,7 +372,7 @@ async function main() {
       totalScenarios: requiredScenarioNames().length,
       scenariosRun: Object.values(scenarioStatus).filter(status => status === 'PASS' || status === 'FAIL').length,
       failures: failures.length,
-      expectedRefusals: failures.filter(f => f.classification === 'EXPECTED_REFUSAL').length,
+      expectedRefusals: failures.filter(isExpectedRefusal).length,
       unexpectedFailures,
       stubs: stubEvents
     }
