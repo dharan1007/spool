@@ -40,4 +40,4 @@ export function requiredScenarioNames() {
 
 // The same fail-closed expected-refusal predicate is used by the harness
 // and by the independent evidence verifier. Do not replicate its logic.
-export { isExpectedRefusal, isUnexpectedFailure, foldScenarioFailures, isLogicalWalLevel } from './failure-classification.js';
+export { isExpectedRefusal, isUnexpectedFailure, foldScenarioFailures, isLogicalWalLevel, scenarioCanPass } from './failure-classification.js';
