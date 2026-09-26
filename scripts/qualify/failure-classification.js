@@ -24,6 +24,16 @@ export function foldScenarioFailures(returnedFailures) {
   });
 }
 
+// A scenario's own reported result is an independent failure signal. It must
+// not be overwritten by the harness's folded-failures calculation.
+export function scenarioCanPass({ foldedStatus, reportedStatus = null, reportedMetricStatus = null, profileFailures = 0 } = {}) {
+  return foldedStatus === 'PASS'
+    && (reportedStatus == null || reportedStatus === 'PASS')
+    && (reportedMetricStatus == null || reportedMetricStatus === 'PASS')
+    && Number.isSafeInteger(profileFailures)
+    && profileFailures === 0;
+}
+
 // wal_level=replica can support physical replication but not the logical
 // decoding required by SPOOL's PostgreSQL CDC qualification.
 export function isLogicalWalLevel(value) {
