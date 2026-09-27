@@ -1140,6 +1140,15 @@ export class PostgresTarget {
         };
 
         const applyMutation = async mutation => {
+          // An async source can lie about its declared mutationCount. Refuse
+          // the FIRST excess item before executing it, rather than keeping
+          // a database transaction open for an unbounded source iterator.
+          if (appliedMutations >= mutationCount) {
+            await client.query('ROLLBACK');
+            fail('CDC_TRANSACTION_BUDGET_EXCEEDED', 'CDC source emitted more mutations than its declared transaction count', {
+              expected: mutationCount, alreadyApplied: appliedMutations
+            });
+          }
           if (!mutation || typeof mutation !== 'object' || Array.isArray(mutation)) {
             await client.query('ROLLBACK');
             fail('INVALID_CDC_TRANSACTION', 'CDC transaction mutations must be objects', context);

@@ -210,3 +210,27 @@ test('reconnect abandons the in-flight transaction and allows clean re-delivery'
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+
+test('bounded ordered CDC hash rejects invalid budgets before consuming a source iterator', async () => {
+  async function *mutations() { yield {op:'upsert',row:{id:1}}; }
+  for (const value of [0,-1,1.5,Infinity]) {
+    await assert.rejects(async () => hashOrderedMutations(mutations(), {maxMutations:value}), /INVALID_CDC_TRANSACTION/);
+  }
+});
+
+test('bounded async CDC mutation hash stops exactly at first excess effect', async () => {
+  const seen=[];
+  async function *mutations() {
+    for(let i=0;i<10;i++) { seen.push(i); yield {op:'upsert',row:{id:i}}; }
+  }
+  await assert.rejects(hashOrderedMutations(mutations(),{maxMutations:3}),/CDC_TRANSACTION_BUDGET_EXCEEDED/);
+  assert.deepEqual(seen,[0,1,2,3]);
+  assert.equal((await hashOrderedMutations((async function*(){yield {op:'upsert',row:{id:1}}})(),{maxMutations:1})).mutationCount,1);
+});
+
+test('bounded synchronous mutation hash refuses an oversized array immediately', () => {
+  const stream=[{op:'upsert',row:{id:1}},{op:'upsert',row:{id:2}}];
+  assert.throws(() => hashOrderedMutations(stream,{maxMutations:1}),/CDC_TRANSACTION_BUDGET_EXCEEDED/);
+  assert.equal(hashOrderedMutations(stream,{maxMutations:2}).mutationCount,2);
+});

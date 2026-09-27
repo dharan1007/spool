@@ -355,10 +355,20 @@ export function createCdcTransactionIdentity({ migrationId, planId, sourceSnapsh
 // Incremental ordered-payload hash over a mutation stream: each canonical
 // mutation record is length-framed into a running SHA-256, so the hash binds
 // exact order without buffering the stream.
-export function hashOrderedMutations(mutations) {
+export function hashOrderedMutations(mutations, { maxMutations = null } = {}) {
+  if (maxMutations != null && (!Number.isSafeInteger(maxMutations) || maxMutations < 1)) {
+    fail('INVALID_CDC_TRANSACTION', 'maxMutations must be a positive safe integer');
+  }
   const digest = createHash('sha256');
   let count = 0;
   const feed = record => {
+    // Enforce the effect budget BEFORE hashing or materializing another
+    // mapped mutation. This is also the FIRST pass of CDC apply: checking
+    // only inside target.commitCdcTransaction is too late for a generator
+    // that exceeds its declared capacity or never terminates.
+    if (maxMutations != null && count >= maxMutations) {
+      fail('CDC_TRANSACTION_BUDGET_EXCEEDED', 'CDC mutation stream exceeded the configured effect budget', { maxMutations, consumed: count });
+    }
     const text = canonicalJson(record);
     digest.update(`${Buffer.byteLength(text, 'utf8')}:`, 'utf8');
     digest.update(text, 'utf8');
@@ -984,7 +994,7 @@ export async function applyCdcTransaction({
     }
   };
   // Pass 1 (streaming, O(1) memory): ordered payload hash + exact count.
-  const hashed = await hashOrderedMutations(streamMutations());
+  const hashed = await hashOrderedMutations(streamMutations(), { maxMutations });
   const transactionIdentity = createCdcTransactionIdentity({
     migrationId: migration.migrationId,
     planId: plan.planId,
