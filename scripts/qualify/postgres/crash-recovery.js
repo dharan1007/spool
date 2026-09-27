@@ -9,6 +9,7 @@ import { PostgresTarget } from '../../../src/connectors/postgres/target.js';
 import { CredentialBroker } from '../../../src/daemon/credential-broker.js';
 import { SpoolCommandService } from '../../../src/daemon/command-service.js';
 import { writeDatasetCsv } from '../dataset.js';
+import { verifyRecoveredTargetContent } from '../recovery-content.js';
 
 
 // PostgreSQL truncates identifiers past 63 characters: all scenario table
@@ -80,7 +81,6 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
     const service1 = await makeService();
     const request = makeRequest();
     const approval = await service1.approve(request, { expiresAt: new Date(Date.now() + 3600_000).toISOString(), nonce: `crash-${runId}` });
-    const faultAt = Date.now();
     const result1 = await service1.run(request, { approval });
     if (result1.status !== 'COMPLETE') throw new Error(`initial run did not complete: ${result1.status}`);
     const state1 = service1.migrationState(request.migrationId);
@@ -91,14 +91,13 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
 
     // Phase 2: fresh process reconstructs durable state and reconciles via replay.
     // Re-running the same approved migration must be idempotent (no duplicates).
+    const continuityStartAt = Date.now();
     const service2 = await makeService();
-    const recoveredAt = Date.now();
     const state2 = service2.migrationState(request.migrationId);
     evidenceWriter.appendRaw({ scenario, event: 'recovery_state', state: state2?.currentState, sequence: state2?.sequence });
     if (!state2 || state2.currentState !== 'READY_FOR_CUTOVER') {
       failures.push({ scenario, code: 'RECOVERY_STATE_MISMATCH', message: `expected READY_FOR_CUTOVER after restart, got ${state2?.currentState}`, expected: false, classification: 'CORRECTNESS', timestamp: new Date().toISOString() });
     }
-    const rtoMs = recoveredAt - faultAt;
     const result2 = await service2.run(request, { approval });
     if (result2.status !== 'COMPLETE') throw new Error(`recovery replay did not complete: ${result2.status}`);
     service2.close();
@@ -110,8 +109,10 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
     if (cnt.rows[0].c !== rowCount) {
       failures.push({ scenario, code: 'REPLAY_DUPLICATED', message: `replay produced ${cnt.rows[0].c} rows, expected ${rowCount}`, expected: false, classification: 'CORRECTNESS', timestamp: new Date().toISOString() });
     }
-    rpoRto.push({ faultId: 'process-restart-after-complete', rtoMs, rpoRows: 0, finalVerification: cnt.rows[0].c === rowCount ? 'VERIFIED' : 'MISMATCH', result: cnt.rows[0].c === rowCount ? 'PASS' : 'FAIL' });
-    evidenceWriter.appendRaw({ scenario, event: 'crash_recovery_completed', rtoMs, targetCount: cnt.rows[0].c });
+    // An already-completed restart is an idempotence check, not a crash or content-verification proof.
+    const continuityMs = Date.now() - continuityStartAt;
+    rpoRto.push({ faultId: 'restart-after-complete', continuityMs, rtoMs: null, rpoRows: null, rpoStatus: 'UNMEASURED', finalVerification: cnt.rows[0].c === rowCount ? 'ROW_COUNT_MATCH_ONLY' : 'MISMATCH', result: cnt.rows[0].c === rowCount ? 'PASS' : 'FAIL' });
+    evidenceWriter.appendRaw({ scenario, event: 'restart_continuity_completed', continuityMs, targetCount: cnt.rows[0].c, contentVerified: false });
 
     const cleanup = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
     await cleanup.connect(); await cleanup.query(`DROP TABLE IF EXISTS public."${table}" CASCADE`); await cleanup.end();
@@ -133,7 +134,6 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
       const childConfigPath = join(tmpdir(), `spool-qualify-child-${runId}.json`);
       let killChild = null;
       let killFaultAt = null;
-      let killRecoveredAt = null;
       let ledgerBeforeKill = 0;
       let checkpointBeforeKill = null;
       try {
@@ -208,7 +208,6 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         evidenceWriter.appendRaw({ scenario, event: 'crash_child_ready', pid: killChild.pid, lease: childLease });
 
         // Ledger-observed progress: poll batch_ledger until at least one batch committed, then kill mid-flight
-        killFaultAt = Date.now();
         let ledgerCount = 0;
         const killDeadline = Date.now() + 15_000;
         while (Date.now() < killDeadline) {
@@ -242,7 +241,8 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         if (process.platform !== 'linux' || killChild.exitCode != null || !killChild.kill('SIGKILL')) {
           throw new Error('Required live Linux SIGKILL could not be delivered');
         }
-        evidenceWriter.appendRaw({ scenario, event: 'crash_kill_signal', signal: 'SIGKILL', pid: killChild.pid, ledgerCount });
+        killFaultAt = Date.now();
+        evidenceWriter.appendRaw({ scenario, event: 'crash_kill_signal', signal: 'SIGKILL', pid: killChild.pid, ledgerCount, faultObservedAtMs: killFaultAt });
         const exitInfo = await Promise.race([childExit, new Promise(r => setTimeout(() => r({ code: null, signal: 'TIMEOUT' }), 5000))]);
         if (exitInfo.signal !== 'SIGKILL') {
           throw new Error(`SIGKILL was not independently observed at process exit: ${JSON.stringify(exitInfo)}`);
@@ -334,8 +334,7 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         evidenceWriter.appendRaw({ scenario, event: 'old_fence_mutation_refused', oldFence: childLease.fencingToken });
 
         // Fresh process must reconstruct durable checkpoint + ledger and complete without duplicates.
-        killRecoveredAt = Date.now();
-        const rtoMsKill = killRecoveredAt - killFaultAt;
+        // RTO ends only after exact post-replay content verification.
         // Verify ledger has at least one entry (atomic batch ledger proved durable)
         let ledgerAfterKill = 0;
         try {
@@ -378,13 +377,32 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
 
         const verifyClient = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
         await verifyClient.connect();
-        const cntKill = await verifyClient.query(`SELECT count(*)::int AS c FROM public."${killTable}"`);
-        const ledgerFinal = await verifyClient.query(`SELECT count(*)::int AS c FROM spool_internal.batch_ledger WHERE migration_id = $1`, [killMigrationId]);
-        await verifyClient.end();
-        const finalCount = cntKill.rows[0].c;
-        const finalLedger = ledgerFinal.rows[0].c;
-        const rpoRows = killRowCount - finalCount;
-        const passed = finalCount === killRowCount && finalLedger === totalBatches;
+        let finalCount, finalLedger, contentProof;
+        try {
+          const cntKill = await verifyClient.query(`SELECT count(*)::int AS c FROM public."${killTable}"`);
+          const ledgerFinal = await verifyClient.query('SELECT count(*)::int AS c FROM spool_internal.batch_ledger WHERE migration_id = $1', [killMigrationId]);
+          finalCount = cntKill.rows[0].c;
+          finalLedger = ledgerFinal.rows[0].c;
+          // Verify actual content in bounded keyset pages on one stable target snapshot.
+          // Matching ledger and count alone cannot prove correct replay.
+          contentProof = await verifyRecoveredTargetContent({
+            client: verifyClient, table: killTable, rowCount: killRowCount,
+            expectedRow: id => {
+              const generated = genRow(killSeed, id, { payloadBytes });
+              return { id: generated.id, payload: generated.payload };
+            }
+          });
+        } finally {
+          await verifyClient.end();
+        }
+        const passed = finalCount === killRowCount && finalLedger === totalBatches
+          && contentProof.status === 'CONTENT_VERIFIED';
+        const rtoMsKill = passed ? Date.now() - killFaultAt : null;
+        evidenceWriter.appendRaw({
+          scenario, event: 'crash_target_content_verified',
+          verifiedRows: contentProof.verifiedRows, contentSha256: contentProof.observedContentSha256,
+          snapshotIsolation: contentProof.isolation
+        });
         if (!passed) {
           failures.push({ scenario, code: 'CRASH_KILL_REPLAY_MISMATCH', message: `kill recovery produced ${finalCount}/${killRowCount} rows, ledger ${finalLedger}/${totalBatches}`, expected: false, classification: 'CORRECTNESS', timestamp: new Date().toISOString() });
         }
@@ -392,8 +410,9 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         if (ledgerBeforeKill < 1) {
           failures.push({ scenario, code: 'CRASH_KILL_NOT_MID_FLIGHT', message: `kill did not land mid-flight: ledger ${ledgerBeforeKill}`, expected: false, classification: 'CORRECTNESS', timestamp: new Date().toISOString() });
         }
-        rpoRto.push({ faultId: 'os-kill-mid-copy', rtoMs: rtoMsKill, rpoRows: Math.max(0, rpoRows), finalVerification: passed ? 'VERIFIED' : 'MISMATCH', result: passed ? 'PASS' : 'FAIL', ledgerBeforeKill, ledgerFinal: finalLedger, recoveredBatches, checkpointBeforeKill, checkpointAfter });
-        evidenceWriter.appendRaw({ scenario, event: 'crash_kill_recovery_completed', rtoMs: rtoMsKill, finalCount, finalLedger, passed, recoveredBatches });
+        // Source ACK-to-durable-target RPO was not instrumented; convergence is not RPO.
+        rpoRto.push({ faultId: 'os-kill-mid-copy', rtoMs: rtoMsKill, rtoStatus: passed ? 'MEASURED_TO_CONTENT_VERIFIED' : 'NOT_RECOVERED', rpoRows: null, rpoStatus: 'UNMEASURED', finalVerification: passed ? 'CONTENT_VERIFIED' : 'MISMATCH', observedContentSha256: contentProof.observedContentSha256, result: passed ? 'PASS' : 'FAIL', ledgerBeforeKill, ledgerFinal: finalLedger, recoveredBatches, checkpointBeforeKill, checkpointAfter });
+        evidenceWriter.appendRaw({ scenario, event: 'crash_kill_recovery_completed', rtoMs: rtoMsKill, finalCount, finalLedger, passed, recoveredBatches, contentVerified: passed });
 
         // Cleanup kill table
         const cleanKill = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
