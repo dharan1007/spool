@@ -598,8 +598,10 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
       resolveDone();
     };
 
-    // WAL callbacks may be emitted while a previous async onChange is
-    // still running. Serial processing prevents early/out-of-order ACKs.
+    // The pinned pg-logical-replication 2.x implementation supports async
+    // listener flow control. Return the serial drain promise to that library,
+    // *and* serialize independently to prevent early/out-of-order ACKs or
+    // an unbounded queue if flow control is bypassed.
     const pump = createCdcSerialPump({
       maxPending: 1024,
       onFailure(error) {
@@ -644,7 +646,10 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
       pump.close();
       finish(error);
     });
-    service.on('data', (lsn, message) => { pump.enqueue(lsn, message); });
+    service.on('data', (lsn, message) => {
+      pump.enqueue(lsn, message);
+      return pump.drain();
+    });
 
     try {
       await service.subscribe(new PgoutputPlugin({ protoVersion: 1, publicationNames: [...publicationNames] }), name, startLsn ?? undefined);

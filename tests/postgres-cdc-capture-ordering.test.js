@@ -9,16 +9,20 @@ const end = code.indexOf('export function createCdcCheckpointStore(', begin);
 assert.ok(begin >= 0 && end > begin, 'real CDC capture implementation is present');
 const captureSource = code.slice(begin, end).replace(/^export /gm, '');
 
-function makeCapture(events, { failAcknowledging = null } = {}) {
+function makeCapture(events, { failAcknowledging = null, honorFlowControl = false } = {}) {
   let service;
   class FakeReplicationService {
     constructor() {
       this.listeners = new Map(); this.acknowledged = [];
-      this.stopped = false; this.destroyed = false; service = this;
+      this.stopped = false; this.destroyed = false; this.dispatched = []; service = this;
     }
     on(name, cb) { this.listeners.set(name, cb); }
     async subscribe() {
-      for (const [lsn, kind] of events) this.listeners.get('data')(lsn, { tag: kind });
+      for (const [lsn, kind] of events) {
+        this.dispatched.push(kind);
+        const inflight = this.listeners.get('data')(lsn, { tag: kind });
+        if (honorFlowControl) await inflight;
+      }
     }
     async acknowledge(lsn) {
       if (lsn === failAcknowledging) throw Object.assign(new Error('injected ACK failure'), { code: 'ACK_FAILED' });
@@ -72,6 +76,25 @@ test('slow durability callback cannot cause a later message to acknowledge first
   assert.deepEqual(harness.getService().acknowledged, ['0/1', '0/2', '0/3']);
   assert.equal(result.acknowledgedLsn, '0/3');
   assert.equal(harness.getService().destroyed, true);
+});
+
+test('replication flow control awaits the complete async callback before reading next WAL message', async () => {
+  let resume;
+  const gate = new Promise(resolve => { resume = resolve; });
+  const harness = makeCapture(events, { honorFlowControl: true });
+  const running = harness.run({
+    onChange: async change => {
+      if (change.tag === 'begin') await gate;
+    }
+  });
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.deepEqual(harness.getService().dispatched, ['begin']);
+  assert.deepEqual(harness.getService().acknowledged, []);
+  resume();
+  const result = await running;
+  assert.deepEqual(harness.getService().dispatched, ['begin', 'insert', 'commit']);
+  assert.deepEqual(harness.getService().acknowledged, ['0/1', '0/2', '0/3']);
+  assert.equal(result.acknowledgedLsn, '0/3');
 });
 
 test('durability failure refuses subsequent messages and never ACKs their WAL positions', async () => {
