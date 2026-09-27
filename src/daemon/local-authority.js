@@ -22,7 +22,7 @@ export function compileLocalAuthorities(identities, allowedCommands) {
       throw new TypeError('Each local identity must be an object');
     }
     const { token, principal, commands } = identity;
-    if (typeof token !== 'string' || Buffer.byteLength(token, 'utf8') < 32) {
+    if (typeof token !== 'string' || Buffer.byteLength(token, 'utf8') < 32 || Buffer.byteLength(token, 'utf8') > 4096) {
       throw new TypeError('Local identity bearer token must be at least 32 bytes');
     }
     if (typeof principal !== 'string' || !PRINCIPAL.test(principal)) {
@@ -40,7 +40,7 @@ export function compileLocalAuthorities(identities, allowedCommands) {
     }
     seenPrincipals.add(principal);
     seenTokens.add(hex);
-    return Object.freeze({ principal, tokenDigest: digest, commands: new Set(commands) });
+    return Object.freeze({ principal, tokenDigestHex: hex, commands: Object.freeze([...commands]) });
   });
   return Object.freeze(records);
 }
@@ -53,7 +53,7 @@ export function authenticateLocalBearer(authorities, bearerHeader) {
   let authenticated = null;
   // Check all identities without an early match-dependent short circuit.
   for (const identity of authorities) {
-    if (timingSafeEqual(submittedDigest, identity.tokenDigest)) authenticated = identity;
+    if (timingSafeEqual(submittedDigest, Buffer.from(identity.tokenDigestHex, 'hex'))) authenticated = identity;
   }
   return authenticated;
 }
@@ -62,7 +62,7 @@ export function assertLocalCommandAuthority(identity, body) {
   if (!identity || !body || typeof body !== 'object' || Array.isArray(body)) {
     throw Object.assign(new Error('Local caller and command body are required'), { code: 'LOCAL_AUTHORITY_REQUIRED' });
   }
-  if (!identity.commands.has(body.command)) {
+  if (!identity.commands.includes(body.command)) {
     throw Object.assign(new Error('Local caller is not permitted to execute this command'), { code: 'COMMAND_FORBIDDEN' });
   }
   // A signed approval bound to a request.principal is meaningless when the

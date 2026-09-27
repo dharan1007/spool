@@ -15,6 +15,7 @@ test('only the correct bound bearer resolves an authenticated identity', () => {
     assert.equal(authenticateLocalBearer(policy, header), null);
   }
   assert.equal(JSON.stringify(policy).includes('0'.repeat(32)), false, 'plaintext credential retained in policy');
+  assert.throws(() => policy[0].commands.push('approve'), TypeError, 'command grants must not be externally mutable');
 });
 test('principal spoofing is refused rather than overwritten', () => {
   assert.throws(() => assertLocalCommandAuthority(policy[0], { command: 'run', request: { principal: 'operator:bob' } }), { code: 'PRINCIPAL_MISMATCH' });
@@ -30,6 +31,7 @@ test('unsafe auth configuration fails at daemon startup', () => {
   for (const bad of [
     [],
     [{ ...identities[0], token: 'short' }],
+    [{ ...identities[0], token: 'x'.repeat(4097) }],
     [{ ...identities[0], principal: 'admin;drop' }],
     [{ ...identities[0], commands: ['not-a-command'] }],
     [{ ...identities[0], commands: ['run', 'run'] }],
