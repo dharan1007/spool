@@ -591,7 +591,7 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
         ssl: parsed.sslMode === 'disable' ? false : { rejectUnauthorized: parsed.sslMode === 'verify-full' },
         application_name: 'spool-cdc-capture'
       },
-      { acknowledge: { auto: false, timeoutSeconds: 10 }, flowControl: { enabled: true } }
+      { acknowledge: { auto: false, timeoutSeconds: 0 }, flowControl: { enabled: true } }
     );
 
     const finish = error => {
@@ -636,20 +636,32 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
           fail('CDC_CAPTURE_BOUNDARY_INCOMPLETE', 'Maximum CDC capture messages reached before a committed transaction boundary');
         }
         if (change) {
+          if (change.tag === 'begin' && inTransaction) fail('CDC_PROTOCOL_VIOLATION', 'Nested CDC BEGIN before COMMIT');
+          if (['insert', 'update', 'delete', 'truncate'].includes(change.tag) && !inTransaction) {
+            fail('CDC_PROTOCOL_VIOLATION', 'CDC row mutation outside an open transaction');
+          }
           if (change.tag === 'commit' && lastAcknowledgedLsn && comparePostgresLsn(change.lsn, lastAcknowledgedLsn) < 0) {
             fail('CDC_LSN_MONOTONICITY_VIOLATION', `Commit LSN went backwards: ${lastAcknowledgedLsn} -> ${change.lsn}`);
           }
           if (onChange) await onChange(change);
         }
-        // Never advance the reported acknowledged LSN before the transport
-        // confirms acknowledgement; no ACK when onChange rejects.
-        await service.acknowledge(position);
+        // A standby feedback packet is cumulative. ACKing a BEGIN/row WAL
+        // position before the complete COMMIT is safely processed risks
+        // advancing confirmed_flush_lsn beyond a partial transaction.
+        // In pg-logical-replication 2.5.x timeoutSeconds MUST be zero:
+        // its periodic standby timer ACKs its volatile _lastLsn even when
+        // auto:false, independently of this handler's durable watermark.
+        if (change?.tag === 'commit') {
+          if (!inTransaction) fail('CDC_PROTOCOL_VIOLATION', 'CDC COMMIT without BEGIN; cannot acknowledge partial history');
+          const committedEnd = change.commitEndLsn ?? change.lsn;
+          if (!LSN.test(committedEnd)) fail('INVALID_POSTGRES_LSN', 'CDC COMMIT end LSN is invalid');
+          const acknowledged = await service.acknowledge(committedEnd);
+          if (acknowledged !== true) fail('CDC_ACK_FAILED', 'CDC transport refused the complete transaction acknowledgement');
+          lastAcknowledgedLsn = committedEnd;
+          inTransaction = false;
+        }
         if (change) {
           if (change.tag === 'begin') inTransaction = true;
-          if (change.tag === 'commit') {
-            lastAcknowledgedLsn = change.commitEndLsn ?? change.lsn;
-            inTransaction = false;
-          }
           messageCount += 1;
           if (changes.length >= maxCollectedChanges) {
             changes.shift();

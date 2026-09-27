@@ -691,7 +691,7 @@ export function createCdcApplier({
           ssl: parsed.sslMode === 'disable' ? false : { rejectUnauthorized: parsed.sslMode === 'verify-full' },
           application_name: 'spool-cdc-apply'
         },
-        { acknowledge: { auto: false, timeoutSeconds: 10 }, flowControl: { enabled: true } }
+        { acknowledge: { auto: false, timeoutSeconds: 0 }, flowControl: { enabled: true } }
       );
       const queue = [];
       let streamError = null;

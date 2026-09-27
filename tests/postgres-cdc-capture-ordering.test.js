@@ -9,10 +9,11 @@ const end = code.indexOf('export function createCdcCheckpointStore(', begin);
 assert.ok(begin >= 0 && end > begin, 'real CDC capture implementation is present');
 const captureSource = code.slice(begin, end).replace(/^export /gm, '');
 
-function makeCapture(events, { failAcknowledging = null, honorFlowControl = false, heartbeatLsn = null, heartbeatAfterTag = null, commitEndLsn = null } = {}) {
+function makeCapture(events, { failAcknowledging = null, refuseAcknowledging = null, honorFlowControl = false, heartbeatLsn = null, heartbeatAfterTag = null, commitEndLsn = null } = {}) {
   let service;
   class FakeReplicationService {
-    constructor() {
+    constructor(_connection, settings) {
+      this.settings = settings;
       this.listeners = new Map(); this.acknowledged = [];
       this.stopped = false; this.destroyed = false; this.dispatched = []; service = this;
     }
@@ -28,7 +29,9 @@ function makeCapture(events, { failAcknowledging = null, honorFlowControl = fals
     }
     async acknowledge(lsn) {
       if (lsn === failAcknowledging) throw Object.assign(new Error('injected ACK failure'), { code: 'ACK_FAILED' });
+      if (lsn === refuseAcknowledging) return false;
       this.acknowledged.push(lsn);
+      return true;
     }
     async stop() { this.stopped = true; }
     async destroy() { this.destroyed = true; }
@@ -75,7 +78,7 @@ test('slow durability callback cannot cause a later message to acknowledge first
   resume();
   const result = await running;
   assert.deepEqual(observed, ['begin', 'insert', 'commit']);
-  assert.deepEqual(harness.getService().acknowledged, ['0/1', '0/2', '0/3']);
+  assert.deepEqual(harness.getService().acknowledged, ['0/3']);
   assert.equal(result.acknowledgedLsn, '0/3');
   assert.equal(harness.getService().destroyed, true);
 });
@@ -95,7 +98,7 @@ test('replication flow control awaits the complete async callback before reading
   resume();
   const result = await running;
   assert.deepEqual(harness.getService().dispatched, ['begin', 'insert', 'commit']);
-  assert.deepEqual(harness.getService().acknowledged, ['0/1', '0/2', '0/3']);
+  assert.deepEqual(harness.getService().acknowledged, ['0/3']);
   assert.equal(result.acknowledgedLsn, '0/3');
 });
 
@@ -106,7 +109,7 @@ test('durability failure refuses subsequent messages and never ACKs their WAL po
       if (change.tag === 'insert') throw Object.assign(new Error('injected apply failure'), { code: 'INJECTED_FAILURE' });
     }
   }), { code: 'INJECTED_FAILURE' });
-  assert.deepEqual(harness.getService().acknowledged, ['0/1']);
+  assert.deepEqual(harness.getService().acknowledged, []);
   assert.equal(harness.getService().destroyed, true);
 });
 
@@ -117,20 +120,20 @@ test('maximum message limit refuses incomplete source transaction before ACKing 
     maxMessages: 2, onChange: async change => { delivered.push(change.tag); }
   }), { code: 'CDC_CAPTURE_BOUNDARY_INCOMPLETE' });
   assert.deepEqual(delivered, ['begin']);
-  assert.deepEqual(harness.getService().acknowledged, ['0/1']);
+  assert.deepEqual(harness.getService().acknowledged, []);
 });
 
 test('LSN waterline is applied only on COMMIT, not to uncommitted row messages', async () => {
   const harness = makeCapture(events);
   const result = await harness.run({ untilLsn: '0/2' });
-  assert.deepEqual(harness.getService().acknowledged, ['0/1', '0/2', '0/3']);
+  assert.deepEqual(harness.getService().acknowledged, ['0/3']);
   assert.equal(result.acknowledgedLsn, '0/3');
 });
 
 test('transport ACK rejection cannot advance the reported commit LSN', async () => {
   const harness = makeCapture(events, { failAcknowledging: '0/3' });
   await assert.rejects(harness.run(), { code: 'ACK_FAILED' });
-  assert.deepEqual(harness.getService().acknowledged, ['0/1', '0/2']);
+  assert.deepEqual(harness.getService().acknowledged, []);
 });
 
 test('callback queue bound refuses overflow without processing subsequent events', async () => {
@@ -184,7 +187,7 @@ test('idle WAL heartbeat completes a fully drained capture after final commit', 
   const result = await harness.run({ untilLsn: '0/4' });
   assert.equal(result.messageCount, 3);
   assert.equal(result.changes.at(-1).tag, 'commit');
-  assert.equal(harness.getService().acknowledged.join(','), '0/1,0/2,0/3');
+  assert.equal(harness.getService().acknowledged.join(','), '0/3');
   assert.equal(result.lastLsn, '0/3');
   assert.equal(harness.getService().stopped, true);
 });
@@ -195,6 +198,40 @@ test('heartbeat never terminates an open source transaction', async () => {
   });
   const result = await harness.run({ untilLsn: '0/4' });
   assert.deepEqual(result.changes.map(change => change.tag), ['begin','insert','commit']);
-  assert.equal(harness.getService().acknowledged.length, 3);
+  assert.equal(harness.getService().acknowledged.length, 1);
   assert.equal(result.messageCount, 3);
+});
+
+
+test('manual pgoutput capture never enables the driver periodic volatile-WAL ACK timer', async () => {
+  const harness = makeCapture(events);
+  await harness.run();
+  assert.deepEqual(harness.getService().settings.acknowledge, {auto:false, timeoutSeconds:0});
+  const applierCode = readFileSync(new URL('../src/connectors/postgres/cdc-apply.js', import.meta.url),'utf8');
+  assert.ok(applierCode.includes('acknowledge: { auto: false, timeoutSeconds: 0 }'));
+});
+
+test('a complete source transaction is the FIRST WAL position acknowledged', async () => {
+  const harness = makeCapture(events, {commitEndLsn:'0/4'});
+  const result = await harness.run({untilLsn:'0/4'});
+  assert.deepEqual(harness.getService().acknowledged,['0/4']);
+  assert.equal(result.acknowledgedLsn,'0/4');
+});
+
+test('driver refusal to acknowledge a COMMIT fails closed and cannot report success', async () => {
+  const harness = makeCapture(events,{refuseAcknowledging:'0/3'});
+  await assert.rejects(harness.run(), {code:'CDC_ACK_FAILED'});
+  assert.deepEqual(harness.getService().acknowledged,[]);
+});
+
+test('orphan COMMIT is never acknowledged',async () => {
+  const harness=makeCapture([['0/1','commit']]);
+  await assert.rejects(harness.run(),{code:'CDC_PROTOCOL_VIOLATION'});
+  assert.deepEqual(harness.getService().acknowledged,[]);
+});
+
+test('row mutation without source BEGIN is never acknowledged',async () => {
+  const harness=makeCapture([['0/1','insert']]);
+  await assert.rejects(harness.run(),{code:'CDC_PROTOCOL_VIOLATION'});
+  assert.deepEqual(harness.getService().acknowledged,[]);
 });
