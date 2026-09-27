@@ -601,6 +601,23 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
       resolveDone();
     };
 
+    let inTransaction = false;
+    let latestHeartbeatLsn = null;
+    // pg_current_wal_flush_lsn() can be *after* the last COMMIT record.
+    // An idle slot may therefore never emit a further COMMIT whose start
+    // reaches the requested waterline. A server heartbeat provides progress
+    // through an otherwise quiescent source. Drain ALL previously emitted
+    // data first, and never stop in the middle of a transaction.
+    const maybeStopAtHeartbeat = pump => {
+      if (finished || inTransaction || untilLsn == null || latestHeartbeatLsn == null
+        || comparePostgresLsn(latestHeartbeatLsn, untilLsn) < 0) return;
+      void pump.drain().then(async () => {
+        if (finished || inTransaction || comparePostgresLsn(latestHeartbeatLsn, untilLsn) < 0) return;
+        await service.stop();
+        finish(null);
+      }).catch(finish);
+    };
+
     // The pinned pg-logical-replication 2.x implementation supports async
     // listener flow control. Return the serial drain promise to that library,
     // *and* serialize independently to prevent early/out-of-order ACKs or
@@ -628,7 +645,11 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
         // confirms acknowledgement; no ACK when onChange rejects.
         await service.acknowledge(position);
         if (change) {
-          if (change.tag === 'commit') lastAcknowledgedLsn = change.lsn;
+          if (change.tag === 'begin') inTransaction = true;
+          if (change.tag === 'commit') {
+            lastAcknowledgedLsn = change.commitEndLsn ?? change.lsn;
+            inTransaction = false;
+          }
           messageCount += 1;
           if (changes.length >= maxCollectedChanges) {
             changes.shift();
@@ -641,16 +662,26 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
         // refusal; LSN waterlines only end at a complete COMMIT.
         const stopByCount = maxMessages != null && messageCount >= maxMessages;
         const stopByLsn = untilLsn != null && change?.tag === 'commit'
-          && comparePostgresLsn(change.lsn, untilLsn) >= 0;
+          && comparePostgresLsn(change.commitEndLsn ?? change.lsn, untilLsn) >= 0;
         if (stopByCount || stopByLsn) {
           await service.stop();
           finish(null);
+        } else if (change?.tag === 'commit') {
+          maybeStopAtHeartbeat(pump);
         }
       }
     });
     service.on('error', error => {
       pump.close();
       finish(error);
+    });
+    service.on('heartbeat', rawLsn => {
+      const lsn = typeof rawLsn === 'string' ? rawLsn : String(rawLsn ?? '');
+      if (finished || untilLsn == null || !LSN.test(lsn)) return;
+      if (latestHeartbeatLsn == null || comparePostgresLsn(lsn, latestHeartbeatLsn) > 0) {
+        latestHeartbeatLsn = lsn;
+      }
+      maybeStopAtHeartbeat(pump);
     });
     service.on('data', (lsn, message) => {
       pump.enqueue(lsn, message);

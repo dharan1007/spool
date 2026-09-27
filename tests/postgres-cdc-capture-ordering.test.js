@@ -9,7 +9,7 @@ const end = code.indexOf('export function createCdcCheckpointStore(', begin);
 assert.ok(begin >= 0 && end > begin, 'real CDC capture implementation is present');
 const captureSource = code.slice(begin, end).replace(/^export /gm, '');
 
-function makeCapture(events, { failAcknowledging = null, honorFlowControl = false } = {}) {
+function makeCapture(events, { failAcknowledging = null, honorFlowControl = false, heartbeatLsn = null, heartbeatAfterTag = null, commitEndLsn = null } = {}) {
   let service;
   class FakeReplicationService {
     constructor() {
@@ -20,9 +20,11 @@ function makeCapture(events, { failAcknowledging = null, honorFlowControl = fals
     async subscribe() {
       for (const [lsn, kind] of events) {
         this.dispatched.push(kind);
-        const inflight = this.listeners.get('data')(lsn, { tag: kind });
+        const inflight = this.listeners.get('data')(lsn, { tag: kind, commitEndLsn: kind === 'commit' ? commitEndLsn : null });
         if (honorFlowControl) await inflight;
+        if (heartbeatLsn && heartbeatAfterTag === kind) this.listeners.get('heartbeat')(heartbeatLsn);
       }
+      if (heartbeatLsn && !heartbeatAfterTag) this.listeners.get('heartbeat')(heartbeatLsn);
     }
     async acknowledge(lsn) {
       if (lsn === failAcknowledging) throw Object.assign(new Error('injected ACK failure'), { code: 'ACK_FAILED' });
@@ -42,7 +44,7 @@ function makeCapture(events, { failAcknowledging = null, honorFlowControl = fals
     ref => ref, slot => slot, /^[a-z_]+$/, /^0\/[0-9A-Fa-f]+$/,
     () => ({ host: 'localhost', port: 5432, sslMode: 'disable' }),
     FakeReplicationService, class {},
-    (lsn, message) => ({ tag: message.tag, lsn }),
+    (lsn, message) => ({ tag: message.tag, lsn, commitEndLsn: message.commitEndLsn ?? null }),
     (left, right) => Number.parseInt(left.split('/')[1], 16) - Number.parseInt(right.split('/')[1], 16),
     fail, error => { throw error; }, createCdcSerialPump
   );
@@ -167,4 +169,32 @@ test('capture refuses invalid collection bounds rather than dropping evidence', 
     const harness = makeCapture(events);
     await assert.rejects(harness.run({ maxCollectedChanges }), { code: 'INVALID_POSTGRES_CDC_CONFIG' });
   }
+});
+
+test('commit END-LSN satisfies flush-waterline without waiting for another source transaction', async () => {
+  const harness = makeCapture(events, { commitEndLsn: '0/4' });
+  const result = await harness.run({ untilLsn: '0/4' });
+  assert.equal(result.lastLsn, '0/4');
+  assert.equal(result.acknowledgedLsn, '0/4');
+  assert.equal(harness.getService().stopped, true);
+});
+
+test('idle WAL heartbeat completes a fully drained capture after final commit', async () => {
+  const harness = makeCapture(events, { heartbeatLsn: '0/5' });
+  const result = await harness.run({ untilLsn: '0/4' });
+  assert.equal(result.messageCount, 3);
+  assert.equal(result.changes.at(-1).tag, 'commit');
+  assert.equal(harness.getService().acknowledged.join(','), '0/1,0/2,0/3');
+  assert.equal(result.lastLsn, '0/3');
+  assert.equal(harness.getService().stopped, true);
+});
+
+test('heartbeat never terminates an open source transaction', async () => {
+  const harness = makeCapture(events, {
+    heartbeatLsn: '0/5', heartbeatAfterTag: 'insert', honorFlowControl: true
+  });
+  const result = await harness.run({ untilLsn: '0/4' });
+  assert.deepEqual(result.changes.map(change => change.tag), ['begin','insert','commit']);
+  assert.equal(harness.getService().acknowledged.length, 3);
+  assert.equal(result.messageCount, 3);
 });
