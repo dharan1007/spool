@@ -2,7 +2,7 @@
 // Isolated, static-only SPOOL candidate preview. No command execution, no DB,
 // no cookies or secrets, and no exposure of the source repository outside dist.
 import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, realpath } from 'node:fs/promises';
 import { resolve, relative, sep, extname } from 'node:path';
 
 const CONTENT_TYPES = Object.freeze({
@@ -76,9 +76,17 @@ export function createPreviewHandler({ directory = 'dist' } = {}) {
       return;
     }
     try {
-      const st = await stat(file);
+      // Lexical containment alone is insufficient: an artifact symlink may
+      // resolve outside dist even when the URL has no traversal segments.
+      const rootReal = await realpath(root);
+      const fileReal = await realpath(file);
+      const contained = relative(rootReal, fileReal);
+      if (!contained || contained === '..' || contained.startsWith('..' + sep) || contained.startsWith(sep)) {
+        throw new Error('Resolved static asset escapes dist');
+      }
+      const st = await stat(fileReal);
       if (!st.isFile()) throw new Error('Not a regular file');
-      const body = await readFile(file);
+      const body = await readFile(fileReal);
       response.writeHead(200, { ...headers, 'content-type': CONTENT_TYPES[suffix], 'content-length': body.length });
       response.end(request.method === 'HEAD' ? undefined : body);
     } catch {

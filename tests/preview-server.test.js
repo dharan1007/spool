@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPreviewHandler } from '../scripts/serve-preview.js';
@@ -16,7 +16,7 @@ async function withServer(task) {
     await writeFile(join(root,'src/app.js'), 'export default 1;');
     await writeFile(join(root,'vercel.json'), '{"unsafe":true}');
     server.listen(0,'127.0.0.1'); await once(server,'listening');
-    return await task('http://127.0.0.1:'+server.address().port);
+    return await task('http://127.0.0.1:'+server.address().port, root);
   } finally {
     if (server.listening) await new Promise(resolve=>server.close(resolve));
     await rm(root,{recursive:true,force:true});
@@ -51,4 +51,20 @@ test('HEAD returns correct length but no body',()=>withServer(async u=>{
   assert.equal(r.status,200);
   assert.equal(r.headers.get('content-length'),String(Buffer.byteLength('<html>isolated-preview</html>')));
   assert.equal(await r.text(),'');
+}));
+
+test('symlinks inside dist cannot leak files or directories from outside the static artifact',()=>withServer(async (u,root)=>{
+  const outside = await mkdtemp(join(tmpdir(),'spool-preview-outside-'));
+  try {
+    await writeFile(join(outside,'private.html'),'OUTSIDE_DIST_SENTINEL');
+    await symlink(join(outside,'private.html'),join(root,'src','escape.html'));
+    await symlink(outside,join(root,'src','escape-folder'));
+    for (const path of ['/src/escape.html','/src/escape-folder/private.html']) {
+      const response = await fetch(u+path);
+      assert.equal(response.status,404,path);
+      assert.doesNotMatch(await response.text(),/OUTSIDE_DIST_SENTINEL/);
+    }
+  } finally {
+    await rm(outside,{recursive:true,force:true});
+  }
 }));
