@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { Client } from 'pg';
 import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
 import { fail } from '../../core/errors.js';
+import { createCdcSerialPump } from './cdc-serial-pump.js';
 import { expressionSourceFields } from '../../core/transforms.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
 import { parsePostgresEndpoint, postgresConnectionConfig } from './connection.js';
@@ -597,37 +598,53 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
       resolveDone();
     };
 
-    service.on('error', error => finish(error));
-    service.on('data', async (lsn, message) => {
-      if (finished) return;
-      try {
-        const change = normalizeMessage(typeof lsn === 'string' ? lsn : String(lsn ?? ''), message);
+    // WAL callbacks may be emitted while a previous async onChange is
+    // still running. Serial processing prevents early/out-of-order ACKs.
+    const pump = createCdcSerialPump({
+      maxPending: 1024,
+      onFailure(error) {
+        finish(error);
+        void service.stop().catch(() => { /* first failure wins */ });
+      },
+      async handle(lsn, message) {
+        if (finished) return;
+        const position = typeof lsn === 'string' ? lsn : String(lsn ?? '');
+        const change = normalizeMessage(position, message);
+        if (change && maxMessages != null && messageCount + 1 >= maxMessages && change.tag !== 'commit') {
+          fail('CDC_CAPTURE_BOUNDARY_INCOMPLETE', 'Maximum CDC capture messages reached before a committed transaction boundary');
+        }
         if (change) {
-          if (onChange) await onChange(change);
-          // Checkpoint monotonicity: commit LSN must not go backwards (per pgoutput commit-order guarantee)
           if (change.tag === 'commit' && lastAcknowledgedLsn && comparePostgresLsn(change.lsn, lastAcknowledgedLsn) < 0) {
-            throw fail('CDC_LSN_MONOTONICITY_VIOLATION', `Commit LSN went backwards: ${lastAcknowledgedLsn} -> ${change.lsn}`);
+            fail('CDC_LSN_MONOTONICITY_VIOLATION', `Commit LSN went backwards: ${lastAcknowledgedLsn} -> ${change.lsn}`);
           }
-          if (change.tag === 'commit') {
-            lastAcknowledgedLsn = change.lsn;
-          }
+          if (onChange) await onChange(change);
+        }
+        // Never advance the reported acknowledged LSN before the transport
+        // confirms acknowledgement; no ACK when onChange rejects.
+        await service.acknowledge(position);
+        if (change) {
+          if (change.tag === 'commit') lastAcknowledgedLsn = change.lsn;
           messageCount += 1;
-          // Bounded changes array for testing - drop oldest if over limit
           if (changes.length >= MAX_CHANGES) changes.shift();
           changes.push(change);
         }
-        await service.acknowledge(typeof lsn === 'string' ? lsn : String(lsn ?? ''));
+        // Never present a partial source transaction as a successful bounded
+        // capture. A maximum-message breach mid-transaction is an explicit
+        // refusal; LSN waterlines only end at a complete COMMIT.
         const stopByCount = maxMessages != null && messageCount >= maxMessages;
-        const stopByLsn = untilLsn != null && change && comparePostgresLsn(change.lsn, untilLsn) >= 0;
+        const stopByLsn = untilLsn != null && change?.tag === 'commit'
+          && comparePostgresLsn(change.lsn, untilLsn) >= 0;
         if (stopByCount || stopByLsn) {
-          try { await service.stop(); } catch { /* stopping wins over stop errors */ }
+          await service.stop();
           finish(null);
         }
-      } catch (error) {
-        try { await service.stop(); } catch { /* stopping wins over stop errors */ }
-        finish(error);
       }
     });
+    service.on('error', error => {
+      pump.close();
+      finish(error);
+    });
+    service.on('data', (lsn, message) => { pump.enqueue(lsn, message); });
 
     try {
       await service.subscribe(new PgoutputPlugin({ protoVersion: 1, publicationNames: [...publicationNames] }), name, startLsn ?? undefined);
@@ -636,6 +653,8 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
       finish(error);
       await done;
     } finally {
+      pump.close();
+      await pump.drain();
       try { await service.destroy(); } catch { /* shutdown must not mask results */ }
     }
     // Translate transport failures into operator-actionable CDC errors at the
