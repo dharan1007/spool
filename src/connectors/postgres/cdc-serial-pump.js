@@ -1,5 +1,6 @@
-// EventEmitter ignores promises from async listeners. Serialize WAL callbacks
-// so callback validation/durability and acknowledgement stay in source order.
+// Serialize callbacks even if a transport emits them without awaiting.
+// The replication listener returns drain() so the upstream flowControl mode
+// can pause delivery until processing and acknowledgement complete.
 export function createCdcSerialPump({ handle, onFailure, maxPending = 1024 } = {}) {
   if (typeof handle !== 'function' || typeof onFailure !== 'function') {
     throw new TypeError('CDC serial pump requires handler and failure callback');
