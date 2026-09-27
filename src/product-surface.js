@@ -197,6 +197,23 @@ function productPage(path) {
   })[path]?.();
 }
 
+// The app and product modules are deliberately separate bundles. Export only
+// the rendering bridge needed by the existing SPA; do not expose a backend API
+// or mutable state in the browser global.
+const PRODUCT_TITLES = Object.freeze({
+  '/local-runner': 'Local Runner',
+  '/examples': 'Examples',
+  '/security': 'Security',
+  '/services': 'Services',
+  '/start': 'Start here',
+  '/integrations': 'Integrations',
+  '/developers': 'Developers'
+});
+window.__spoolProductSurface = Object.freeze({
+  render(path) { return PRODUCT_ROUTES.has(path) ? productPage(path) : null; },
+  title(path) { return PRODUCT_TITLES[path] ?? 'SPOOL'; }
+});
+
 function addProductNav(root, path) {
   const nav = root.querySelector('.primary-nav');
   if (!nav) return;
@@ -219,7 +236,7 @@ function addHomepageProductBand(root) {
   const section = document.createElement('section');
   section.id = 'complete-product';
   section.className = 'section complete-product-band';
-  section.innerHTML = `<div class="section-heading"><span class="kicker">THE COMPLETE PRODUCT</span><h2>Two execution surfaces. One correctness model.</h2><p>Use Browser Studio when you need local CSV preparation and validation. Use the Local Runner when you need a production-verified, bounded-memory write into an existing SQLite table with a durable snapshot, approval, crash reconciliation and a receipt.</p></div><div class="surface-grid"><article><span>BROWSER STUDIO</span><h3>Work entirely in-browser</h3><p>Profile, infer, transform, validate, checkpoint, inspect violations and export without a dataset backend. Browser input limit: 50 MiB.</p><a href="/studio/new">Start in Studio →</a></article><article class="accent"><span>LOCAL RUNNER</span><h3>Write to a real SQLite target</h3><p>Bounded-memory stream + 256 MiB default source ceiling + durable snapshot + live target contract + target_write approval + fencing + atomic ledger + verification + receipt.</p><a href="/local-runner">Open Local Runner →</a></article></div>`;
+  section.innerHTML = `<div class="section-heading"><span class="kicker">THE COMPLETE PRODUCT</span><h2>Two execution surfaces. One correctness model.</h2><p>Use Browser Studio when you need local CSV preparation and validation. Use the Local Runner when you need a released, bounded-memory write into an existing SQLite table with a durable snapshot, approval, crash reconciliation and a receipt.</p></div><div class="surface-grid"><article><span>BROWSER STUDIO</span><h3>Work entirely in-browser</h3><p>Profile, infer, transform, validate, checkpoint, inspect violations and export without a dataset backend. Browser input limit: 50 MiB.</p><a href="/studio/new">Start in Studio →</a></article><article class="accent"><span>LOCAL RUNNER</span><h3>Write to a real SQLite target</h3><p>Bounded-memory stream + 256 MiB default source ceiling + durable snapshot + live target contract + target_write approval + fencing + atomic ledger + verification + receipt.</p><a href="/local-runner">Open Local Runner →</a></article></div>`;
   finalCta.before(section);
   const hero = root.querySelector('.hero');
   if (hero && !root.querySelector('#choose-path')) {
@@ -239,7 +256,7 @@ function syncProductSurface() {
     const current = root.querySelector(`[data-product-route="${path}"]`);
     if (current) return;
     root.innerHTML = productPage(path);
-    document.title = `${({ '/local-runner': 'Local Runner', '/examples': 'Examples', '/security': 'Security', '/services': 'Services', '/start': 'Start here', '/integrations': 'Integrations', '/developers': 'Developers' })[path]} — SPOOL`;
+    document.title = `${PRODUCT_TITLES[path]} — SPOOL`;
     return;
   }
   addProductNav(root, path);

@@ -7,7 +7,8 @@ import { toolNamesForPhase } from './webmcp/registry.js';
 import { initializeOptionalWebMcp } from './webmcp/optional.js';
 
 const ROUTES = Object.freeze([
-  '/', '/start', '/integrations', '/developers', '/autopilot', '/how-it-works', '/webmcp', '/benchmarks', '/docs',
+  '/', '/start', '/integrations', '/developers', '/local-runner', '/examples', '/security', '/services',
+  '/autopilot', '/how-it-works', '/webmcp', '/benchmarks', '/docs',
   '/studio', '/studio/new', '/studio/mission', '/studio/results'
 ]);
 
@@ -430,6 +431,18 @@ function notFoundPage(path, state) {
 function render() {
   if (!latestState || !appRoot) return;
   const path = currentPath();
+  const productMarkup = window.__spoolProductSurface?.render(path);
+  if (typeof productMarkup === 'string') {
+    appRoot.innerHTML = productMarkup;
+    document.title = `${window.__spoolProductSurface.title(path)} — SPOOL`;
+    return;
+  }
+  // The sibling product bundle might not have evaluated yet. Never paint
+  // an incorrect 404 while the valid product route initializes.
+  if (['/local-runner', '/examples', '/security', '/services', '/start', '/integrations', '/developers'].includes(path)) {
+    appRoot.innerHTML = '<main class="boot-screen" role="status">Loading SPOOL page…</main>';
+    return;
+  }
   const pages = {
     '/': overviewPage,
     '/autopilot': autopilotPage,
@@ -523,8 +536,17 @@ async function handleAction(action) {
 
 function bindGlobalEvents() {
   appRoot.addEventListener('click', event => {
-    const routeLink = event.target.closest('[data-route]');
-    if (routeLink) { event.preventDefault(); navigate(routeLink.dataset.route); return; }
+    // Product-page links and the Studio share one history without causing
+    // a new page load (or silently losing the browser-local workspace).
+    // Preserve native browser handling for modified clicks, downloads and
+    // links leaving this application's explicitly enumerated routes.
+    const routeLink = event.target.closest('[data-route], a[href^="/"]');
+    if (routeLink && !event.defaultPrevented && event.button === 0
+      && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
+      && routeLink.getAttribute('target') !== '_blank' && !routeLink.hasAttribute('download')) {
+      const route = routeLink.dataset.route ?? routeLink.getAttribute('href');
+      if (ROUTES.includes(route)) { event.preventDefault(); navigate(route); return; }
+    }
     const outcome = event.target.closest('[data-outcome]');
     if (outcome) { selectedOutcome = outcome.dataset.outcome; render(); return; }
     const action = event.target.closest('[data-action]');
