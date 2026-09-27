@@ -161,3 +161,43 @@ test('spoold drives cutover arming and commit against a real service', async () 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('strict scoped loopback HTTP refuses cross-migration read and mutation before dispatch', async () => {
+  const calls = [];
+  const service = {
+    status: async id => { calls.push(['status',id]); return {id}; },
+    run: async req => { calls.push(['run',req.migrationId]); return {id:req.migrationId}; },
+    abortCutover: async id => { calls.push(['abort',id]); return {id}; }
+  };
+  const identityToken = 'S'.repeat(32);
+  const daemon = createSpoolDaemon({service, requireMigrationScopes:true, localIdentities:[{
+    token:identityToken, principal:'operator:alice', commands:['status','run','abort-cutover'],
+    migrationIds:['migration-A']
+  }]});
+  const address = await daemon.listen(0);
+  try {
+    for(const [body,expected] of [
+      [{command:'status',migrationId:'migration-B'},403],
+      [{command:'run',request:{principal:'operator:alice',migrationId:'migration-B'}},403],
+      [{command:'abort-cutover',migrationId:'migration-B'},403],
+      [{command:'run',request:{principal:'operator:bob',migrationId:'migration-A'}},403],
+      [{command:'run',request:{principal:'operator:alice',migrationId:'migration-A'},migrationId:'migration-B'},403],
+      [{command:'status',migrationId:'migration-A'},200],
+      [{command:'run',request:{principal:'operator:alice',migrationId:'migration-A'}},200]
+    ]) {
+      const actual = await request({port:address.port,token:identityToken,body});
+      assert.equal(actual.status,expected,JSON.stringify(body));
+    }
+    assert.deepEqual(calls,[['status','migration-A'],['run','migration-A']]);
+  } finally { await daemon.close(); }
+});
+
+test('strict scoped daemon refuses a single shared legacy token or missing scopes at startup', () => {
+  const service={status:async()=>null};
+  assert.throws(()=>createSpoolDaemon({service,token:TOKEN,requireMigrationScopes:true}),{
+    code:'INVALID_DAEMON_CONFIG'
+  });
+  assert.throws(()=>createSpoolDaemon({service,requireMigrationScopes:true,
+    localIdentities:[{token:'X'.repeat(32),principal:'operator:alice',commands:['status'] }]
+  }),{code:'INVALID_DAEMON_CONFIG'});
+});

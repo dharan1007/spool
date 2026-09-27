@@ -96,11 +96,13 @@ function transportError(error) {
   });
 }
 
-export function createSpoolDaemon({ service, token, localIdentities = null, host = '127.0.0.1', allowedOrigins = [], maxBodyBytes = 1024 * 1024 } = {}) {
+export function createSpoolDaemon({ service, token, localIdentities = null, requireMigrationScopes = false, host = '127.0.0.1', allowedOrigins = [], maxBodyBytes = 1024 * 1024 } = {}) {
   if (!service || typeof service !== 'object') fail('INVALID_DAEMON_CONFIG', 'service is required');
   // Legacy single bearer remains loopback-only for backward compatibility.
   // In bound mode, callers MUST use separately provisioned identity credentials;
   // a legacy fallback would bypass per-principal authorization.
+  if (typeof requireMigrationScopes !== 'boolean') fail('INVALID_DAEMON_CONFIG', 'requireMigrationScopes must be boolean');
+  if (requireMigrationScopes && localIdentities == null) fail('INVALID_DAEMON_CONFIG', 'Strict migration scope mode requires identity-bound credentials');
   if (localIdentities == null) {
     if (typeof token !== 'string' || token.length < 32) fail('INVALID_DAEMON_CONFIG', 'daemon bearer token must be at least 32 bytes');
   } else if (token != null) {
@@ -108,7 +110,7 @@ export function createSpoolDaemon({ service, token, localIdentities = null, host
   }
   let localPolicy = null;
   if (localIdentities != null) {
-    try { localPolicy = compileLocalAuthorities(localIdentities, COMMANDS); }
+    try { localPolicy = compileLocalAuthorities(localIdentities, COMMANDS, { requireMigrationScopes }); }
     catch (error) { fail('INVALID_DAEMON_CONFIG', error.message); }
   }
   if (!['127.0.0.1', '::1'].includes(host)) fail('INVALID_DAEMON_CONFIG', 'spoold binds only to a loopback IP');
@@ -147,7 +149,7 @@ export function createSpoolDaemon({ service, token, localIdentities = null, host
       json(response, 200, { ok: true, result });
     } catch (error) {
       const publicError = transportError(error);
-      const status = publicError.code === 'REQUEST_TOO_LARGE' ? 413 : ['COMMAND_FORBIDDEN','PRINCIPAL_MISMATCH','LOCAL_AUTHORITY_REQUIRED'].includes(publicError.code) ? 403 : publicError.code === 'INVALID_JSON' || publicError.code === 'INVALID_COMMAND' ? 400 : publicError.code === 'INTERNAL_ERROR' ? 500 : 422;
+      const status = publicError.code === 'REQUEST_TOO_LARGE' ? 413 : ['COMMAND_FORBIDDEN','PRINCIPAL_MISMATCH','LOCAL_AUTHORITY_REQUIRED','MIGRATION_FORBIDDEN','MIGRATION_SCOPE_MISMATCH'].includes(publicError.code) ? 403 : publicError.code === 'INVALID_JSON' || publicError.code === 'INVALID_COMMAND' ? 400 : publicError.code === 'INTERNAL_ERROR' ? 500 : 422;
       json(response, status, { ok: false, error: publicError });
     }
   });
