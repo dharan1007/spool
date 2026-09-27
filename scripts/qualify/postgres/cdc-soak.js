@@ -28,9 +28,9 @@ function opMix(writer, opIndex) {
 }
 
 function opEvents(kind) {
-  // Every UPDATE, DELETE and multi case inserts its seed row in the same
-  // source transaction. pgoutput emits BOTH row mutations; counting only
-  // the second event produces false-green or false-negative CDC evidence.
+  // UPDATE/DELETE emit their seed INSERT plus mutation. MULTI must
+  // insert two DIFFERENT primary keys in a single committed transaction.
+  // All three cases therefore emit exactly two row records.
   if (kind === 'insert') return 1;
   if (kind === 'update' || kind === 'delete' || kind === 'multi') return 2;
   throw new Error(`Unsupported deterministic CDC operation: ${kind}`);
@@ -101,27 +101,30 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
           const opIndex = chunk * opsPerChunk + op;
           const kind = opMix(wi, opIndex);
           const singleId = WRITER_BASE + wi * WRITER_STRIDE + opIndex + 1;
-          const id = kind === 'multi' ? singleId + MULTI_OFFSET : singleId;
-          if (opIndex >= MULTI_OFFSET || id > 2_147_483_647) {
+          const secondId = singleId + MULTI_OFFSET;
+          if (opIndex >= MULTI_OFFSET || secondId > 2_147_483_647) {
             throw new Error('CDC writer exhausted its disjoint 32-bit identifier band');
           }
           let inTx = false;
           try {
             if (kind !== 'insert') { await client.query('BEGIN'); inTx = true; }
-            const added = await client.query(`INSERT INTO public."${table}"(id, payload) VALUES ($1, $2)`, [id, `new-${wi}-${opIndex}`]);
+            const added = await client.query(`INSERT INTO public."${table}"(id, payload) VALUES ($1, $2)`, [singleId, `new-${wi}-${opIndex}`]);
             if (added.rowCount !== 1) throw new Error('CDC writer insert was not exactly one row');
-            // All update/delete/multi events MUST mutate a row that exists.
-            // A setup INSERT and its mutation share one source transaction:
-            // this proves event order and atomicity rather than no-op SQL.
-            if (kind === 'update' || kind === 'multi') {
-              const updated = await client.query(`UPDATE public."${table}" SET payload = $2 WHERE id = $1`, [id, `updated-${wi}-${opIndex}`]);
+            // These are real committed DML effects, not UPDATE/DELETE no-ops
+            // on missing rows. MULTI uses two distinct primary keys so it
+            // exercises a genuine multi-row source transaction.
+            if (kind === 'multi') {
+              const second = await client.query(`INSERT INTO public."${table}"(id, payload) VALUES ($1, $2)`, [secondId, `second-${wi}-${opIndex}`]);
+              if (second.rowCount !== 1) throw new Error('CDC multi-row second insert was not exactly one row');
+            } else if (kind === 'update') {
+              const updated = await client.query(`UPDATE public."${table}" SET payload = $2 WHERE id = $1`, [singleId, `updated-${wi}-${opIndex}`]);
               if (updated.rowCount !== 1) throw new Error('CDC writer update was not exactly one row');
             } else if (kind === 'delete') {
-              const deleted = await client.query(`DELETE FROM public."${table}" WHERE id = $1`, [id]);
+              const deleted = await client.query(`DELETE FROM public."${table}" WHERE id = $1`, [singleId]);
               if (deleted.rowCount !== 1) throw new Error('CDC writer delete was not exactly one row');
             }
             if (inTx) await client.query('COMMIT');
-            inserted += 1;
+            inserted += kind === 'multi' ? 2 : 1;
             attempted += opEvents(kind);
             operations += 1;
           } catch (error) {
