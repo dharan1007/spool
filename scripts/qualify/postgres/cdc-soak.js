@@ -62,30 +62,17 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
     return res.rows[0].lsn;
   };
 
-  const CHUNKS = Math.max(4, Math.min(12, Math.floor(durationSec / 3)));
-  const opsPerChunk = Math.max(4, Math.floor((durationSec * 1000) / (30 * CHUNKS)));
+  // Each 30-second slice allocates at most 100 operations per writer. A
+  // seven-day run cannot allocate billions of planned operations upfront.
+  const CHUNK_WINDOW_MS = 30_000;
+  const CHUNKS = Math.max(1, Math.ceil(durationSec * 1000 / CHUNK_WINDOW_MS));
+  const opsPerChunk = 100;
   const writerPaceMs = Math.max(1, Math.floor((durationSec * 1000) / (CHUNKS * opsPerChunk)));
+  const WRITER_BASE = 100_000_000, WRITER_STRIDE = 20_000_000, MULTI_OFFSET = 10_000_000;
 
-  // Deterministic per-chunk plan: op indices advance globally so capture order is stable.
-  // update/delete ops may target rows that do not exist yet and emit no change message,
-  // so equality is asserted on unique insert captures only; all captured changes still
-  // carry monotonicity and resume-bound checks below.
-  const plans = [];
+  // Only count SQL operations and inserts once the exact effect completed.
   let expectedInsertCount = 0;
   let eventsAttempted = 0;
-  for (let chunk = 0; chunk < CHUNKS; chunk += 1) {
-    const chunkPlans = Array.from({ length: writers }, () => []);
-    for (let wi = 0; wi < writers; wi += 1) {
-      for (let op = 0; op < opsPerChunk; op += 1) {
-        const opIndex = chunk * opsPerChunk * writers + wi * opsPerChunk + op;
-        const kind = opMix(wi, opIndex);
-        eventsAttempted += opEvents(kind);
-        if (kind === 'insert') expectedInsertCount += 1;
-        chunkPlans[wi].push({ opIndex, kind });
-      }
-    }
-    plans.push(chunkPlans);
-  }
 
   let capturedChanges = 0;
   let insertCapturedTotal = 0;
@@ -97,34 +84,66 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
   let windowBounded = true;
   let lastLagBytes = null;
 
-  async function writePlan(plan) {
-    const tasks = Array.from({ length: writers }, async (_, wi) => {
-      const wClient = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
-      await wClient.connect();
+  async function writePlan(chunk) {
+    const jobs = Array.from({ length: writers }, async (_, wi) => {
+      const client = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
+      await client.connect();
+      let inserted = 0, attempted = 0, operations = 0;
       try {
-        const ops = plan[wi];
-        for (let i = 0; i < ops.length; i += 1) {
-          const { opIndex, kind } = ops[i];
-          const baseId = wi * 1_000_000 + opIndex;
+        for (let op = 0; op < opsPerChunk; op += 1) {
+          const opIndex = chunk * opsPerChunk + op;
+          const kind = opMix(wi, opIndex);
+          const singleId = WRITER_BASE + wi * WRITER_STRIDE + opIndex + 1;
+          const id = kind === 'multi' ? singleId + MULTI_OFFSET : singleId;
+          if (opIndex >= MULTI_OFFSET || id > 2_147_483_647) {
+            throw new Error('CDC writer exhausted its disjoint 32-bit identifier band');
+          }
+          let inTx = false;
           try {
-            if (kind === 'insert') {
-              await wClient.query(`INSERT INTO public."${table}"(id, payload) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [baseId + 1, `payload-${opIndex}`]);
-            } else if (kind === 'update') {
-              await wClient.query(`UPDATE public."${table}" SET payload = $2 WHERE id = $1`, [baseId % 200 + 1, `updated-${opIndex}`]);
+            if (kind !== 'insert') { await client.query('BEGIN'); inTx = true; }
+            const added = await client.query(`INSERT INTO public."${table}"(id, payload) VALUES ($1, $2)`, [id, `new-${wi}-${opIndex}`]);
+            if (added.rowCount !== 1) throw new Error('CDC writer insert was not exactly one row');
+            // All update/delete/multi events MUST mutate a row that exists.
+            // A setup INSERT and its mutation share one source transaction:
+            // this proves event order and atomicity rather than no-op SQL.
+            if (kind === 'update' || kind === 'multi') {
+              const updated = await client.query(`UPDATE public."${table}" SET payload = $2 WHERE id = $1`, [id, `updated-${wi}-${opIndex}`]);
+              if (updated.rowCount !== 1) throw new Error('CDC writer update was not exactly one row');
             } else if (kind === 'delete') {
-              await wClient.query(`DELETE FROM public."${table}" WHERE id = $1`, [baseId % 200 + 1]);
-            } else {
-              const multiId = baseId + 100_000;
-              await wClient.query(`BEGIN; INSERT INTO public."${table}"(id, payload) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING; UPDATE public."${table}" SET payload = $3 WHERE id = $4; COMMIT`, [multiId, `m-${opIndex}`, `mu-${opIndex}`, multiId % 200 + 1]);
+              const deleted = await client.query(`DELETE FROM public."${table}" WHERE id = $1`, [id]);
+              if (deleted.rowCount !== 1) throw new Error('CDC writer delete was not exactly one row');
             }
-          } catch {}
-          if (i < ops.length - 1) await sleep(writerPaceMs);
+            if (inTx) await client.query('COMMIT');
+            inserted += 1;
+            attempted += opEvents(kind);
+            operations += 1;
+          } catch (error) {
+            if (inTx) {
+              try { await client.query('ROLLBACK'); } catch { /* original failure wins */ }
+            }
+            throw error;
+          }
+          if (op < opsPerChunk - 1) await sleep(writerPaceMs);
         }
       } finally {
-        await wClient.end();
+        await client.end();
       }
+      return { inserted, attempted, operations };
     });
-    await Promise.all(tasks);
+    // Every writer must close before a failed run may drop the test tables.
+    const completed = await Promise.allSettled(jobs);
+    const rejected = completed.find(outcome => outcome.status === 'rejected');
+    if (rejected) throw rejected.reason;
+    const result = completed.reduce((acc, outcome) => {
+      acc.inserted += outcome.value.inserted;
+      acc.attempted += outcome.value.attempted;
+      acc.operations += outcome.value.operations;
+      return acc;
+    }, { inserted: 0, attempted: 0, operations: 0 });
+    if (result.operations !== writers * opsPerChunk) {
+      throw new Error('CDC workload did not execute every required writer operation');
+    }
+    return result;
   }
 
   // Streaming-ordering invariant: pgoutput emits complete transactions in commit
@@ -184,13 +203,17 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
 
     // Steady-state capture: each chunk writes its deterministic plan, then the real
     // SPOOL CDC connector streams from the durable cursor to the chunk waterline.
+    const soakStart = process.hrtime.bigint();
     for (let chunk = 0; chunk < CHUNKS; chunk += 1) {
       const chunkStart = Date.now();
-      await writePlan(plans[chunk]);
+      const applied = await writePlan(chunk);
+      expectedInsertCount += applied.inserted;
+      eventsAttempted += applied.attempted;
       // Flush anchor: a deterministic insert that is the last WAL record of the chunk,
       // guaranteeing the streaming stop condition observes a commit at the waterline.
       const anchorId = 5_000_000 + chunk;
-      await adminClient.query(`INSERT INTO public."${table}"(id, payload) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [anchorId, `anchor-${chunk}`]);
+      const anchored = await adminClient.query(`INSERT INTO public."${table}"(id, payload) VALUES ($1, $2)`, [anchorId, `anchor-${chunk}`]);
+      if (anchored.rowCount !== 1) throw new Error('CDC anchor was not inserted exactly once');
       expectedInsertCount += 1;
       eventsAttempted += 1;
       const untilLsn = await flushLsn(adminClient);
@@ -199,6 +222,11 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
         startLsn: currentCheckpoint, untilLsn, maxMessages: 1_000_000
       });
       const rowChanges = streamed.changes.filter(change => ['insert', 'update', 'delete'].includes(change.tag) && change.table === table);
+      if (rowChanges.length !== applied.attempted + 1) {
+        failures.push({ code: 'CDC_ACTUAL_EVENT_COUNT_MISMATCH',
+          message: `chunk ${chunk} captured ${rowChanges.length} row events; expected ${applied.attempted + 1}`,
+          expected: false, classification: 'CORRECTNESS' });
+      }
       capturedChanges += rowChanges.length;
       insertCapturedTotal += rowChanges.filter(change => change.tag === 'insert').length;
       checkResumeBound(rowChanges, currentCheckpoint);
@@ -209,6 +237,11 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
 
       const elapsed = Date.now() - chunkStart;
       if (elapsed < writerPaceMs * opsPerChunk) await sleep(writerPaceMs * opsPerChunk - elapsed);
+    }
+
+    const observedSoakMs = Number(process.hrtime.bigint() - soakStart) / 1e6;
+    if (observedSoakMs < durationSec * 1000) {
+      failures.push({ code: 'CDC_SOAK_UNDER_EXECUTED', message: 'Monotonic CDC duration was shorter than declared workload', expected: false, classification: 'HARNESS' });
     }
 
     // Concurrent-window proof: a capture whose waterline was fixed BEFORE a burst
@@ -320,6 +353,7 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
       requestedConfig: { cdcDurationSeconds: profile.cdcDurationSeconds, writers: profile.writers },
       effectiveConfig,
       durationSec,
+      observedSoakMs,
       writers,
       chunks: CHUNKS,
       eventsAttempted,
