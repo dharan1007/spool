@@ -11,6 +11,7 @@ import { CredentialBroker } from '../../../src/daemon/credential-broker.js';
 import { createPostgresTargetRuntime } from '../../../src/connectors/postgres/runtime.js';
 import { MigrationRunner } from '../../../src/execution/migration-runner.js';
 import { generateRow } from '../dataset.js';
+import { createDurableJsonCheckpointStore } from './durable-checkpoint.js';
 
 function parseArgs() {
   const idx = process.argv.indexOf('--config');
@@ -47,27 +48,10 @@ async function main() {
   const lease = await execution.renewLease();
   const target = execution.openTarget();
 
-  // File-backed checkpoint store: parent shares the same file path via cfg.checkpointPath
-  // We use a simple JSON file checkpoint for this child->parent proof (durable across kill).
-  // The parent will read same file after kill to verify checkpoint persistence.
-  const { checkpointPath } = cfg;
-  const checkpointStore = {
-    _path: checkpointPath,
-    async load() {
-      try {
-        const data = await readFile(checkpointPath, 'utf8');
-        return JSON.parse(data);
-      } catch {
-        return null;
-      }
-    },
-    async save(cp) {
-      const { writeFile, mkdir } = await import('node:fs/promises');
-      const { dirname } = await import('node:path');
-      await mkdir(dirname(checkpointPath), { recursive: true });
-      await writeFile(checkpointPath, JSON.stringify(cp), 'utf8');
-    }
-  };
+  // The parent and killed child share one atomic, fsync'd checkpoint file.
+  // SIGKILL can expose either the old complete JSON or the new complete JSON,
+  // never a torn in-place write silently interpreted as no checkpoint.
+  const checkpointStore = createDurableJsonCheckpointStore({ path: cfg.checkpointPath });
 
   const runner = new MigrationRunner({ target, checkpointStore });
 

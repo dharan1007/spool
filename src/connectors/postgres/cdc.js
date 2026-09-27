@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { Client } from 'pg';
 import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
 import { fail } from '../../core/errors.js';
+import { createCdcSerialPump } from './cdc-serial-pump.js';
 import { expressionSourceFields } from '../../core/transforms.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
 import { parsePostgresEndpoint, postgresConnectionConfig } from './connection.js';
@@ -551,7 +552,7 @@ export function normalizeMessage(lsn, message) {
 
 export async function streamPostgresChanges({
   ref, credentialBroker, slotName, publicationNames,
-  startLsn = null, untilLsn = null, maxMessages = null, onChange = null
+  startLsn = null, untilLsn = null, maxMessages = null, onChange = null, maxCollectedChanges = 10_000
 } = {}) {
   const databaseRef = requireDatabaseRef(ref);
   if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_POSTGRES_CDC_CONFIG', 'credentialBroker.withSecret() is required');
@@ -563,6 +564,9 @@ export async function streamPostgresChanges({
   if (untilLsn != null && (typeof untilLsn !== 'string' || !LSN.test(untilLsn))) fail('INVALID_POSTGRES_LSN', 'untilLsn must look like 0/16B6C50');
   if (maxMessages != null && (!Number.isSafeInteger(maxMessages) || maxMessages < 1)) fail('INVALID_POSTGRES_CDC_CONFIG', 'maxMessages must be a positive safe integer');
   if (onChange != null && typeof onChange !== 'function') fail('INVALID_POSTGRES_CDC_CONFIG', 'onChange must be a function');
+  if (!Number.isSafeInteger(maxCollectedChanges) || maxCollectedChanges < 1 || maxCollectedChanges > 1_000_000) {
+    fail('INVALID_POSTGRES_CDC_CONFIG', 'maxCollectedChanges must be an integer between 1 and 1000000');
+  }
 
 const parsed = parsePostgresEndpoint(databaseRef.endpoint);
   let lastAcknowledgedLsn = startLsn ?? null;
@@ -572,8 +576,8 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
   let resolveDone;
   const done = new Promise(resolve => { resolveDone = resolve; });
   // Bounded changes array for testing/debugging - bounded to prevent unbounded memory
-  const MAX_CHANGES = 10000;
   const changes = [];
+  let truncatedChanges = false;
 
   return credentialBroker.withSecret(databaseRef.secretRef, async secret => {
     if (typeof secret !== 'string' || !secret) fail('SECRET_NOT_FOUND', 'PostgreSQL password is required');
@@ -587,7 +591,7 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
         ssl: parsed.sslMode === 'disable' ? false : { rejectUnauthorized: parsed.sslMode === 'verify-full' },
         application_name: 'spool-cdc-capture'
       },
-      { acknowledge: { auto: false, timeoutSeconds: 10 }, flowControl: { enabled: true } }
+      { acknowledge: { auto: false, timeoutSeconds: 0 }, flowControl: { enabled: true } }
     );
 
     const finish = error => {
@@ -597,36 +601,103 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
       resolveDone();
     };
 
-    service.on('error', error => finish(error));
-    service.on('data', async (lsn, message) => {
-      if (finished) return;
-      try {
-        const change = normalizeMessage(typeof lsn === 'string' ? lsn : String(lsn ?? ''), message);
+    let inTransaction = false;
+    let latestHeartbeatLsn = null;
+    // pg_current_wal_flush_lsn() can be *after* the last COMMIT record.
+    // An idle slot may therefore never emit a further COMMIT whose start
+    // reaches the requested waterline. A server heartbeat provides progress
+    // through an otherwise quiescent source. Drain ALL previously emitted
+    // data first, and never stop in the middle of a transaction.
+    const maybeStopAtHeartbeat = pump => {
+      if (finished || inTransaction || untilLsn == null || latestHeartbeatLsn == null
+        || comparePostgresLsn(latestHeartbeatLsn, untilLsn) < 0) return;
+      void pump.drain().then(async () => {
+        if (finished || inTransaction || comparePostgresLsn(latestHeartbeatLsn, untilLsn) < 0) return;
+        await service.stop();
+        finish(null);
+      }).catch(finish);
+    };
+
+    // The pinned pg-logical-replication 2.x implementation supports async
+    // listener flow control. Return the serial drain promise to that library,
+    // *and* serialize independently to prevent early/out-of-order ACKs or
+    // an unbounded queue if flow control is bypassed.
+    const pump = createCdcSerialPump({
+      maxPending: 1024,
+      onFailure(error) {
+        finish(error);
+        void service.stop().catch(() => { /* first failure wins */ });
+      },
+      async handle(lsn, message) {
+        if (finished) return;
+        const position = typeof lsn === 'string' ? lsn : String(lsn ?? '');
+        const change = normalizeMessage(position, message);
+        if (change && maxMessages != null && messageCount + 1 >= maxMessages && change.tag !== 'commit') {
+          fail('CDC_CAPTURE_BOUNDARY_INCOMPLETE', 'Maximum CDC capture messages reached before a committed transaction boundary');
+        }
         if (change) {
-          if (onChange) await onChange(change);
-          // Checkpoint monotonicity: commit LSN must not go backwards (per pgoutput commit-order guarantee)
+          if (change.tag === 'begin' && inTransaction) fail('CDC_PROTOCOL_VIOLATION', 'Nested CDC BEGIN before COMMIT');
+          if (['insert', 'update', 'delete', 'truncate'].includes(change.tag) && !inTransaction) {
+            fail('CDC_PROTOCOL_VIOLATION', 'CDC row mutation outside an open transaction');
+          }
           if (change.tag === 'commit' && lastAcknowledgedLsn && comparePostgresLsn(change.lsn, lastAcknowledgedLsn) < 0) {
-            throw fail('CDC_LSN_MONOTONICITY_VIOLATION', `Commit LSN went backwards: ${lastAcknowledgedLsn} -> ${change.lsn}`);
+            fail('CDC_LSN_MONOTONICITY_VIOLATION', `Commit LSN went backwards: ${lastAcknowledgedLsn} -> ${change.lsn}`);
           }
-          if (change.tag === 'commit') {
-            lastAcknowledgedLsn = change.lsn;
-          }
+          if (onChange) await onChange(change);
+        }
+        // A standby feedback packet is cumulative. ACKing a BEGIN/row WAL
+        // position before the complete COMMIT is safely processed risks
+        // advancing confirmed_flush_lsn beyond a partial transaction.
+        // In pg-logical-replication 2.5.x timeoutSeconds MUST be zero:
+        // its periodic standby timer ACKs its volatile _lastLsn even when
+        // auto:false, independently of this handler's durable watermark.
+        if (change?.tag === 'commit') {
+          if (!inTransaction) fail('CDC_PROTOCOL_VIOLATION', 'CDC COMMIT without BEGIN; cannot acknowledge partial history');
+          const committedEnd = change.commitEndLsn ?? change.lsn;
+          if (!LSN.test(committedEnd)) fail('INVALID_POSTGRES_LSN', 'CDC COMMIT end LSN is invalid');
+          const acknowledged = await service.acknowledge(committedEnd);
+          if (acknowledged !== true) fail('CDC_ACK_FAILED', 'CDC transport refused the complete transaction acknowledgement');
+          lastAcknowledgedLsn = committedEnd;
+          inTransaction = false;
+        }
+        if (change) {
+          if (change.tag === 'begin') inTransaction = true;
           messageCount += 1;
-          // Bounded changes array for testing - drop oldest if over limit
-          if (changes.length >= MAX_CHANGES) changes.shift();
+          if (changes.length >= maxCollectedChanges) {
+            changes.shift();
+            truncatedChanges = true;
+          }
           changes.push(change);
         }
-        await service.acknowledge(typeof lsn === 'string' ? lsn : String(lsn ?? ''));
+        // Never present a partial source transaction as a successful bounded
+        // capture. A maximum-message breach mid-transaction is an explicit
+        // refusal; LSN waterlines only end at a complete COMMIT.
         const stopByCount = maxMessages != null && messageCount >= maxMessages;
-        const stopByLsn = untilLsn != null && change && comparePostgresLsn(change.lsn, untilLsn) >= 0;
+        const stopByLsn = untilLsn != null && change?.tag === 'commit'
+          && comparePostgresLsn(change.commitEndLsn ?? change.lsn, untilLsn) >= 0;
         if (stopByCount || stopByLsn) {
-          try { await service.stop(); } catch { /* stopping wins over stop errors */ }
+          await service.stop();
           finish(null);
+        } else if (change?.tag === 'commit') {
+          maybeStopAtHeartbeat(pump);
         }
-      } catch (error) {
-        try { await service.stop(); } catch { /* stopping wins over stop errors */ }
-        finish(error);
       }
+    });
+    service.on('error', error => {
+      pump.close();
+      finish(error);
+    });
+    service.on('heartbeat', rawLsn => {
+      const lsn = typeof rawLsn === 'string' ? rawLsn : String(rawLsn ?? '');
+      if (finished || untilLsn == null || !LSN.test(lsn)) return;
+      if (latestHeartbeatLsn == null || comparePostgresLsn(lsn, latestHeartbeatLsn) > 0) {
+        latestHeartbeatLsn = lsn;
+      }
+      maybeStopAtHeartbeat(pump);
+    });
+    service.on('data', (lsn, message) => {
+      pump.enqueue(lsn, message);
+      return pump.drain();
     });
 
     try {
@@ -636,6 +707,8 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
       finish(error);
       await done;
     } finally {
+      pump.close();
+      await pump.drain();
       try { await service.destroy(); } catch { /* shutdown must not mask results */ }
     }
     // Translate transport failures into operator-actionable CDC errors at the
@@ -646,6 +719,8 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
       slotName: name,
       changes: Object.freeze(changes),
       messageCount,
+      truncatedChanges,
+      collectedChangeCount: changes.length,
       lastLsn: lastAcknowledgedLsn,
       acknowledgedLsn: lastAcknowledgedLsn
     });

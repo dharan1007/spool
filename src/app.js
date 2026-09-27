@@ -7,16 +7,17 @@ import { toolNamesForPhase } from './webmcp/registry.js';
 import { initializeOptionalWebMcp } from './webmcp/optional.js';
 
 const ROUTES = Object.freeze([
-  '/', '/autopilot', '/how-it-works', '/webmcp', '/benchmarks', '/docs',
+  '/', '/start', '/integrations', '/developers', '/local-runner', '/examples', '/security', '/services',
+  '/autopilot', '/how-it-works', '/webmcp', '/benchmarks', '/docs',
   '/studio', '/studio/new', '/studio/mission', '/studio/results'
 ]);
 
 const PUBLIC_NAV = [
   ['/', 'Overview'],
-  ['/autopilot', 'Autopilot'],
+  ['/start', 'Start here'],
   ['/how-it-works', 'How it works'],
-  ['/webmcp', 'WebMCP'],
-  ['/benchmarks', 'Benchmarks'],
+  ['/integrations', 'Integrations'],
+  ['/developers', 'Developers'],
   ['/docs', 'Docs']
 ];
 
@@ -181,8 +182,8 @@ function overviewPage(state) {
         <h1>Turn a messy CSV into a <em>verified data contract</em> without babysitting the workflow.</h1>
         <p class="lede">SPOOL profiles the source, infers a safe target schema, builds deterministic transforms, dry-runs them, executes in a Worker, groups bad rows, recovers from checkpoints, and exposes only the agent tools that make sense right now.</p>
         <div class="hero-actions">
-          <a href="/studio/new" data-route="/studio/new" class="button primary">Start a migration ${arrowIcon()}</a>
-          <a href="/how-it-works" data-route="/how-it-works" class="button secondary">See the workflow</a>
+          <a href="/start" data-route="/start" class="button primary">Find your setup ${arrowIcon()}</a>
+          <a href="/studio/new" data-route="/studio/new" class="button secondary">Open CSV Studio</a>
         </div>
         <div class="trust-line"><span><b>01</b> Your rows stay in-browser</span><span><b>02</b> No arbitrary generated code</span><span><b>03</b> Pause/recovery is durable</span></div>
       </div>
@@ -244,7 +245,7 @@ function autopilotPage(state) {
     <section class="page-hero compact-hero"><div>${heroBadge('AUTOPILOT')}<h1>The user states the outcome. <em>SPOOL owns the procedure.</em></h1><p>Autopilot is not a script that clicks the old UI. It is a kernel-level orchestration path that plans, dry-runs and starts the migration through the same deterministic commands used everywhere else.</p><a href="/studio/new" data-route="/studio/new" class="button primary">Run Autopilot ${arrowIcon()}</a></div><div class="mission-mini"><small>DEFAULT HAPPY PATH</small><code>Add source</code><span>↓</span><code>Choose Database-ready</code><span>↓</span><code>Run Autopilot</code><span>↓</span><strong>No action required</strong></div></section>
     <section class="section"><div class="section-heading"><span class="kicker">THE PIPELINE</span><h2>Seven internal stages, one primary action.</h2></div><div class="pipeline-list">${stages.map(([name,title,copy],i) => `<article><span class="pipeline-number">${String(i+1).padStart(2,'0')}</span><div><small>${name}</small><h3>${title}</h3><p>${copy}</p></div></article>`).join('')}</div></section>
     <section class="section split-section"><div><span class="kicker">SAFE AUTOMATION</span><h2>Automatic does not mean reckless.</h2><p>SPOOL only advances when the target and transform plan satisfy deterministic safety rules. Strong parseability evidence can promote a dirty string field to a type while rows that fail that contract are rejected into quality groups.</p></div><div class="decision-grid"><article class="decision safe"><span>CONTINUE AUTOMATICALLY</span><h3>Lossless / strongly evidenced</h3><p>Whitespace trim, normalized identifiers, obvious booleans, strongly parseable numbers and ISO dates.</p></article><article class="decision stop"><span>NEEDS ATTENTION</span><h3>Destructive / ambiguous</h3><p>Name collisions, multiple equally plausible interpretations, or a plan that cannot satisfy the typed target contract.</p></article></div></section>
-    <section class="section"><div class="callout"><div><span class="kicker">EVIDENCE, NOT MAGIC</span><h2>Every inferred field carries provenance.</h2></div><pre class="code-panel">target field: monthly_fee\ninferred type: number\nconfidence: 0.9900\nevidence: 99 / 100 sampled values parse\ndecision: automatic</pre></div></section>
+    <section class="section"><div class="callout"><div><span class="kicker">EVIDENCE, NOT MAGIC</span><h2>Every inferred field carries provenance.</h2></div><dl class="inference-summary"><div><dt>Field</dt><dd>Monthly fee</dd></div><div><dt>Proposed type</dt><dd>Number</dd></div><div><dt>Sample evidence</dt><dd>99 of 100 values parsed</dd></div><div><dt>Inference confidence</dt><dd>99%</dd></div><div><dt>Decision</dt><dd>Automatic</dd></div></dl></div></section>
   `, state);
 }
 
@@ -430,6 +431,18 @@ function notFoundPage(path, state) {
 function render() {
   if (!latestState || !appRoot) return;
   const path = currentPath();
+  const productMarkup = window.__spoolProductSurface?.render(path);
+  if (typeof productMarkup === 'string') {
+    appRoot.innerHTML = productMarkup;
+    document.title = `${window.__spoolProductSurface.title(path)} — SPOOL`;
+    return;
+  }
+  // The sibling product bundle might not have evaluated yet. Never paint
+  // an incorrect 404 while the valid product route initializes.
+  if (['/local-runner', '/examples', '/security', '/services', '/start', '/integrations', '/developers'].includes(path)) {
+    appRoot.innerHTML = '<main class="boot-screen" role="status">Loading SPOOL page…</main>';
+    return;
+  }
   const pages = {
     '/': overviewPage,
     '/autopilot': autopilotPage,
@@ -523,8 +536,17 @@ async function handleAction(action) {
 
 function bindGlobalEvents() {
   appRoot.addEventListener('click', event => {
-    const routeLink = event.target.closest('[data-route]');
-    if (routeLink) { event.preventDefault(); navigate(routeLink.dataset.route); return; }
+    // Product-page links and the Studio share one history without causing
+    // a new page load (or silently losing the browser-local workspace).
+    // Preserve native browser handling for modified clicks, downloads and
+    // links leaving this application's explicitly enumerated routes.
+    const routeLink = event.target.closest('[data-route], a[href^="/"]');
+    if (routeLink && !event.defaultPrevented && event.button === 0
+      && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
+      && routeLink.getAttribute('target') !== '_blank' && !routeLink.hasAttribute('download')) {
+      const route = routeLink.dataset.route ?? routeLink.getAttribute('href');
+      if (ROUTES.includes(route)) { event.preventDefault(); navigate(route); return; }
+    }
     const outcome = event.target.closest('[data-outcome]');
     if (outcome) { selectedOutcome = outcome.dataset.outcome; render(); return; }
     const action = event.target.closest('[data-action]');
@@ -557,7 +579,7 @@ async function initWebMcp() {
 function renderBootFailure(error) {
   if (!appRoot) return;
   const message = error?.message || String(error);
-  appRoot.innerHTML = `<main class="boot-failure"><div class="boot-failure-card"><span class="brand-mark">S</span><span class="kicker">STARTUP CHECK FAILED</span><h1>Unable to start SPOOL.</h1><p>The application stopped before entering the migration workflow instead of leaving you on a permanent loading screen.</p><pre>${esc(message)}</pre><div class="hero-actions"><button class="button primary" id="reload-app">Reload SPOOL</button><span>IndexedDB and Web Workers must be available in this browser.</span></div></div></main>`;
+  appRoot.innerHTML = `<main class="boot-failure"><div class="boot-failure-card"><span class="brand-mark">S</span><span class="kicker">STARTUP CHECK FAILED</span><h1>Unable to start SPOOL.</h1><p>The application stopped before entering the migration workflow instead of leaving you on a permanent loading screen.</p><details class="developer-details"><summary>Technical startup details</summary><pre>${esc(message)}</pre></details><div class="hero-actions"><button class="button primary" id="reload-app">Reload SPOOL</button><span>IndexedDB and Web Workers must be available in this browser.</span></div></div></main>`;
   document.getElementById('reload-app')?.addEventListener('click', () => window.location.reload());
 }
 

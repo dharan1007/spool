@@ -72,8 +72,10 @@ pg_tests=(tests/conformance/postgres*.test.js)
 redteam_tests=(tests/industrial-postgres-*.test.js tests/industrial-redteam.test.js)
 (( ${#pg_tests[@]} > 0 )) || fail 'no PostgreSQL conformance tests found'
 (( ${#redteam_tests[@]} >= 2 )) || fail 'no complete PostgreSQL red-team tests found'
-run_gate postgres-conformance node --test --test-concurrency=1 "${pg_tests[@]}"
-run_gate postgres-redteam node --test --test-concurrency=1 "${redteam_tests[@]}"
+run_gate postgres-conformance node --test --test-reporter=tap --test-concurrency=1 "${pg_tests[@]}"
+run_gate postgres-conformance-executed node scripts/qualify/assert-test-execution.js "$evidence/postgres-conformance.log" 10
+run_gate postgres-redteam node --test --test-reporter=tap --test-concurrency=1 "${redteam_tests[@]}"
+run_gate postgres-redteam-executed node scripts/qualify/assert-test-execution.js "$evidence/postgres-redteam.log" 4
 run_gate postgres-materialization node scripts/qualify-postgres-materialization.js
 run_gate postgres-qualification node scripts/qualify/industrial-postgres.js --profile CI --output "$evidence/postgres"
 run_gate evidence-verification node scripts/qualify/verify-evidence.js "$evidence/postgres"

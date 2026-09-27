@@ -355,10 +355,20 @@ export function createCdcTransactionIdentity({ migrationId, planId, sourceSnapsh
 // Incremental ordered-payload hash over a mutation stream: each canonical
 // mutation record is length-framed into a running SHA-256, so the hash binds
 // exact order without buffering the stream.
-export function hashOrderedMutations(mutations) {
+export function hashOrderedMutations(mutations, { maxMutations = null } = {}) {
+  if (maxMutations != null && (!Number.isSafeInteger(maxMutations) || maxMutations < 1)) {
+    fail('INVALID_CDC_TRANSACTION', 'maxMutations must be a positive safe integer');
+  }
   const digest = createHash('sha256');
   let count = 0;
   const feed = record => {
+    // Enforce the effect budget BEFORE hashing or materializing another
+    // mapped mutation. This is also the FIRST pass of CDC apply: checking
+    // only inside target.commitCdcTransaction is too late for a generator
+    // that exceeds its declared capacity or never terminates.
+    if (maxMutations != null && count >= maxMutations) {
+      fail('CDC_TRANSACTION_BUDGET_EXCEEDED', 'CDC mutation stream exceeded the configured effect budget', { maxMutations, consumed: count });
+    }
     const text = canonicalJson(record);
     digest.update(`${Buffer.byteLength(text, 'utf8')}:`, 'utf8');
     digest.update(text, 'utf8');
@@ -428,6 +438,42 @@ export async function discoverTargetPrimaryKey({ targetRef, credentialBroker, ex
 //   durable checkpoint persist -> source acknowledgement.
 // Acknowledgement therefore always trails durability; a crash before ack
 // replays through ledger reconciliation, a crash after ack is already proven.
+// pg-logical-replication 2.5.x sends periodic feedback from the volatile
+// receive cursor unless the driver timer is disabled. This scheduler sends
+// ONLY an explicitly supplied durable position, serializes heartbeat replies
+// with transaction-commit feedback, and prevents LSN regression under races.
+export function createCdcFeedbackQueue({ acknowledge, initialLsn = null } = {}) {
+  if (typeof acknowledge !== 'function') fail('INVALID_POSTGRES_CDC_CONFIG', 'Acknowledgement sender is required');
+  if (initialLsn != null) requireLsn(initialLsn, 'initialLsn');
+  let queue = Promise.resolve();
+  let lastFeedbackLsn = initialLsn;
+  let closed = false;
+  const send = position => {
+    const job = queue.then(async () => {
+      if (closed) fail('CDC_FEEDBACK_CLOSED', 'CDC acknowledgement queue is already closed');
+      let candidate = typeof position === 'function' ? position() : position;
+      requireLsn(candidate, 'feedbackLsn');
+      if (lastFeedbackLsn && comparePostgresLsn(candidate, lastFeedbackLsn) < 0) {
+        candidate = lastFeedbackLsn;
+      }
+      const accepted = await acknowledge(candidate);
+      if (accepted !== true) fail('CDC_ACK_FAILED', 'Replication driver refused feedback for the durable LSN');
+      lastFeedbackLsn = candidate;
+      return candidate;
+    });
+    // Preserve queue liveness after a refusal, but return the ORIGINAL
+    // rejecting promise so callers cannot silently treat it as success.
+    queue = job.catch(() => {});
+    return job;
+  };
+  return Object.freeze({
+    send,
+    lastSent: () => lastFeedbackLsn,
+    drain: () => queue,
+    close: () => { closed = true; }
+  });
+}
+
 function requireSourceTable(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('INVALID_CDC_APPLY_CONFIG', 'sourceTable is required');
   if (typeof value.schema !== 'string' || !value.schema || typeof value.table !== 'string' || !value.table) {
@@ -691,11 +737,14 @@ export function createCdcApplier({
           ssl: parsed.sslMode === 'disable' ? false : { rejectUnauthorized: parsed.sslMode === 'verify-full' },
           application_name: 'spool-cdc-apply'
         },
-        { acknowledge: { auto: false, timeoutSeconds: 10 }, flowControl: { enabled: true } }
+        { acknowledge: { auto: false, timeoutSeconds: 0 }, flowControl: { enabled: true } }
       );
       const queue = [];
       let streamError = null;
       let stopped = false;
+      const feedback = createCdcFeedbackQueue({
+        acknowledge: lsn => service.acknowledge(lsn), initialLsn: fromLsn
+      });
       let roomWaiters = [];
       let notify;
       let notified = new Promise(resolve => { notify = resolve; });
@@ -733,12 +782,19 @@ export function createCdcApplier({
         streamError = error;
         wake();
       });
-      service.on('heartbeat', lsn => {
-        // Server WAL position with no change attached: the only termination
-        // signal on a quiesced source. Tracked for the waterline, and wakes
-        // the pump so an idle drain can observe it and stop.
+      service.on('heartbeat', (lsn, _timestamp, shouldRespond) => {
+        // The server can request feedback during an open, uncommitted source
+        // transaction. Respond with the LAST durably saved checkpoint (or
+        // earlier server-ACKed position), never with the heartbeat's volatile
+        // received LSN; queue feedback behind any in-flight commit ACK.
         trackPosition(lsn);
         wake();
+        if (shouldRespond && !stopped) {
+          void feedback.send(() => serverAck.last ?? fromLsn ?? '0/0').catch(error => {
+            if (!streamError && !stopped) streamError = error;
+            wake();
+          });
+        }
       });
       service.on('data', async (lsn, message) => {
         // Backpressure, never drops: when the queue is full this listener
@@ -761,6 +817,8 @@ export function createCdcApplier({
       const stopService = async () => {
         stopped = true;
         wakeRoom();
+        await feedback.drain();
+        feedback.close();
         try { await service.stop(); } catch { /* stopping wins over stop errors */ }
         try { await service.destroy(); } catch { /* shutdown must not mask results */ }
       };
@@ -769,8 +827,8 @@ export function createCdcApplier({
       // names the last SERVER-acked LSN (never the merely applied one).
       const flushPendingAck = async () => {
         if (serverAck.pending == null) return;
-        await service.acknowledge(serverAck.pending);
-        serverAck.last = serverAck.pending;
+        const sentPosition = await feedback.send(() => serverAck.pending);
+        serverAck.last = sentPosition;
         serverAck.atCount = metrics.appliedTransactions;
         serverAck.atMs = Date.now();
         serverAck.pending = null;
@@ -984,7 +1042,7 @@ export async function applyCdcTransaction({
     }
   };
   // Pass 1 (streaming, O(1) memory): ordered payload hash + exact count.
-  const hashed = await hashOrderedMutations(streamMutations());
+  const hashed = await hashOrderedMutations(streamMutations(), { maxMutations });
   const transactionIdentity = createCdcTransactionIdentity({
     migrationId: migration.migrationId,
     planId: plan.planId,

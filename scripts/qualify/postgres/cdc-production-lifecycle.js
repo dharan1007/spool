@@ -73,17 +73,27 @@ export async function runCdcProductionLifecycle({ profile, seed, evidenceWriter,
       while (Date.now() < stopAt) {
         const kind = (wi * 13 + opIndex * 7) % 100;
         const baseId = rowCount + wi * 2_000_000 + opIndex;
-        if (kind < 60) {
+        // A logical writer operation is exactly one source transaction. The
+        // delete+insert branch must not expose an intermediate deleted row to
+        // logical decoding. Do not claim "transactions" by counting loops.
+        await client.query('BEGIN');
+        try {
+          if (kind < 60) {
           await client.query(`INSERT INTO public."${sourceTable}"(id, payload) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [baseId + 1, `w${wi}-${opIndex}`]);
-        } else if (kind < 85) {
+          } else if (kind < 85) {
           await client.query(`UPDATE public."${sourceTable}" SET payload = $2 WHERE id = $1`, [(opIndex % rowCount) + 1, `u${wi}-${opIndex}`]);
-        } else {
+          } else {
           await client.query(`DELETE FROM public."${sourceTable}" WHERE id = $1`, [(opIndex % rowCount) + 1]);
           await client.query(`INSERT INTO public."${sourceTable}"(id, payload) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [(opIndex % rowCount) + 1, `r${wi}-${opIndex}`]);
+          }
+          await client.query('COMMIT');
+          transactions += 1;
+        } catch (error) {
+          try { await client.query('ROLLBACK'); } catch { /* original failure wins */ }
+          throw error;
         }
         ops += 1; opIndex += 1;
         if (opIndex % 25 === 0) {
-          transactions += 1;
           await new Promise(resolve => setTimeout(resolve, 5));
         }
       }
@@ -170,7 +180,11 @@ export async function runCdcProductionLifecycle({ profile, seed, evidenceWriter,
 
     const writerStats = await writerPromise;
     const totalOps = writerStats.reduce((a, b) => a + b.ops, 0);
-    evidenceWriter.appendRaw({ scenario, event: 'writers_quiesced', totalOps, writers });
+    const committedSourceTransactions = writerStats.reduce((a, b) => a + b.transactions, 0);
+    if (committedSourceTransactions !== totalOps) {
+      throw new Error(`Qualification writer transactions do not match committed operations: ${committedSourceTransactions}/${totalOps}`);
+    }
+    evidenceWriter.appendRaw({ scenario, event: 'writers_quiesced', totalOps, committedSourceTransactions, writers });
 
     // 4. Catch up through the waterline on the production applier path.
     const quencher = await admin();
@@ -240,7 +254,7 @@ export async function runCdcProductionLifecycle({ profile, seed, evidenceWriter,
       scenario,
       requestedConfig: { rows: profile.rows, writers: profile.writers, cdcDurationSeconds: profile.cdcDurationSeconds, largeTransactionRows: profile.largeTransactionRows },
       effectiveConfig,
-      rowCount, writers, durationSec, largeTxRows, totalOps,
+      rowCount, writers, durationSec, largeTxRows, totalOps, committedSourceTransactions,
       appliedTransactions: summary.appliedTransactions ?? null,
       appliedLsn: binding?.appliedLsn ?? null,
       acknowledgedLsn: binding?.acknowledgedLsn ?? null,
