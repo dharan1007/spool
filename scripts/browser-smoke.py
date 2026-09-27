@@ -238,7 +238,7 @@ def main():
             raise AssertionError(f'Browser error/warning logs: {severe_logs[:3]}')
 
         shot = cdp.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': False})
-        screenshot_path = os.path.join(ROOT, 'browser-smoke.png')
+        screenshot_path = os.environ.get('SPOOL_SCREENSHOT_PATH') or os.path.join(ROOT, 'browser-smoke.png')
         with open(screenshot_path, 'wb') as f:
             f.write(base64.b64decode(shot['data']))
         print(json.dumps({

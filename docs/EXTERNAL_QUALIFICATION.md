@@ -4,7 +4,7 @@ GitHub-hosted Actions minutes can be exhausted without making SPOOL's industrial
 
 ## Direct local/independent runner (requires no GitHub Actions)
 
-Use a dedicated Linux x64 VM, or Windows with WSL2 Ubuntu, with Git, Node.js 22, npm, Python 3, Chromium, and isolated PostgreSQL 17 configured with `wal_level=logical`. The PostgreSQL test suite creates, mutates and drops objects: NEVER aim it at a customer or production database. Provide CodeQL CLI for the security scan; CodeQL licensing/availability for a private repository must be checked separately. Install dependencies from the pinned lockfile, not from untrusted scripts.
+Use a dedicated Linux x64 VM, or Windows with WSL2 Ubuntu, with Git, Node.js 22, npm, Python 3, Chromium, and isolated PostgreSQL 17 configured with `wal_level=logical`. The PostgreSQL test suite creates, mutates and drops objects: NEVER aim it at a customer or production database. Provide CodeQL CLI for the security scan; CodeQL licensing/availability for a private repository must be checked separately. Python `websocket-client` and a working Chromium/Chrome executable are mandatory for the standalone browser gate; missing browser dependencies fail closed, never silently skip the smoke run. Install dependencies from the pinned lockfile, not from untrusted scripts.
 
 Checkout an exact reviewed commit on the experimental/qualification branch, and use its clean worktree. Before execution, integrate red-team PR #72's tests for contract races and natural stale-lease takeover; the offline gate **refuses** to proceed without those files:
 
@@ -19,7 +19,7 @@ export SPOOL_EXTERNAL_EVIDENCE_ROOT="$HOME"
 bash scripts/qualify/external-ci.sh "$(git rev-parse HEAD)"
 ```
 
-The script checks the exact SHA, clean checkout, real PostgreSQL credentials and presence of the two red-team tests. It then executes `npm ci`, the production dependency audit, unit/integration/model/static/build/package/release checks, the entire real PostgreSQL conformance test set, red-team tests, snapshot materialization, actual CI-sized PostgreSQL qualification, the independent evidence verifier, and the CodeQL CLI. Missing CodeQL is a hard refusal. Its evidence directory is outside the worktree, and includes per-command output, exit statuses and SHA-256 checksums. SHA-256 checksums alone do **not** make the resulting evidence an independently signed or tamper-proof release receipt.
+The script checks the exact SHA, clean checkout, real PostgreSQL credentials and presence of the two red-team tests. It then executes `npm ci`, the production dependency audit, unit/integration/model/static/build/package/release checks, a real Chromium smoke run against the built SPA (screenshot stored and checksummed OUTSIDE the checkout), the entire real PostgreSQL conformance test set, red-team tests, snapshot materialization, actual CI-sized PostgreSQL qualification, the independent evidence verifier, and the CodeQL CLI. Missing CodeQL is a hard refusal. Its evidence directory is outside the worktree, and includes per-command output, exit statuses and SHA-256 checksums. SHA-256 checksums alone do **not** make the resulting evidence an independently signed or tamper-proof release receipt.
 
 When the environment is not ready, it exits nonzero. A passing run records only `DEVELOPMENT_EVIDENCE_ONLY` and `RELEASE_AUTHORIZED=NO`. It does **not** establish sustained soak, hard SIGKILL recovery, natural lease takeover, multi-party approval, production IAM, multiversion/HA qualification, Windows/macOS portability, or 10M/100M/1B-row scale.
 
