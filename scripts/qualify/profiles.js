@@ -20,10 +20,10 @@ export const PROFILE_DEFINITIONS = Object.freeze({
     batchSize: 5000,
     writers: 5,
     workers: 4,
-    cdcDurationSeconds: 300,
+    cdcDurationSeconds: 3600,
     largeTransactionRows: 100_000,
     maxRssBytes: 1536 * 1024 * 1024,
-    description: 'SMALL: 1M rows, 5 writers, 5 min CDC'
+    description: 'SMALL: 1M rows, 5 writers, 1h CDC'
   }),
   MEDIUM: Object.freeze({
     name: 'MEDIUM',
@@ -32,10 +32,10 @@ export const PROFILE_DEFINITIONS = Object.freeze({
     batchSize: 10000,
     writers: 10,
     workers: 8,
-    cdcDurationSeconds: 3600,
+    cdcDurationSeconds: 24 * 3600,
     largeTransactionRows: 500_000,
     maxRssBytes: 3072 * 1024 * 1024,
-    description: 'MEDIUM: 10M rows, 1h CDC'
+    description: 'MEDIUM: 10M rows, 24h CDC'
   }),
   LARGE: Object.freeze({
     name: 'LARGE',
@@ -44,10 +44,10 @@ export const PROFILE_DEFINITIONS = Object.freeze({
     batchSize: 10000,
     writers: 20,
     workers: 16,
-    cdcDurationSeconds: 6 * 3600,
+    cdcDurationSeconds: 72 * 3600,
     largeTransactionRows: 1_000_000,
     maxRssBytes: 6144 * 1024 * 1024,
-    description: 'LARGE: 100M rows, 6h CDC'
+    description: 'LARGE: 100M rows, 72h CDC'
   }),
   INDUSTRIAL: Object.freeze({
     name: 'INDUSTRIAL',
@@ -56,13 +56,16 @@ export const PROFILE_DEFINITIONS = Object.freeze({
     batchSize: 10000,
     writers: 50,
     workers: 32,
-    cdcDurationSeconds: 24 * 3600,
+    cdcDurationSeconds: 7 * 24 * 3600,
     largeTransactionRows: 1_000_000,
     maxRssBytes: 12 * 1024 * 1024 * 1024,
-    description: 'INDUSTRIAL: 1B rows, 24h CDC'
+    description: 'INDUSTRIAL: 1B rows, 7d CDC'
   })
 });
 
+// A seven-day immutable profile must be executable; custom longer soaks
+// are bounded to 30 days and cannot inherit the immutable profile name.
+const MAX_CDC_SOAK_SECONDS = 30 * 24 * 3600;
 const OVERRIDE_KEYS = new Set(['rows', 'payloadBytes', 'batchSize', 'writers', 'workers', 'cdcDurationSeconds', 'largeTransactionRows', 'maxRssBytes']);
 
 function parseOverride(key, value) {
@@ -100,7 +103,7 @@ export function resolveProfile(name, overrides = {}) {
   if (resolved.batchSize > resolved.rows) fail('INVALID_PROFILE', 'batchSize must not exceed rows');
   if (resolved.writers < 1 || resolved.writers > 100) fail('INVALID_PROFILE', 'writers must be 1..100');
   if (resolved.workers < 1 || resolved.workers > 64) fail('INVALID_PROFILE', 'workers must be 1..64');
-  if (resolved.cdcDurationSeconds < 5 || resolved.cdcDurationSeconds > 72 * 3600) fail('INVALID_PROFILE', 'cdcDurationSeconds must be 5..259200');
+  if (resolved.cdcDurationSeconds < 5 || resolved.cdcDurationSeconds > MAX_CDC_SOAK_SECONDS) fail('INVALID_PROFILE', 'cdcDurationSeconds must be 5..2592000');
   if (!Number.isSafeInteger(resolved.largeTransactionRows) || resolved.largeTransactionRows < 1) fail('INVALID_PROFILE', 'largeTransactionRows must be >= 1');
   if (!Number.isSafeInteger(resolved.maxRssBytes) || resolved.maxRssBytes < 64 * 1024 * 1024) fail('INVALID_PROFILE', 'maxRssBytes must be >= 64MiB');
   const neededBytes = resolved.rows * (resolved.payloadBytes + 512) * 3;

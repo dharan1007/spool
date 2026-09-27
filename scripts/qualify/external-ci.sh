@@ -60,6 +60,9 @@ run_gate unit-integration npm test
 run_gate model-check npm run check:model
 run_gate static-check node scripts/static-check.js
 run_gate build npm run build
+# Real Chromium checks the built site via SPA rewrites; screenshot stays OUTSIDE
+# the immutable checkout and is included in the evidence checksums.
+run_gate browser-smoke bash scripts/qualify/browser-smoke-direct.sh "$evidence/browser-smoke.png"
 run_gate package npm run pack:verify
 run_gate release-gate node scripts/release-gate.js
 
@@ -99,5 +102,5 @@ run_gate source-integrity bash -c '[[ $(git rev-parse HEAD) == "$SPOOL_COMMIT_SH
 # Only this exact local Linux/PG configuration ran here. Windows/macOS, true
 # kill/failover, scale and enterprise IAM must be separately qualified.
 printf 'UTC_FINISHED=%s\nLOCAL_LINUX_PG_GATES=PASS\nQUALIFICATION_CLAIM=DEVELOPMENT_EVIDENCE_ONLY\nRELEASE_AUTHORIZED=NO\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$evidence/manifest.txt"
-(cd "$evidence" && sha256sum -- *.log manifest.txt codeql.sarif > sha256sums.txt)
+(cd "$evidence" && sha256sum -- *.log manifest.txt codeql.sarif browser-smoke.png > sha256sums.txt)
 printf 'LOCAL DEVELOPMENT GATES PASS. NOT A PRODUCTION/INDUSTRIAL CERTIFICATE. Evidence: %s\n' "$evidence"

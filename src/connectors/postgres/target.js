@@ -3,6 +3,7 @@ import { sha256Canonical } from '../../platform/canonical-json.js';
 import { from as copyFrom } from 'pg-copy-streams';
 import { normalizePostgresRow, normalizePostgresSchema, normalizePostgresValue, postgresContentKeyId, postgresContentRowHash } from './row-codec.js';
 import { withPostgresClient } from './connection.js';
+import { postgresMetadataCacheKey } from './metadata-cache-key.js';
 import { assertExactPostgresAffectedRows, countExactPostgresUpserts } from './exact-cardinality.js';
 import { POSTGRES_METADATA_SCHEMA, postgresTargetContractId } from './preflight.js';
 
@@ -268,7 +269,7 @@ export async function ensurePostgresMetadata({ targetRef, credentialBroker } = {
 const ensuredMetadataTargets = new Set();
 
 function metadataCacheKey(targetRef) {
-  return `${targetRef.database ?? ''}.${targetRef.schema ?? ''}.${targetRef.table ?? ''}`;
+  return postgresMetadataCacheKey(targetRef);
 }
 
 export function invalidatePostgresMetadataCache(targetRef = null) {

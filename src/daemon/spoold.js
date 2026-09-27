@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { fail, toErrorEnvelope } from '../core/errors.js';
+import { compileLocalAuthorities, authenticateLocalBearer, assertLocalCommandAuthority } from './local-authority.js';
 
 const COMMANDS = new Set([
   'inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt',
@@ -95,9 +96,21 @@ function transportError(error) {
   });
 }
 
-export function createSpoolDaemon({ service, token, host = '127.0.0.1', allowedOrigins = [], maxBodyBytes = 1024 * 1024 } = {}) {
+export function createSpoolDaemon({ service, token, localIdentities = null, host = '127.0.0.1', allowedOrigins = [], maxBodyBytes = 1024 * 1024 } = {}) {
   if (!service || typeof service !== 'object') fail('INVALID_DAEMON_CONFIG', 'service is required');
-  if (typeof token !== 'string' || token.length < 32) fail('INVALID_DAEMON_CONFIG', 'daemon bearer token must be at least 32 bytes');
+  // Legacy single bearer remains loopback-only for backward compatibility.
+  // In bound mode, callers MUST use separately provisioned identity credentials;
+  // a legacy fallback would bypass per-principal authorization.
+  if (localIdentities == null) {
+    if (typeof token !== 'string' || token.length < 32) fail('INVALID_DAEMON_CONFIG', 'daemon bearer token must be at least 32 bytes');
+  } else if (token != null) {
+    fail('INVALID_DAEMON_CONFIG', 'legacy token and bound localIdentities are mutually exclusive');
+  }
+  let localPolicy = null;
+  if (localIdentities != null) {
+    try { localPolicy = compileLocalAuthorities(localIdentities, COMMANDS); }
+    catch (error) { fail('INVALID_DAEMON_CONFIG', error.message); }
+  }
   if (!['127.0.0.1', '::1'].includes(host)) fail('INVALID_DAEMON_CONFIG', 'spoold binds only to a loopback IP');
   if (!Array.isArray(allowedOrigins) || allowedOrigins.some(value => typeof value !== 'string')) fail('INVALID_DAEMON_CONFIG', 'allowedOrigins must be a string array');
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1024 || maxBodyBytes > 16 * 1024 * 1024) fail('INVALID_DAEMON_CONFIG', 'maxBodyBytes must be 1 KiB to 16 MiB');
@@ -107,7 +120,9 @@ export function createSpoolDaemon({ service, token, host = '127.0.0.1', allowedO
   const server = http.createServer(async (request, response) => {
     try {
       const auth = request.headers.authorization;
-      if (typeof auth !== 'string' || !auth.startsWith('Bearer ') || !safeTokenEqual(token, auth.slice(7))) {
+      const localIdentity = localPolicy ? authenticateLocalBearer(localPolicy, auth) : null;
+      if (localPolicy ? localIdentity == null
+        : typeof auth !== 'string' || !auth.startsWith('Bearer ') || !safeTokenEqual(token, auth.slice(7))) {
         json(response, 401, { ok: false, error: { code: 'UNAUTHORIZED', message: 'Bearer authentication required' } });
         return;
       }
@@ -124,11 +139,15 @@ export function createSpoolDaemon({ service, token, host = '127.0.0.1', allowedO
         return;
       }
       const body = await readJsonBody(request, maxBodyBytes);
+      if (localPolicy) {
+        try { assertLocalCommandAuthority(localIdentity, body); }
+        catch (error) { fail(error.code ?? 'COMMAND_FORBIDDEN', error.message); }
+      }
       const result = await dispatch(service, body);
       json(response, 200, { ok: true, result });
     } catch (error) {
       const publicError = transportError(error);
-      const status = publicError.code === 'REQUEST_TOO_LARGE' ? 413 : publicError.code === 'INVALID_JSON' || publicError.code === 'INVALID_COMMAND' ? 400 : publicError.code === 'INTERNAL_ERROR' ? 500 : 422;
+      const status = publicError.code === 'REQUEST_TOO_LARGE' ? 413 : ['COMMAND_FORBIDDEN','PRINCIPAL_MISMATCH','LOCAL_AUTHORITY_REQUIRED'].includes(publicError.code) ? 403 : publicError.code === 'INVALID_JSON' || publicError.code === 'INVALID_COMMAND' ? 400 : publicError.code === 'INTERNAL_ERROR' ? 500 : 422;
       json(response, status, { ok: false, error: publicError });
     }
   });
