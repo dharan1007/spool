@@ -15,13 +15,13 @@ const daemon = createSpoolDaemon({
     {
       token: process.env.SPOOL_OPERATOR_A_TOKEN,
       principal: 'operator:alice',
-      commands: ['inspect', 'plan', 'status', 'run', 'receipt'],
+      commands: ['inspect', 'plan', 'status', 'approve', 'run', 'receipt'],
       migrationIds: ['preprovisioned-migration-A']
     },
     {
       token: process.env.SPOOL_OPERATOR_B_TOKEN,
       principal: 'operator:bob',
-      commands: ['inspect', 'plan', 'status', 'approve', 'receipt'],
+      commands: ['inspect', 'plan', 'status', 'receipt'],
       migrationIds: ['preprovisioned-migration-A']
     }
   ]
@@ -45,8 +45,11 @@ data requires a separately trusted binding from each identity to immutable
 source and target resource identities. This setting does not implement
 OIDC/JWT verification, mTLS, global session revocation, approval separation
 between distinct humans, audit log export, or distributed role administration.
-The signed plan/repair approval record still binds to one request principal,
-so do **not** interpret separate `approve` and `run` grants as a completed
+The signed plan/repair approval record still binds to one request principal.
+For now a working local approve-and-run path needs that same bound principal,
+so the example grants Alice both commands. Bob's read-only identity illustrates
+migration-scoped visibility; it is **not** a second approving authority.
+Do **not** interpret separate `approve` and `run` grants as a completed
 two-person authorization workflow.
 
 Legacy single-token mode is retained for backwards compatibility and remains
