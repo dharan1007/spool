@@ -28,7 +28,12 @@ function opMix(writer, opIndex) {
 }
 
 function opEvents(kind) {
-  return kind === 'multi' ? 2 : 1;
+  // Every UPDATE, DELETE and multi case inserts its seed row in the same
+  // source transaction. pgoutput emits BOTH row mutations; counting only
+  // the second event produces false-green or false-negative CDC evidence.
+  if (kind === 'insert') return 1;
+  if (kind === 'update' || kind === 'delete' || kind === 'multi') return 2;
+  throw new Error(`Unsupported deterministic CDC operation: ${kind}`);
 }
 
 export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runId }) {

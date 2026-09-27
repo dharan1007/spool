@@ -7,6 +7,36 @@ const start = code.indexOf('  async function writePlan(chunk) {');
 const end = code.indexOf('  // Streaming-ordering invariant:', start);
 assert.ok(start >= 0 && end > start, 'production CDC qualification writer is present');
 const functionBody = code.slice(start, end);
+// Test the actual production operation counter. A test-local replacement for
+// opEvents previously hid a live-writer accounting defect.
+const mixStart = code.indexOf('function opMix(writer, opIndex) {');
+const mixEnd = code.indexOf('export async function runCdcSoak(', mixStart);
+assert.ok(mixStart >= 0 && mixEnd > mixStart, 'production CDC operation mix is present');
+const { opMix, opEvents } = new Function(code.slice(mixStart, mixEnd) + '\\nreturn { opMix, opEvents };')();
+
+test('production counter includes both WAL row changes for update/delete/multi', () => {
+  assert.equal(opEvents('insert'), 1);
+  for (const kind of ['update','delete','multi']) assert.equal(opEvents(kind), 2);
+  assert.throws(() => opEvents('not-a-real-operation'), /Unsupported deterministic/);
+});
+
+test('mixed workload event budget exactly matches emitted source row operations', () => {
+  let inserted = 0, updated = 0, deleted = 0;
+  const kinds = new Set();
+  let expected = 0;
+  for (let writer = 0; writer < 4; writer += 1) {
+    for (let op = 0; op < 100; op += 1) {
+      const kind = opMix(writer, op);
+      kinds.add(kind);
+      inserted += 1;
+      if (kind === 'update' || kind === 'multi') updated += 1;
+      if (kind === 'delete') deleted += 1;
+      expected += opEvents(kind);
+    }
+  }
+  assert.deepEqual([...kinds].sort(), ['delete','insert','multi','update']);
+  assert.equal(expected, inserted + updated + deleted);
+});
 
 async function exercise(kind, { workers = 1, fault = null, chunk = 0 } = {}) {
   const sessions = [];
@@ -27,7 +57,7 @@ async function exercise(kind, { workers = 1, fault = null, chunk = 0 } = {}) {
   )(
     Client, { host: '127.0.0.1', port: 5432, database: 'isolated', user: 'test', password: 'fixture' },
     workers, 100, () => kind, 100_000_000, 20_000_000, 10_000_000,
-    'q_cdc_test', value => value === 'insert' ? 1 : 2, () => Promise.resolve(), 0
+    'q_cdc_test', opEvents, () => Promise.resolve(), 0
   );
   let result, error;
   try { result = await fn(chunk); } catch (caught) { error = caught; }
