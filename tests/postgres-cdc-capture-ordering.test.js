@@ -151,3 +151,20 @@ test('callback queue bound refuses overflow without processing subsequent events
   assert.deepEqual(applied, []);
   assert.deepEqual(pump.stats(), { accepting: false, pending: 0 });
 });
+
+
+test('capture reports truncation instead of silently certifying an incomplete CDC window', async () => {
+  const harness = makeCapture(events);
+  const captured = await harness.run({ maxCollectedChanges: 2 });
+  assert.equal(captured.messageCount, 3);
+  assert.equal(captured.collectedChangeCount, 2);
+  assert.equal(captured.truncatedChanges, true);
+  assert.deepEqual(captured.changes.map(change => change.tag), ['insert', 'commit']);
+});
+
+test('capture refuses invalid collection bounds rather than dropping evidence', async () => {
+  for (const maxCollectedChanges of [0, -1, 1.5, Infinity, 1_000_001]) {
+    const harness = makeCapture(events);
+    await assert.rejects(harness.run({ maxCollectedChanges }), { code: 'INVALID_POSTGRES_CDC_CONFIG' });
+  }
+});

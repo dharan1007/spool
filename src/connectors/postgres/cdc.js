@@ -552,7 +552,7 @@ export function normalizeMessage(lsn, message) {
 
 export async function streamPostgresChanges({
   ref, credentialBroker, slotName, publicationNames,
-  startLsn = null, untilLsn = null, maxMessages = null, onChange = null
+  startLsn = null, untilLsn = null, maxMessages = null, onChange = null, maxCollectedChanges = 10_000
 } = {}) {
   const databaseRef = requireDatabaseRef(ref);
   if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_POSTGRES_CDC_CONFIG', 'credentialBroker.withSecret() is required');
@@ -564,6 +564,9 @@ export async function streamPostgresChanges({
   if (untilLsn != null && (typeof untilLsn !== 'string' || !LSN.test(untilLsn))) fail('INVALID_POSTGRES_LSN', 'untilLsn must look like 0/16B6C50');
   if (maxMessages != null && (!Number.isSafeInteger(maxMessages) || maxMessages < 1)) fail('INVALID_POSTGRES_CDC_CONFIG', 'maxMessages must be a positive safe integer');
   if (onChange != null && typeof onChange !== 'function') fail('INVALID_POSTGRES_CDC_CONFIG', 'onChange must be a function');
+  if (!Number.isSafeInteger(maxCollectedChanges) || maxCollectedChanges < 1 || maxCollectedChanges > 1_000_000) {
+    fail('INVALID_POSTGRES_CDC_CONFIG', 'maxCollectedChanges must be an integer between 1 and 1000000');
+  }
 
 const parsed = parsePostgresEndpoint(databaseRef.endpoint);
   let lastAcknowledgedLsn = startLsn ?? null;
@@ -573,8 +576,8 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
   let resolveDone;
   const done = new Promise(resolve => { resolveDone = resolve; });
   // Bounded changes array for testing/debugging - bounded to prevent unbounded memory
-  const MAX_CHANGES = 10000;
   const changes = [];
+  let truncatedChanges = false;
 
   return credentialBroker.withSecret(databaseRef.secretRef, async secret => {
     if (typeof secret !== 'string' || !secret) fail('SECRET_NOT_FOUND', 'PostgreSQL password is required');
@@ -627,7 +630,10 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
         if (change) {
           if (change.tag === 'commit') lastAcknowledgedLsn = change.lsn;
           messageCount += 1;
-          if (changes.length >= MAX_CHANGES) changes.shift();
+          if (changes.length >= maxCollectedChanges) {
+            changes.shift();
+            truncatedChanges = true;
+          }
           changes.push(change);
         }
         // Never present a partial source transaction as a successful bounded
@@ -670,6 +676,8 @@ const parsed = parsePostgresEndpoint(databaseRef.endpoint);
       slotName: name,
       changes: Object.freeze(changes),
       messageCount,
+      truncatedChanges,
+      collectedChangeCount: changes.length,
       lastLsn: lastAcknowledgedLsn,
       acknowledgedLsn: lastAcknowledgedLsn
     });

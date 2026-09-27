@@ -224,8 +224,10 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
       const untilLsn = await flushLsn(adminClient);
       const streamed = await streamPostgresChanges({
         ref: dbRef, credentialBroker: broker, slotName, publicationNames: [publicationName],
-        startLsn: currentCheckpoint, untilLsn, maxMessages: 1_000_000
+        startLsn: currentCheckpoint, untilLsn, maxMessages: 1_000_000,
+        maxCollectedChanges: 100_000
       });
+      if (streamed.truncatedChanges) throw new Error('CDC chunk capture exceeded its explicit collection budget; correctness evidence would be incomplete');
       const rowChanges = streamed.changes.filter(change => ['insert', 'update', 'delete'].includes(change.tag) && change.table === table);
       if (rowChanges.length !== applied.attempted + 1) {
         failures.push({ code: 'CDC_ACTUAL_EVENT_COUNT_MISMATCH',
@@ -264,7 +266,8 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
 
     const streamPromise = streamPostgresChanges({
       ref: dbRef, credentialBroker: broker, slotName, publicationNames: [publicationName],
-      startLsn: currentCheckpoint, untilLsn: waterline, maxMessages: 1_000_000
+      startLsn: currentCheckpoint, untilLsn: waterline, maxMessages: 1_000_000,
+      maxCollectedChanges: 100_000
     });
     const burstPromise = (async () => {
       try {
@@ -279,6 +282,7 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
     })();
 
     const [windowResult, burstResult] = await Promise.all([streamPromise, burstPromise]);
+    if (windowResult.truncatedChanges) throw new Error('CDC waterline capture exceeded its collection budget');
     const windowRows = windowResult.changes.filter(change => ['insert', 'update', 'delete'].includes(change.tag) && change.table === table);
     if (windowRows.some(change => change.row?.id >= 9_000_000)) windowBounded = false;
     // The in-flight capture stops at the marker: it must contain exactly the window row.
@@ -293,8 +297,10 @@ export async function runCdcSoak({ profile, seed, evidenceWriter, pgConfig, runI
     const tailUntil = await flushLsn(adminClient);
     const resume = await streamPostgresChanges({
       ref: dbRef, credentialBroker: broker, slotName, publicationNames: [publicationName],
-      startLsn: currentCheckpoint, untilLsn: tailUntil, maxMessages: 1_000_000
+      startLsn: currentCheckpoint, untilLsn: tailUntil, maxMessages: 1_000_000,
+      maxCollectedChanges: 100_000
     });
+    if (resume.truncatedChanges) throw new Error('CDC restarted capture exceeded its collection budget');
     const resumeRows = resume.changes.filter(change => ['insert', 'update', 'delete'].includes(change.tag) && change.table === table);
     checkResumeBound(resumeRows, currentCheckpoint);
     recordStream(resume.changes);
