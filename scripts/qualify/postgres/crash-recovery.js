@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -10,6 +10,7 @@ import { CredentialBroker } from '../../../src/daemon/credential-broker.js';
 import { SpoolCommandService } from '../../../src/daemon/command-service.js';
 import { writeDatasetCsv } from '../dataset.js';
 import { verifyRecoveredTargetContent } from '../recovery-content.js';
+import { createDurableJsonCheckpointStore } from './durable-checkpoint.js';
 
 
 // PostgreSQL truncates identifiers past 63 characters: all scenario table
@@ -130,8 +131,13 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
       // qualification-only TTL keeps the test bounded without admin DELETE.
       const killLeaseTtlMs = 8_000;
       const killSeed = `${seed}-crash-kill`;
-      const checkpointPath = join(tmpdir(), `spool-qualify-checkpoint-${runId}.json`);
-      const childConfigPath = join(tmpdir(), `spool-qualify-child-${runId}.json`);
+      // A private directory contains both the child config (DB password)
+      // and atomic-checkpoint temp files left by SIGKILL. Removing the
+      // directory after the fault clears all orphaned files as well.
+      const crashDir = await mkdtemp(join(tmpdir(), 'spool-qualify-crash-'));
+      const checkpointPath = join(crashDir, 'checkpoint.json');
+      const durableCheckpoint = createDurableJsonCheckpointStore({ path: checkpointPath });
+      const childConfigPath = join(crashDir, 'child.json');
       let killChild = null;
       let killFaultAt = null;
       let ledgerBeforeKill = 0;
@@ -224,10 +230,10 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
           await new Promise(r => setTimeout(r, 5));
         }
         ledgerBeforeKill = ledgerCount;
-        try {
-          const cpRaw = await readFile(checkpointPath, 'utf8');
-          checkpointBeforeKill = JSON.parse(cpRaw);
-        } catch { checkpointBeforeKill = null; }
+        // Atomic checkpoint reader: only ENOENT means none. A truncated,
+        // corrupt, or inaccessible file fails the fault proof rather than
+        // hiding a durability defect behind a full replay.
+        checkpointBeforeKill = await durableCheckpoint.load();
         evidenceWriter.appendRaw({ scenario, event: 'crash_kill_ledger_observed', ledgerCount, checkpoint: checkpointBeforeKill, pid: killChild.pid });
 
         // The fault is valid only when an actual SIGKILL kills a still-live
@@ -349,12 +355,7 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         const { MigrationRunner: Runner2 } = await import('../../../src/execution/migration-runner.js');
         const { generateRow: genRow } = await import('../dataset.js');
         const target2 = exec2.openTarget();
-        const cpStore2 = {
-          async load() {
-            try { return JSON.parse(await readFile(checkpointPath, 'utf8')); } catch { return null; }
-          },
-          async save(cp) { await writeFile(checkpointPath, JSON.stringify(cp), 'utf8'); }
-        };
+        const cpStore2 = durableCheckpoint;
         const runner2 = new Runner2({ target: target2, checkpointStore: cpStore2 });
         let checkpointAfter = await cpStore2.load();
         let recoveredBatches = 0;
@@ -425,8 +426,7 @@ export async function runCrashRecovery({ profile, seed, evidenceWriter, pgConfig
         evidenceWriter.appendRaw({ scenario, event: 'crash_kill_failed', error: e.message, code: e.code ?? 'UNKNOWN' });
       } finally {
         try { if (killChild && killChild.exitCode == null) killChild.kill('SIGKILL'); } catch {}
-        try { await rm(childConfigPath, { force: true }); } catch {}
-        try { await rm(checkpointPath, { force: true }); } catch {}
+        try { await rm(crashDir, { recursive: true, force: true }); } catch {}
         try {
           const c = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
           await c.connect();
