@@ -222,3 +222,19 @@ test('evidence writer fails closed on write error and marks INCOMPLETE', async (
   try { await writer2.close(); } catch {}
   await rm(dir, { recursive: true, force: true });
 });
+
+// Qualification workloads must not claim a seven-day envelope after a short
+// 24-hour run. Execution evidence is separate from these input definitions.
+test('immutable PostgreSQL profiles enforce the declared CDC-soak ladder', () => {
+  const seconds = { CI: 30, SMALL: 3600, MEDIUM: 86400, LARGE: 259200, INDUSTRIAL: 604800 };
+  for (const [name, expected] of Object.entries(seconds)) {
+    const profile = resolveProfile(name);
+    assert.equal(profile.name, name);
+    assert.equal(profile.cdcDurationSeconds, expected);
+    assert.equal(profile.customized, false);
+  }
+  const custom = resolveProfile('INDUSTRIAL', { cdcDurationSeconds: 5 * 86400 });
+  assert.equal(custom.name, 'INDUSTRIAL_CUSTOM');
+  assert.equal(custom.requestedConfig.cdcDurationSeconds, 604800);
+  assert.throws(() => resolveProfile('CI', { cdcDurationSeconds: 31 * 86400 }), /INVALID_PROFILE/);
+});
