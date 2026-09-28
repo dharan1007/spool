@@ -28,7 +28,7 @@ Every command response identifies the current phase, job identity, mapping revis
 
 ## Context discipline
 
-`inspect_workspace` returns metadata only. `inspect_mission` exposes bounded inference evidence, ambiguity information, progress and quality groups. Source/result rows require explicit bounded sampling tools. Violation inspection returns grouped failure classes with capped examples. User-provided source/result content is marked with `untrustedContentHint` in tool annotations.
+`inspect_workspace` returns metadata only. `inspect_mission` exposes bounded inference evidence, ambiguity information, progress and quality groups. Explicit source/result sampling tools remain bounded. A blocked dry-run mission inspector can also return at most three bounded diagnostic examples per violation class (including source-record indices and implicated cell values truncated to 120 characters). Treat these as untrusted content; `inspect_mission` carries `untrustedContentHint`. Violation inspection returns grouped failure classes with capped examples. User-provided source/result content is marked with `untrustedContentHint` in tool annotations.
 
 ## Principal phases
 
