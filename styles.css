@@ -66,3 +66,19 @@
 .mission-error p{color:var(--muted);overflow-wrap:anywhere}
 @media(max-width:900px){.recovery-outcomes{grid-template-columns:1fr}.attention-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:620px){.attention-metrics{grid-template-columns:1fr}.recovery-actions{flex-direction:column}.recovery-actions .button{width:100%}.quality-diagnostic-list .card-head{flex-wrap:wrap}}
+
+/* Visible, legible state while a local main-thread phase is in progress. */
+.processing-banner{position:fixed;right:20px;top:86px;z-index:80;max-width:min(420px,calc(100vw - 40px));padding:14px 18px;border:1px solid var(--accent);border-radius:13px;background:var(--panel);color:var(--text);font-size:13px;line-height:1.5;box-shadow:var(--shadow)}
+.studio-main .kicker{font-size:11px;line-height:1.45}
+.studio-main .attention-panel p,.studio-main .ambiguity-list p{font-size:13px;line-height:1.6}
+.studio-main .ambiguity-list h3{font-size:14px;line-height:1.5}
+.studio-main .attention-note{font-size:12px;line-height:1.6}
+.studio-main .mini-stats span{font-size:10px}
+.studio-main .mission-progress-card>p{font-size:12px}
+.studio-main .evidence-row{font-size:12px}
+.studio-main .evidence-head{font-size:10px}
+.studio-main .outcome-option p,.studio-main .launch-card p{font-size:12px}
+.studio-main .quality-grid p,.studio-main .quality-grid small{font-size:12px;line-height:1.5}
+.studio-rail a,.studio-rail .rail-disabled{font-size:12px}
+@media(max-width:900px){.processing-banner{top:145px}}
+@media(max-width:620px){.processing-banner{right:12px;top:120px}}
