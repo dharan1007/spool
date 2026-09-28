@@ -14,6 +14,8 @@ SPOOL is split into explanatory product routes and a focused Studio. The normal 
 
 Database-ready inference can promote a source string to boolean, integer, number or date only when sampled evidence crosses the planner confidence threshold. Destructive naming collisions fail closed into `NEEDS_ATTENTION`; SPOOL does not invent a resolution.
 
+A representative dry run below 95% acceptance also enters `NEEDS_ATTENTION` before a Worker is started. The mission retains bounded violation examples with original source-record indices and implicated fields; no invalid-record payload is sent to a backend. The operator can correct/replace the CSV or explicitly choose another supported output contract and rerun the same validation. `preserve_contract` retains parsed CSV header spellings and raw string cell values, including distinct headers that would collide after normalization. It does not override the acceptance gate or implicitly edit the source.
+
 A safe mission executes:
 
 `PROFILE → INFER → PLAN → DRY RUN → ASSESS → EXECUTE → VERIFY`
@@ -28,7 +30,7 @@ A manual run interrupted by a terminated tab restores as `PAUSED_RECOVERED`. An 
 
 ## Durable data plane
 
-`IndexedDbWorkspaceStore` separates compact workflow/mission metadata from source/output chunks. Source chunks are rewritten only when the source fingerprint changes. Output chunks append as progress advances and are cleared when output identity/revision rewinds.
+`IndexedDbWorkspaceStore` separates compact workflow/mission metadata from source/output chunks. Source chunks are rewritten only when the source fingerprint changes. Output chunks append as progress advances and are cleared when output identity/revision rewinds. Browser Studio emits a bounded UI snapshot that omits the full source/output arrays. IndexedDB checkpoint metadata is cloned after the source/output arrays have been detached from the compact representation; rendering or a checkpoint no longer needlessly clones the full source.
 
 The current UI accepts files up to 50 MB and the parser still materializes the source in browser memory. Whole-file streaming/OPFS is a future scale extension, not a current capability claim.
 

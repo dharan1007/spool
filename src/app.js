@@ -50,10 +50,12 @@ let webMcpStatus = 'Checking browser support';
 let nativeRegistry = null;
 let registryChain = Promise.resolve();
 let renderQueued = false;
+let isBusy = false;
 
 const kernel = new CommandKernel({
   store,
   runtime,
+  snapshotMode: 'ui',
   onStateChange(state) {
     latestState = state;
     scheduleRender();
@@ -122,7 +124,7 @@ function navigate(path) {
 function scheduleRender() {
   if (renderQueued) return;
   renderQueued = true;
-  queueMicrotask(() => { renderQueued = false; render(); });
+  window.requestAnimationFrame(() => { renderQueued = false; render(); });
 }
 
 function topbar(path, state) {
@@ -150,7 +152,7 @@ function shell(path, body, state, { studio = false } = {}) {
       <div><strong>SPOOL</strong><span>Local-first deterministic migration infrastructure.</span></div>
       <div><span>Dataset plane: browser-local</span><span>Network: disabled by CSP</span><span>Transform IR: constrained</span></div>
     </footer>
-    <div id="toast" class="toast" role="status" aria-live="polite"></div>`;
+    `;
 }
 
 function studioRail(path, state) {
@@ -366,6 +368,26 @@ function newMigrationPage(state) {
   `, state, { studio: true });
 }
 
+function recoveryPanel(mission, outcome) {
+  const decisions = mission?.ambiguities ?? [];
+  const dryRun = mission?.dryRun;
+  const groups = dryRun?.violationGroups ?? [];
+  const colliding = decisions.some(item => item.code === 'TARGET_NAME_COLLISION');
+  const diagnostics = groups.length
+    ? `<details class="quality-diagnostics" open><summary>Why sample records failed · ${number(groups.reduce((total, item) => total + item.count, 0))} rejected</summary><div class="quality-diagnostic-list">${groups.map(group => `<article><div class="card-head"><div><span class="kicker">${esc(group.code)}</span><h3>${esc(group.message || 'A transformation or target validation failed.')}</h3></div><strong>${number(group.count)} rows</strong></div>${group.sourceFields?.length ? `<p>Fields to review: ${group.sourceFields.map(esc).join(', ')}</p>` : ''}${group.examples?.length ? `<div class="quality-examples">${group.examples.map(example => `<div><strong>Source record ${number(example.record)}</strong>${example.fields?.length ? `<p>${example.fields.map(field => `<code>${esc(field.field)}</code> = <span>${esc(field.value)}</span>`).join(' · ')}</p>` : '<p>Inspect this record in the source CSV.</p>'}</div>`).join('')}</div>` : ''}</article>`).join('')}</div></details>`
+    : '';
+  return `<section class="attention-panel" aria-labelledby="attention-title">
+    <div><span class="kicker">REVIEW REQUIRED</span><h2 id="attention-title">${decisions.length} decision${decisions.length === 1 ? '' : 's'} need review</h2><p>Autopilot has not started execution. Your original CSV is still loaded; nothing has been written to the result set.</p>${dryRun ? `<div class="attention-metrics"><div><strong>${number(dryRun.validRows)} / ${number(dryRun.processedRows)}</strong><span>Sample accepted</span></div><div><strong>${number(dryRun.invalidRows)}</strong><span>Sample rejected</span></div><div><strong>${Math.round(dryRun.minimumAcceptance * 100)}%</strong><span>Required acceptance</span></div></div><p class="sample-disclaimer">This is a representative sample, not a complete assessment of all source rows.</p>` : ''}</div>
+    <div class="ambiguity-list">${decisions.map(item => `<article><span>${esc(item.code)}</span><h3>${esc(item.message)}</h3>${item.sourceFields?.length ? `<p>Fields to review: ${item.sourceFields.map(esc).join(', ')}</p>` : ''}</article>`).join('')}${diagnostics}</div>
+    <div class="attention-note">${colliding ? 'Some headers collide after normalization. Correct the headers in your CSV, or explicitly choose Preserve contract to retain distinct original names.' : 'The rejected sample exceeds the acceptance limit. Review the failing values or explicitly choose a less transformative outcome; the safety limit is never silently lowered.'}</div>
+    <div class="recovery-workflow"><span class="kicker">RECOVERY · NO OVERRIDE</span><h3>Choose how to proceed</h3><p>Changing an outcome changes the exported data contract. Inspect the differences before starting a fresh dry run.</p>
+      <div class="recovery-outcomes">${OUTCOMES.map(item => `<button type="button" data-outcome="${esc(item.id)}" class="recovery-option ${outcome === item.id ? 'selected' : ''}" aria-pressed="${outcome === item.id}"><strong>${esc(item.title)}</strong><span>${esc(item.copy)}</span></button>`).join('')}</div>
+      <div class="recovery-actions"><button type="button" class="button primary" data-action="retry-autopilot">Run revised dry run →</button><a class="button secondary" href="/studio/new" data-route="/studio/new">Correct or replace CSV</a><a class="button secondary" href="/studio" data-route="/studio">Back to workspace</a></div>
+      <p class="sample-disclaimer">SPOOL will profile and validate again before executing. A result below the 95% floor will remain blocked.</p>
+    </div>
+  </section>`;
+}
+
 function missionPage(state) {
   if (!state.source) return shell('/studio/mission', `<section class="studio-heading"><div><span class="kicker">MISSION</span><h1>No source loaded.</h1><p>Create a migration first.</p></div><a href="/studio/new" data-route="/studio/new" class="button primary">New migration</a></section>`, state, { studio: true });
   const mission = state.mission;
@@ -379,7 +401,8 @@ function missionPage(state) {
   return shell('/studio/mission', `
     <section class="mission-header"><div><span class="kicker">MISSION · ${esc(mission?.outcome ?? 'not planned')}</span><h1>${esc(missionHeadline(status))}</h1><p>${status === 'RUNNING' ? 'No action required. You can leave this page; durable checkpoints protect progress and Autopilot resumes a valid interrupted mission when you return.' : status === 'NEEDS_ATTENTION' ? 'SPOOL refused to guess. Resolve the bounded ambiguity before execution.' : status === 'COMPLETE_VERIFIED' ? 'Every processed row satisfied the target contract and the final revision is ready.' : status === 'COMPLETE_WITH_REJECTIONS' ? 'Valid output is ready, and rejected rows remain explicit in the quality report.' : 'Mission state is stored locally in this browser.'}</p></div><span class="status-pill ${phaseTone(state.job.phase)} large-pill"><i></i>${esc(status)}</span></section>
 
-    ${status === 'NEEDS_ATTENTION' ? `<section class="attention-panel"><div><span class="kicker">REVIEW REQUIRED</span><h2>${ambiguities.length} decision${ambiguities.length === 1 ? '' : 's'} block automatic execution</h2><p>These choices can change the target contract destructively, so SPOOL fails closed instead of choosing silently.</p></div><div class="ambiguity-list">${ambiguities.map(item => `<article><span>${esc(item.code)}</span><h3>${esc(item.message)}</h3><p>Source fields: ${(item.sourceFields ?? []).map(esc).join(', ')}</p></article>`).join('')}</div><div class="attention-note">For this release, destructive name collisions require correcting the source headers before rerunning Autopilot. SPOOL will not invent a rename.</div></section>` : ''}
+    ${status === 'NEEDS_ATTENTION' ? recoveryPanel(mission, selectedOutcome) : ''}
+    ${state.job.phase === PHASES.FAILED || state.job.phase === PHASES.ABORTED ? `<section class="mission-error"><strong>${esc(state.lastError?.code ?? 'MISSION_STOPPED')}</strong><p>${esc(state.lastError?.message ?? 'This run is no longer active.')}</p><a href="/studio/new" data-route="/studio/new" class="button secondary">Review source and start again</a></section>` : ''}
 
     ${mission?.dryRun?.assessment === 'WARNING' ? `<div class="attention-note"><strong>Dry-run warning:</strong> ${number(mission.dryRun.validRows)} / ${number(mission.dryRun.processedRows)} representative rows passed (${Math.round((mission.dryRun.acceptanceRate ?? 0) * 100)}%). Execution continued because the result met the ${Math.round((mission.dryRun.minimumAcceptance ?? 0.95) * 100)}% safety floor; rejected rows remain explicit.</div>` : ''}
 
@@ -443,6 +466,16 @@ function render() {
     '/studio/results': resultsPage
   };
   appRoot.innerHTML = (pages[path] ?? (() => notFoundPage(path, latestState)))(latestState);
+  if (isBusy) {
+    const buttons = appRoot.querySelectorAll('[data-action], [data-outcome], #source-file');
+    buttons.forEach(button => { button.disabled = true; });
+    appRoot.setAttribute('aria-busy', 'true');
+    const processing = document.createElement('div');
+    processing.className = 'processing-banner';
+    processing.setAttribute('role', 'status');
+    processing.textContent = 'Processing locally. This view will update when the current step finishes.';
+    appRoot.prepend(processing);
+  } else appRoot.removeAttribute('aria-busy');
   document.title = `${pageTitle(path)} — SPOOL`;
 }
 
@@ -454,8 +487,14 @@ function pageTitle(path) {
 }
 
 function toast(message, tone = 'neutral') {
-  const el = document.getElementById('toast');
-  if (!el) return;
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    document.body.appendChild(el);
+  }
   el.textContent = message;
   el.className = `toast show ${tone}`;
   window.clearTimeout(toast.timer);
@@ -463,28 +502,66 @@ function toast(message, tone = 'neutral') {
 }
 
 async function loadText(text, fileName) {
+  if (isBusy) return;
+  if ([PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(latestState?.job?.phase)
+    && !window.confirm('Replace the source? This will stop the active migration and discard its current output.')) return;
+  isBusy = true;
+  render();
   try {
+    await new Promise(resolve => window.requestAnimationFrame(() => setTimeout(resolve, 0)));
     await kernel.loadSourceText(text, fileName);
     selectedOutcome = 'database_ready';
     toast(`${fileName} is profiled locally.`, 'success');
   } catch (error) {
     toast(error?.message || String(error), 'danger');
+  } finally {
+    isBusy = false;
+    render();
   }
 }
 
 async function loadFile(file) {
-  if (!file) return;
+  if (!file || isBusy) return;
+  if ([PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(latestState?.job?.phase)
+    && !window.confirm('Replace the source? This will stop the active migration and discard its current output.')) return;
   if (file.size > 50 * 1024 * 1024) return toast('This UI currently limits file selection to 50 MB. Use a smaller CSV for this release.', 'danger');
   if (!file.name.toLowerCase().endsWith('.csv') && file.type !== 'text/csv') return toast('SPOOL currently accepts CSV source files.', 'danger');
-  await loadText(await file.text(), file.name);
+  isBusy = true;
+  render();
+  try {
+    await new Promise(resolve => window.requestAnimationFrame(() => setTimeout(resolve, 0)));
+    const text = await file.text();
+    await kernel.loadSourceText(text, file.name);
+    selectedOutcome = 'database_ready';
+    toast(`${file.name} is profiled locally.`, 'success');
+  } catch (error) {
+    toast(error?.message || String(error), 'danger');
+  } finally {
+    isBusy = false;
+    render();
+  }
 }
 
 async function runAutopilot() {
-  const response = await kernel.invoke('run_autopilot', { outcome: selectedOutcome });
-  if (!response.ok) return toast(`${response.error.code}: ${response.error.message}`, 'danger');
-  navigate('/studio/mission');
-  if (response.result?.status === 'NEEDS_ATTENTION') toast('Autopilot stopped before execution because a destructive ambiguity needs attention.', 'warning');
-  else toast('Autopilot planned, dry-ran and started the migration.', 'success');
+  if (isBusy) return;
+  isBusy = true;
+  render();
+  try {
+    await new Promise(resolve => window.requestAnimationFrame(() => setTimeout(resolve, 0)));
+    const response = await kernel.invoke('run_autopilot', { outcome: selectedOutcome });
+    if (!response.ok) {
+      if (response.state?.phase === PHASES.FAILED) navigate('/studio/mission');
+      return toast(`${response.error.code}: ${response.error.message}`, 'danger');
+    }
+    navigate('/studio/mission');
+    if (response.result?.status === 'NEEDS_ATTENTION') toast('Dry run blocked execution. Review the failed sample records and choose a recovery action.', 'warning');
+    else toast('Autopilot passed its safety checks and started processing.', 'success');
+  } catch (error) {
+    toast(error?.message || String(error), 'danger');
+  } finally {
+    isBusy = false;
+    render();
+  }
 }
 
 function download(result) {
@@ -497,7 +574,7 @@ function download(result) {
 
 async function handleAction(action) {
   if (action === 'load-demo') return loadText(createDemoCsv(25000), 'customer-export-25k.csv');
-  if (action === 'run-autopilot') return runAutopilot();
+  if (action === 'run-autopilot' || action === 'retry-autopilot') return runAutopilot();
   if (action === 'reset-workspace') {
     const response = await kernel.invoke('start_new_migration', {});
     if (response.ok) { selectedOutcome = 'database_ready'; toast('Workspace cleared.', 'success'); }
@@ -526,12 +603,18 @@ function bindGlobalEvents() {
     const routeLink = event.target.closest('[data-route]');
     if (routeLink) { event.preventDefault(); navigate(routeLink.dataset.route); return; }
     const outcome = event.target.closest('[data-outcome]');
-    if (outcome) { selectedOutcome = outcome.dataset.outcome; render(); return; }
+    if (outcome && !isBusy) { selectedOutcome = outcome.dataset.outcome; render(); return; }
     const action = event.target.closest('[data-action]');
-    if (action && !action.disabled) void handleAction(action.dataset.action);
+    if (action && !action.disabled && !isBusy) void handleAction(action.dataset.action);
   });
   appRoot.addEventListener('change', event => {
     if (event.target.id === 'source-file') void loadFile(event.target.files?.[0]);
+  });
+  appRoot.addEventListener('keydown', event => {
+    if (event.target.id === 'source-dropzone' && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      document.getElementById('source-file')?.click();
+    }
   });
   appRoot.addEventListener('dragover', event => {
     const dropzone = event.target.closest('#source-dropzone');
@@ -565,7 +648,8 @@ async function boot() {
   if (!appRoot) throw new Error('Missing #app-root');
   bindGlobalEvents();
   await kernel.initialize();
-  latestState = kernel.snapshot();
+  latestState = kernel.viewSnapshot();
+  selectedOutcome = latestState.mission?.outcome ?? 'database_ready';
   await initWebMcp();
   render();
   window.__spoolTest = Object.freeze({
@@ -574,6 +658,7 @@ async function boot() {
     invoke: (name, args = {}) => kernel.invoke(name, args),
     navigate,
     loadDemo: () => loadText(createDemoCsv(25000), 'customer-export-25k.csv'),
+    loadCsv: (value, filename = 'browser-recovery.csv') => loadText(value, filename),
     runAutopilot: outcome => kernel.invoke('run_autopilot', { outcome: outcome ?? selectedOutcome })
   });
 }

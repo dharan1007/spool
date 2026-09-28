@@ -1,6 +1,6 @@
 import { parseCsv, toCsv } from './csv.js';
-import { inferSchema, fingerprintText, validateTargetSchema } from './schema.js';
-import { compileMapping } from './transforms.js';
+import { inferSchema, fingerprintText, validateOutputRow, validateTargetSchema } from './schema.js';
+import { compileMapping, evaluateExpr } from './transforms.js';
 import { MigrationEngine } from './migration.js';
 import { createJob, transition, assertJobInvariants, PHASES } from './state-machine.js';
 import { SpoolError, fail } from './errors.js';
@@ -43,6 +43,37 @@ function representativeRows(rows, limit = AUTOPILOT_DRY_RUN_SIZE) {
   return sampled;
 }
 
+function summarizeDryRunViolations(violations, plan) {
+  const targetFields = new Map(plan.targetSchema.map(field => [field.name, field]));
+  return violations.map(group => {
+    const sourceFields = new Set();
+    const examples = (group.samples ?? []).slice(0, 3).map(sample => {
+      const fields = [];
+      for (const entry of plan.mapping) {
+        try {
+          const value = evaluateExpr(entry.expr, sample.row);
+          validateOutputRow({ [entry.target]: value }, [targetFields.get(entry.target)]);
+        } catch (error) {
+          if (error?.code !== group.code) continue;
+          const name = entry.expr?.value?.name ?? entry.expr?.name ?? entry.target;
+          sourceFields.add(name);
+          if (fields.length < 5) {
+            fields.push({ field: name, value: String(sample.row?.[name] ?? '').slice(0, 120) });
+          }
+        }
+      }
+      return { record: sample.rowIndex + 1, fields };
+    });
+    return {
+      code: group.code,
+      count: group.count,
+      message: String(group.message ?? '').slice(0, 180),
+      sourceFields: [...sourceFields].slice(0, 12),
+      examples
+    };
+  });
+}
+
 function mergeViolations(existing, incoming, sampleLimit = 10) {
   const map = new Map(existing.map(group => [group.code, clone(group)]));
   for (const group of incoming ?? []) {
@@ -64,10 +95,11 @@ function ensureTargetsMatch(targetSchema, mapping) {
 }
 
 export class CommandKernel {
-  constructor({ store, runtime, onStateChange = () => {} }) {
+  constructor({ store, runtime, onStateChange = () => {}, snapshotMode = 'full' }) {
     this.store = store;
     this.runtime = runtime;
     this.onStateChange = onStateChange;
+    this.snapshotMode = snapshotMode;
     this.workspace = freshWorkspace();
     this.engine = new MigrationEngine({ sampleLimit: 10 });
     this.runEpoch = 0;
@@ -92,7 +124,8 @@ export class CommandKernel {
         this.workspace.job = transition(this.workspace.job, PHASES.RUNNING);
         this.workspace.mission = { ...this.workspace.mission, status: 'RUNNING', updatedAt: new Date().toISOString() };
         await this.persist();
-        await this.startRuntime({ startIndex: this.workspace.job.checkpoint, replaying: false });
+        try { await this.startRuntime({ startIndex: this.workspace.job.checkpoint, replaying: false }); }
+        catch (error) { await this.failCurrentRun(error); }
       }
     } else this.emit();
     return this.snapshot();
@@ -100,7 +133,32 @@ export class CommandKernel {
 
   snapshot() { return clone(this.workspace); }
 
-  emit() { this.onStateChange(this.snapshot()); }
+  // Rendering never needs the whole source or completed output. Keep the
+  // canonical full snapshot for tests/clients and emit a bounded UI view.
+  viewSnapshot() {
+    const workspace = this.workspace;
+    const source = workspace.source;
+    const sourceView = source ? {
+      fileName: source.fileName,
+      fingerprint: source.fingerprint,
+      headers: { length: source.headers.length },
+      bytes: source.bytes,
+      rows: { length: source.rows.length }
+    } : null;
+    return clone({
+      ...workspace,
+      source: sourceView,
+      output: workspace.output.slice(0, 12).map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key,
+        typeof value === 'string' && value.length > 200 ? `${value.slice(0, 200)}… [truncated preview]` : value
+      ]))),
+      violations: workspace.violations.map(group => ({
+        ...group,
+        samples: (group.samples ?? []).slice(0, 2).map(sample => ({ rowIndex: sample.rowIndex }))
+      }))
+    });
+  }
+
+  emit() { this.onStateChange(this.snapshotMode === 'ui' ? this.viewSnapshot() : this.snapshot()); }
 
   async persist() {
     this.workspace.updatedAt = new Date().toISOString();
@@ -235,16 +293,23 @@ export class CommandKernel {
       });
     }
 
-    validateTargetSchema(plan.targetSchema);
+    // Preserve-contract is browser CSV-to-CSV: source header spellings may
+    // contain spaces/punctuation. They were already vetted by parseCsv.
+    // SQL/typed target authoring continues to require validateTargetSchema.
+    if (outcome !== AUTOPILOT_OUTCOMES.PRESERVE_CONTRACT) validateTargetSchema(plan.targetSchema);
     const compiled = compileMapping(plan.mapping);
     ensureTargetsMatch(plan.targetSchema, compiled.entries);
     const previewRevision = this.workspace.mappingRevision + 1;
     const previewRows = representativeRows(this.workspace.source.rows);
+    const previewIndexes = previewRows.map((_, index) => previewRows.length === this.workspace.source.rows.length
+      ? index
+      : Math.floor((index * (this.workspace.source.rows.length - 1)) / (previewRows.length - 1)));
     const preview = this.engine.run(
       previewRows,
       plan.mapping,
       previewRevision,
-      plan.targetSchema
+      plan.targetSchema,
+      previewIndexes
     );
     const acceptanceRate = preview.processedRows > 0 ? preview.validRows / preview.processedRows : 1;
     const assessment = preview.validRows === 0 || acceptanceRate < AUTOPILOT_MIN_ACCEPTANCE
@@ -260,7 +325,7 @@ export class CommandKernel {
       minimumAcceptance: AUTOPILOT_MIN_ACCEPTANCE,
       assessment,
       sampling: previewRows.length === this.workspace.source.rows.length ? 'full_source' : 'evenly_spaced_full_source',
-      violationGroups: preview.violations.map(group => ({ code: group.code, count: group.count }))
+      violationGroups: summarizeDryRunViolations(preview.violations, plan)
     };
     if (assessment === 'BLOCK') {
       const zeroAcceptance = preview.validRows === 0;
@@ -269,7 +334,7 @@ export class CommandKernel {
         message: zeroAcceptance
           ? 'Autopilot dry run accepted zero rows. Execution was not started; revise the outcome or target interpretation.'
           : `Autopilot dry run accepted ${preview.validRows}/${preview.processedRows} representative rows, below the ${(AUTOPILOT_MIN_ACCEPTANCE * 100).toFixed(0)}% safety floor. Execution was not started.`,
-        sourceFields: []
+        sourceFields: this.workspace.mission.dryRun.violationGroups.flatMap(group => group.sourceFields).slice(0, 12)
       };
       this.workspace.mission.status = 'NEEDS_ATTENTION';
       this.workspace.mission.ambiguities = [...(this.workspace.mission.ambiguities ?? []), decision];
@@ -383,9 +448,28 @@ export class CommandKernel {
     this.workspace.violations = [];
     this.workspace.needsReplay = false;
     this.workspace.job = transition(this.workspace.job, PHASES.RUNNING, { processedRows: 0, validRows: 0, invalidRows: 0, checkpoint: 0, mappingRevision: this.workspace.mappingRevision });
-    await this.persist();
-    await this.startRuntime({ startIndex: 0, replaying: false });
+    try {
+      await this.persist();
+      await this.startRuntime({ startIndex: 0, replaying: false });
+    } catch (error) {
+      await this.failCurrentRun(error);
+      throw error;
+    }
     return this.envelope({ started: true });
+  }
+
+  async failCurrentRun(error) {
+    try { await this.runtime.abort(); } catch { /* Surface original failure. */ }
+    this.runEpoch += 1; // Stale Worker callbacks must never revive a stopped run.
+    const code = error?.code || (error?.name === 'QuotaExceededError' ? 'STORAGE_WRITE_FAILED' : 'WORKER_OR_STORAGE_FAILED');
+    this.workspace.lastError = { code, message: String(error?.message || error || 'Local execution failed').slice(0, 300) };
+    if ([PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(this.workspace.job.phase)) {
+      this.workspace.job = transition(this.workspace.job, PHASES.FAILED);
+    }
+    if (this.workspace.mission?.mode === 'autopilot') {
+      this.workspace.mission = { ...this.workspace.mission, status: 'FAILED', updatedAt: new Date().toISOString() };
+    }
+    try { await this.persist(); } catch { this.emit(); } // Never claim durable completion after a failed checkpoint.
   }
 
   async startRuntime({ startIndex, replaying }) {
@@ -399,10 +483,16 @@ export class CommandKernel {
       startIndex,
       chunkSize: 500
     };
+    const enqueue = action => {
+      this.runtimeEventChain = this.runtimeEventChain.then(action).catch(async error => {
+        if (epoch !== this.runEpoch) return;
+        await this.failCurrentRun(error);
+      });
+    };
     const handlers = {
-      onProgress: progress => { this.runtimeEventChain = this.runtimeEventChain.then(() => this.applyProgress(progress, epoch)); },
-      onComplete: summary => { this.runtimeEventChain = this.runtimeEventChain.then(() => this.applyComplete(summary, epoch)); },
-      onError: error => { this.runtimeEventChain = this.runtimeEventChain.then(() => this.applyRuntimeError(error, epoch)); }
+      onProgress: progress => enqueue(() => this.applyProgress(progress, epoch)),
+      onComplete: summary => enqueue(() => this.applyComplete(summary, epoch)),
+      onError: error => enqueue(() => this.applyRuntimeError(error, epoch))
     };
     await this.runtime.start(payload, handlers);
     if (replaying) this.workspace.needsReplay = false;
@@ -468,19 +558,24 @@ export class CommandKernel {
 
   async cmd_resume_run() {
     const replay = this.workspace.needsReplay;
-    if (replay) {
-      await this.runtime.abort();
-      this.runEpoch += 1;
-      this.workspace.output = [];
-      this.workspace.violations = [];
-      this.workspace.outputRevision = this.workspace.mappingRevision;
-      this.workspace.job = transition(this.workspace.job, PHASES.REPLAYING, { processedRows: 0, validRows: 0, invalidRows: 0, checkpoint: 0, mappingRevision: this.workspace.mappingRevision });
-      await this.persist();
-      await this.startRuntime({ startIndex: 0, replaying: true });
-    } else {
-      this.workspace.job = transition(this.workspace.job, PHASES.RUNNING);
-      await this.persist();
-      await this.startRuntime({ startIndex: this.workspace.job.checkpoint, replaying: false });
+    try {
+      if (replay) {
+        await this.runtime.abort();
+        this.runEpoch += 1;
+        this.workspace.output = [];
+        this.workspace.violations = [];
+        this.workspace.outputRevision = this.workspace.mappingRevision;
+        this.workspace.job = transition(this.workspace.job, PHASES.REPLAYING, { processedRows: 0, validRows: 0, invalidRows: 0, checkpoint: 0, mappingRevision: this.workspace.mappingRevision });
+        await this.persist();
+        await this.startRuntime({ startIndex: 0, replaying: true });
+      } else {
+        this.workspace.job = transition(this.workspace.job, PHASES.RUNNING);
+        await this.persist();
+        await this.startRuntime({ startIndex: this.workspace.job.checkpoint, replaying: false });
+      }
+    } catch (error) {
+      await this.failCurrentRun(error);
+      throw error;
     }
     return this.envelope({ replaying: replay, checkpoint: this.workspace.job.checkpoint });
   }

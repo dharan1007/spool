@@ -54,7 +54,7 @@ messy CSV
   → typed output + violations + lineage
 ```
 
-The browser path is local-first and retains the production CSP boundary `connect-src 'none'`. The current browser input limit is **50 MiB**. SPOOL fails closed on ambiguous dates/numbers, invalid target values, storage-capacity failure and unsafe export cells.
+The browser path is local-first and retains the production CSP boundary `connect-src 'none'`. The current browser input limit is **50 MiB**. SPOOL fails closed on ambiguous dates/numbers, invalid target values, storage-capacity failure and unsafe export cells. A blocked Autopilot mission remains recoverable in the Studio: bounded failed-sample diagnostics identify implicated fields and original record numbers, and the operator can correct/replace the CSV or explicitly choose another output contract and rerun the dry run. The 95% automatic-acceptance floor is never silently reduced; preserving original CSV field names is a different output contract, not a data-cleaning shortcut.
 
 ### Gate B Local Runner
 

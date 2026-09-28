@@ -24,7 +24,7 @@ const ALLOWED = Object.freeze({
   RUNNING: new Set(['PAUSED', 'COMPLETE', 'FAILED', 'ABORTED']),
   PAUSED: new Set(['RUNNING', 'REPLAYING', 'ABORTED', 'FAILED']),
   REPLAYING: new Set(['RUNNING', 'FAILED', 'ABORTED']),
-  PAUSED_RECOVERED: new Set(['RUNNING', 'REPLAYING', 'ABORTED']),
+  PAUSED_RECOVERED: new Set(['RUNNING', 'REPLAYING', 'ABORTED', 'FAILED']),
   COMPLETE: new Set(['EMPTY']),
   FAILED: new Set(['EMPTY']),
   ABORTED: new Set(['EMPTY'])

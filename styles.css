@@ -33,3 +33,52 @@
 @media (max-width:900px){.topbar{padding-left:16px;padding-right:16px}.top-actions .status-pill{display:none}.hero,.page-hero,.section,.footer{width:min(100% - 28px,var(--max))}.hero{padding-top:58px}.hero-grid{gap:32px}.hero h1,.page-hero h1{font-size:clamp(44px,12vw,70px)}.comparison-grid,.proof-panel,.architecture-card,.callout,.split-section,.decision-grid,.method-grid,.docs-layout{grid-template-columns:1fr}.step-flow{grid-template-columns:1fr 1fr}.topology-demo{grid-template-columns:1fr}.topology-arrow{transform:rotate(90deg);text-align:center}.docs-nav{position:static;display:flex;flex-direction:row;overflow:auto;border-bottom:1px solid var(--line);padding-bottom:10px}.studio-rail{position:sticky;top:113px;left:auto;bottom:auto;width:auto;height:auto;display:flex;align-items:center;gap:4px;overflow:auto;padding:9px 14px;border-right:0;border-bottom:1px solid var(--line);z-index:35}.rail-label{padding:0 8px}.studio-rail a,.rail-disabled{white-space:nowrap}.studio-main{width:min(100% - 28px,var(--max));margin:0 auto;padding-top:26px}.setup-layout,.studio-grid,.mission-grid,.attention-panel,.lineage-card{grid-template-columns:1fr}.launch-card{grid-column:auto}.attention-note{grid-column:auto}.result-metrics{grid-template-columns:1fr 1fr}.advanced-grid{grid-template-columns:1fr}.advanced-grid article.wide,.advanced-actions{grid-column:auto}.quality-grid{grid-template-columns:1fr 1fr}.compact-hero{padding-top:70px}.footer{flex-direction:column}.benchmark-grid{grid-template-columns:1fr 1fr}.benchmark-grid .benchmark-hero{grid-column:1/-1;grid-row:auto;min-height:300px}.metric-stack{max-width:650px}}
 
 @media (max-width:620px){.brand-word small{display:none}.primary-nav{gap:1px}.primary-nav a{padding:8px;font-size:10px}.top-actions .button{min-height:34px;padding:0 10px;font-size:10px}.hero,.page-hero,.section{width:min(100% - 22px,var(--max))}.hero{padding-top:42px}.hero h1,.page-hero h1{font-size:clamp(40px,13vw,58px)}.lede,.page-hero>p,.page-hero>div>p{font-size:14px}.transform-preview{grid-template-columns:1fr}.transform-column{flex-direction:row;flex-wrap:wrap}.transform-column small{width:100%}.visual-progress>div:first-child{flex-direction:column}.step-flow,.comparison-grid,.decision-grid,.tool-grid,.benchmark-grid,.method-grid,.quality-grid{grid-template-columns:1fr}.comparison-card{min-height:auto}.proof-panel,.architecture-card,.callout{padding:22px}.journey-step{grid-template-columns:38px 1fr;gap:15px}.journey-dot{width:38px;height:38px}.journey-line{left:18px}.studio-heading,.mission-header,.result-hero,.launch-card{align-items:flex-start;flex-direction:column}.studio-heading h1,.mission-header h1,.result-hero h1{font-size:38px}.setup-card,.studio-card,.mission-progress-card,.studio-section{padding:18px}.dropzone{min-height:190px}.mini-stats,.result-metrics{grid-template-columns:1fr 1fr}.source-summary-card{align-items:flex-start;flex-direction:column}.evidence-head,.evidence-row{min-width:680px}.result-hero>div:first-child{gap:11px}.export-actions{width:100%}.export-actions .button{flex:1}.footer{width:min(100% - 22px,var(--max))}}
+
+/* Blocked migrations are a decision workspace, not a terminal error card. */
+.attention-panel .ambiguity-list{min-width:0}
+.attention-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:22px}
+.attention-metrics>div{padding:13px;border:1px solid rgba(244,201,107,.2);border-radius:11px;background:rgba(0,0,0,.12)}
+.attention-metrics strong{display:block;color:var(--text);font-size:18px;font-variant-numeric:tabular-nums}
+.attention-metrics span{display:block;margin-top:4px;color:#c0b48f;font-size:10px}
+.sample-disclaimer{color:var(--muted);font-size:11px;line-height:1.6}
+.quality-diagnostics{border:1px solid rgba(244,201,107,.22);border-radius:13px;overflow:hidden}
+.quality-diagnostics>summary{padding:15px;color:var(--text);font-size:12px;font-weight:800;cursor:pointer}
+.quality-diagnostic-list{display:grid;gap:8px;padding:0 10px 10px}
+.quality-diagnostic-list article{min-width:0;padding:13px;border:1px solid var(--line-2);border-radius:10px;background:rgba(0,0,0,.13)}
+.quality-diagnostic-list h3{overflow-wrap:anywhere;font-size:12px;line-height:1.6}
+.quality-diagnostic-list article strong{font-size:11px;white-space:nowrap}
+.quality-examples{display:grid;gap:7px;margin-top:10px}
+.quality-examples>div{padding:8px 10px;border-left:2px solid var(--warn);background:rgba(0,0,0,.13)}
+.quality-examples p{overflow-wrap:anywhere}
+.quality-examples code{color:var(--text);font-size:11px}
+.recovery-workflow{grid-column:1/-1;min-width:0;padding-top:19px;border-top:1px solid rgba(244,201,107,.2)}
+.recovery-workflow h3{margin:8px 0 0;font-size:20px}
+.recovery-workflow>p{max-width:790px;font-size:12px;line-height:1.65}
+.recovery-outcomes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:15px}
+.recovery-option{display:block;width:100%;min-width:0;padding:15px;text-align:left;border:1px solid var(--line-2);border-radius:12px;background:var(--panel);color:var(--text);cursor:pointer}
+.recovery-option:hover,.recovery-option.selected{border-color:var(--accent);background:var(--accent-soft)}
+.recovery-option strong{display:block;font-size:13px}
+.recovery-option span{display:block;margin-top:6px;color:var(--muted);font-size:11px;line-height:1.5}
+.recovery-option:focus-visible,.quality-diagnostics>summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.recovery-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:18px}
+.mission-error{padding:20px;margin-bottom:15px;border:1px solid rgba(255,143,143,.3);border-radius:14px;background:var(--danger-soft)}
+.mission-error strong{color:#ffc5c5}
+.mission-error p{color:var(--muted);overflow-wrap:anywhere}
+@media(max-width:900px){.recovery-outcomes{grid-template-columns:1fr}.attention-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:620px){.attention-metrics{grid-template-columns:1fr}.recovery-actions{flex-direction:column}.recovery-actions .button{width:100%}.quality-diagnostic-list .card-head{flex-wrap:wrap}}
+
+/* Visible, legible state while a local main-thread phase is in progress. */
+.processing-banner{position:fixed;right:20px;top:86px;z-index:80;max-width:min(420px,calc(100vw - 40px));padding:14px 18px;border:1px solid var(--accent);border-radius:13px;background:var(--panel);color:var(--text);font-size:13px;line-height:1.5;box-shadow:var(--shadow)}
+.studio-main .kicker{font-size:11px;line-height:1.45}
+.studio-main .attention-panel p,.studio-main .ambiguity-list p{font-size:13px;line-height:1.6}
+.studio-main .ambiguity-list h3{font-size:14px;line-height:1.5}
+.studio-main .attention-note{font-size:12px;line-height:1.6}
+.studio-main .mini-stats span{font-size:10px}
+.studio-main .mission-progress-card>p{font-size:12px}
+.studio-main .evidence-row{font-size:12px}
+.studio-main .evidence-head{font-size:10px}
+.studio-main .outcome-option p,.studio-main .launch-card p{font-size:12px}
+.studio-main .quality-grid p,.studio-main .quality-grid small{font-size:12px;line-height:1.5}
+.studio-rail a,.studio-rail .rail-disabled{font-size:12px}
+@media(max-width:900px){.processing-banner{top:145px}}
+@media(max-width:620px){.processing-banner{right:12px;top:120px}}

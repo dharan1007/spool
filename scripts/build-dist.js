@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 const RELEASE_FILES = new Set(['release.json', 'release-manifest.json']);
@@ -62,6 +63,17 @@ function artifactRootSha256(artifacts) {
     .join('');
   return createHash('sha256').update(canonical).digest('hex');
 }
+
+// Vercel can deploy without GitHub Actions quota. Enforce the browser
+// recovery regression and syntax gate inside the build itself.
+for (const path of ['src/app.js', 'src/core/command-kernel.js', 'src/core/migration.js', 'src/storage/indexeddb.js']) {
+  execFileSync(process.execPath, ['--check', path], { stdio: 'inherit' });
+}
+execFileSync(process.execPath, ['--test',
+  'tests/autopilot-recovery.test.js',
+  'tests/autopilot-kernel.test.js',
+  'tests/ui-contract.test.js'
+], { stdio: 'inherit' });
 
 const distDir = process.env.SPOOL_DIST_DIR?.trim() || 'dist';
 await rm(distDir, { recursive: true, force: true });

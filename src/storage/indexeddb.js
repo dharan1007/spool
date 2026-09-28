@@ -153,9 +153,12 @@ export class IndexedDbWorkspaceStore {
         }
       }
 
-      const compact = structuredClone(workspace);
-      if (compact.source) delete compact.source.rows;
-      delete compact.output;
+      // Do not clone source/output merely to delete them afterward: for a
+      // 50 MiB input that causes repeated, avoidable full-dataset copies.
+      const { source, output: _output, ...metadata } = workspace;
+      const sourceMetadata = source ? { ...source } : null;
+      if (sourceMetadata) delete sourceMetadata.rows;
+      const compact = structuredClone({ ...metadata, source: sourceMetadata });
       metaStore.put({ key: 'active', workspace: compact });
       await txDone(tx);
 
