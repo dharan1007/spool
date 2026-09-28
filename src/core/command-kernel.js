@@ -140,15 +140,16 @@ export class CommandKernel {
     const sourceView = source ? {
       fileName: source.fileName,
       fingerprint: source.fingerprint,
-      headers: [...source.headers],
-      schema: source.schema,
+      headers: { length: source.headers.length },
       bytes: source.bytes,
       rows: { length: source.rows.length }
     } : null;
     return clone({
       ...workspace,
       source: sourceView,
-      output: workspace.output.slice(0, 12),
+      output: workspace.output.slice(0, 12).map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key,
+        typeof value === 'string' && value.length > 200 ? `${value.slice(0, 200)}… [truncated preview]` : value
+      ]))),
       violations: workspace.violations.map(group => ({
         ...group,
         samples: (group.samples ?? []).slice(0, 2).map(sample => ({ rowIndex: sample.rowIndex }))
