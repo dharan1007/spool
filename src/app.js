@@ -549,7 +549,10 @@ async function runAutopilot() {
   try {
     await new Promise(resolve => window.requestAnimationFrame(() => setTimeout(resolve, 0)));
     const response = await kernel.invoke('run_autopilot', { outcome: selectedOutcome });
-    if (!response.ok) return toast(`${response.error.code}: ${response.error.message}`, 'danger');
+    if (!response.ok) {
+      if (response.state?.phase === PHASES.FAILED) navigate('/studio/mission');
+      return toast(`${response.error.code}: ${response.error.message}`, 'danger');
+    }
     navigate('/studio/mission');
     if (response.result?.status === 'NEEDS_ATTENTION') toast('Dry run blocked execution. Review the failed sample records and choose a recovery action.', 'warning');
     else toast('Autopilot passed its safety checks and started processing.', 'success');
