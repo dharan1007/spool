@@ -202,6 +202,48 @@ def main():
             cdp.eval('window.__spoolTest.invoke("start_new_migration", {})')
             wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "EMPTY"'), label='workspace reset')
 
+        bad_indexes = set([i * 1999 // 99 for i in range(100) if i * 1999 // 99 >= 1000][:9])
+        # Regression for the exact 91/100 blocked Autopilot mission.
+        # Source indices are spread across the CSV, so this also verifies
+        # diagnostic record numbers refer to the original file, not a
+        # synthetic 0..99 preview numbering.
+        blocked_rows = [
+            f'{index + 1},{("not-a-number" if index in bad_indexes else str(index + 100) + ".25")},Customer {index + 1}'
+            for index in range(2000)
+        ]
+        blocked_csv = 'Customer ID,amount,Name\\n' + '\\n'.join(blocked_rows)
+        before_blocked = cdp.eval('performance.now()')
+        cdp.eval('window.__spoolTest.loadCsv(' + json.dumps(blocked_csv) + ')')
+        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "SOURCE_READY"'), label='blocked fixture load')
+        blocked_load_ms = round(cdp.eval('performance.now()') - before_blocked)
+        blocked_response = cdp.eval('window.__spoolTest.runAutopilot("database_ready")')
+        assert blocked_response['ok'] is True
+        assert blocked_response['result']['status'] == 'NEEDS_ATTENTION'
+        blocked_state = cdp.eval('window.__spoolTest.state()')
+        assert blocked_state['mission']['dryRun']['validRows'] == 91
+        assert blocked_state['mission']['dryRun']['invalidRows'] == 9
+        assert blocked_state['job']['phase'] == 'SOURCE_READY'
+        assert blocked_state['output'] == []
+        cdp.eval('window.__spoolTest.navigate("/studio/mission")')
+        wait_for(lambda: cdp.eval('document.querySelector("[data-action=\\\"retry-autopilot\\\"]") !== null'), label='blocked mission recovery UI')
+        assert cdp.eval('document.querySelectorAll(".quality-examples > div").length') > 0
+        assert cdp.eval('document.body.innerText.includes("Source record")')
+        assert cdp.eval('document.querySelectorAll(".recovery-option").length') == 3
+        cdp.eval('document.querySelector("[data-outcome=\\\"preserve_contract\\\"]").click()')
+        assert cdp.eval('document.querySelector("[data-outcome=\\\"preserve_contract\\\"]').getAttribute("aria-pressed")') == 'true'
+        cdp.eval('document.querySelector("[data-action=\\\"retry-autopilot\\\"]").click()')
+        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'), timeout=20, label='blocked workflow recovery completion')
+        recovered = cdp.eval('window.__spoolTest.state()')
+        assert recovered['job']['validRows'] == 2000
+        assert recovered['job']['invalidRows'] == 0
+        assert recovered['mission']['outcome'] == 'preserve_contract'
+        assert cdp.eval('document.querySelector(".result-hero")') is None  # Still on mission; no fake result screen.
+        cdp.eval('window.__spoolTest.invoke("start_new_migration", {})')
+        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "EMPTY"'), label='recovery fixture cleanup')
+        print(json.dumps({'blockedDryRun': 'PASS', 'accepted': 91, 'sampleSize': 100,
+                          'originalRecordDiagnostics': 'PASS', 'recoverableViaButtons': 'PASS',
+                          'sampleLoadMs': blocked_load_ms}), flush=True)
+
         cdp.eval('window.__spoolTest.loadDemo()')
         wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "SOURCE_READY"'), timeout=15, label='demo source load')
         assert cdp.eval('window.__spoolTest.state().source.rows.length') == 25000
