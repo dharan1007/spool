@@ -211,7 +211,7 @@ def main():
             f'{index + 1},{("not-a-number" if index in bad_indexes else str(index + 100) + ".25")},Customer {index + 1}'
             for index in range(2000)
         ]
-        blocked_csv = 'Customer ID,amount,Name\\n' + '\\n'.join(blocked_rows)
+        blocked_csv = 'Customer ID,amount,Name\n' + '\n'.join(blocked_rows)
         before_blocked = cdp.eval('performance.now()')
         cdp.eval('window.__spoolTest.loadCsv(' + json.dumps(blocked_csv) + ')')
         wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "SOURCE_READY"'), label='blocked fixture load')
@@ -225,13 +225,13 @@ def main():
         assert blocked_state['job']['phase'] == 'SOURCE_READY'
         assert blocked_state['output'] == []
         cdp.eval('window.__spoolTest.navigate("/studio/mission")')
-        wait_for(lambda: cdp.eval('document.querySelector("[data-action=\\\"retry-autopilot\\\"]") !== null'), label='blocked mission recovery UI')
+        wait_for(lambda: cdp.eval('document.querySelector("[data-action=retry-autopilot]") !== null'), label='blocked mission recovery UI')
         assert cdp.eval('document.querySelectorAll(".quality-examples > div").length') > 0
         assert cdp.eval('document.body.innerText.includes("Source record")')
         assert cdp.eval('document.querySelectorAll(".recovery-option").length') == 3
-        cdp.eval('document.querySelector("[data-outcome=\\\"preserve_contract\\\"]").click()')
+        cdp.eval('document.querySelector("[data-outcome=preserve_contract]").click()')
         assert cdp.eval('document.querySelector("[data-outcome=\\\"preserve_contract\\\"]').getAttribute("aria-pressed")') == 'true'
-        cdp.eval('document.querySelector("[data-action=\\\"retry-autopilot\\\"]").click()')
+        cdp.eval('document.querySelector("[data-action=retry-autopilot]").click()')
         wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'), timeout=20, label='blocked workflow recovery completion')
         recovered = cdp.eval('window.__spoolTest.state()')
         assert recovered['job']['validRows'] == 2000
