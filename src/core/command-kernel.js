@@ -124,7 +124,8 @@ export class CommandKernel {
         this.workspace.job = transition(this.workspace.job, PHASES.RUNNING);
         this.workspace.mission = { ...this.workspace.mission, status: 'RUNNING', updatedAt: new Date().toISOString() };
         await this.persist();
-        await this.startRuntime({ startIndex: this.workspace.job.checkpoint, replaying: false });
+        try { await this.startRuntime({ startIndex: this.workspace.job.checkpoint, replaying: false }); }
+        catch (error) { await this.failCurrentRun(error); }
       }
     } else this.emit();
     return this.snapshot();
@@ -447,9 +448,28 @@ export class CommandKernel {
     this.workspace.violations = [];
     this.workspace.needsReplay = false;
     this.workspace.job = transition(this.workspace.job, PHASES.RUNNING, { processedRows: 0, validRows: 0, invalidRows: 0, checkpoint: 0, mappingRevision: this.workspace.mappingRevision });
-    await this.persist();
-    await this.startRuntime({ startIndex: 0, replaying: false });
+    try {
+      await this.persist();
+      await this.startRuntime({ startIndex: 0, replaying: false });
+    } catch (error) {
+      await this.failCurrentRun(error);
+      throw error;
+    }
     return this.envelope({ started: true });
+  }
+
+  async failCurrentRun(error) {
+    try { await this.runtime.abort(); } catch { /* Surface original failure. */ }
+    this.runEpoch += 1; // Stale Worker callbacks must never revive a stopped run.
+    const code = error?.code || (error?.name === 'QuotaExceededError' ? 'STORAGE_WRITE_FAILED' : 'WORKER_OR_STORAGE_FAILED');
+    this.workspace.lastError = { code, message: String(error?.message || error || 'Local execution failed').slice(0, 300) };
+    if ([PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(this.workspace.job.phase)) {
+      this.workspace.job = transition(this.workspace.job, PHASES.FAILED);
+    }
+    if (this.workspace.mission?.mode === 'autopilot') {
+      this.workspace.mission = { ...this.workspace.mission, status: 'FAILED', updatedAt: new Date().toISOString() };
+    }
+    try { await this.persist(); } catch { this.emit(); } // Never claim durable completion after a failed checkpoint.
   }
 
   async startRuntime({ startIndex, replaying }) {
@@ -463,10 +483,16 @@ export class CommandKernel {
       startIndex,
       chunkSize: 500
     };
+    const enqueue = action => {
+      this.runtimeEventChain = this.runtimeEventChain.then(action).catch(async error => {
+        if (epoch !== this.runEpoch) return;
+        await this.failCurrentRun(error);
+      });
+    };
     const handlers = {
-      onProgress: progress => { this.runtimeEventChain = this.runtimeEventChain.then(() => this.applyProgress(progress, epoch)); },
-      onComplete: summary => { this.runtimeEventChain = this.runtimeEventChain.then(() => this.applyComplete(summary, epoch)); },
-      onError: error => { this.runtimeEventChain = this.runtimeEventChain.then(() => this.applyRuntimeError(error, epoch)); }
+      onProgress: progress => enqueue(() => this.applyProgress(progress, epoch)),
+      onComplete: summary => enqueue(() => this.applyComplete(summary, epoch)),
+      onError: error => enqueue(() => this.applyRuntimeError(error, epoch))
     };
     await this.runtime.start(payload, handlers);
     if (replaying) this.workspace.needsReplay = false;
@@ -532,19 +558,24 @@ export class CommandKernel {
 
   async cmd_resume_run() {
     const replay = this.workspace.needsReplay;
-    if (replay) {
-      await this.runtime.abort();
-      this.runEpoch += 1;
-      this.workspace.output = [];
-      this.workspace.violations = [];
-      this.workspace.outputRevision = this.workspace.mappingRevision;
-      this.workspace.job = transition(this.workspace.job, PHASES.REPLAYING, { processedRows: 0, validRows: 0, invalidRows: 0, checkpoint: 0, mappingRevision: this.workspace.mappingRevision });
-      await this.persist();
-      await this.startRuntime({ startIndex: 0, replaying: true });
-    } else {
-      this.workspace.job = transition(this.workspace.job, PHASES.RUNNING);
-      await this.persist();
-      await this.startRuntime({ startIndex: this.workspace.job.checkpoint, replaying: false });
+    try {
+      if (replay) {
+        await this.runtime.abort();
+        this.runEpoch += 1;
+        this.workspace.output = [];
+        this.workspace.violations = [];
+        this.workspace.outputRevision = this.workspace.mappingRevision;
+        this.workspace.job = transition(this.workspace.job, PHASES.REPLAYING, { processedRows: 0, validRows: 0, invalidRows: 0, checkpoint: 0, mappingRevision: this.workspace.mappingRevision });
+        await this.persist();
+        await this.startRuntime({ startIndex: 0, replaying: true });
+      } else {
+        this.workspace.job = transition(this.workspace.job, PHASES.RUNNING);
+        await this.persist();
+        await this.startRuntime({ startIndex: this.workspace.job.checkpoint, replaying: false });
+      }
+    } catch (error) {
+      await this.failCurrentRun(error);
+      throw error;
     }
     return this.envelope({ replaying: replay, checkpoint: this.workspace.job.checkpoint });
   }
