@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises';
 
 class ControlledRuntime {
   constructor() { this.startCalls = []; }
-  async start(payload) { this.startCalls.push(payload); }
+  async start(payload, handlers) { this.startCalls.push({ payload, handlers }); }
   async abort() {}
   async pause() {}
 }
@@ -83,4 +83,47 @@ test('blocked mission interface has recovery controls and preserved diagnostics,
   assert.ok(styles.includes('.recovery-outcomes'));
   assert.ok(styles.includes('.quality-examples'));
   assert.ok(!storage.includes('structuredClone(workspace);\n      if (compact.source) delete compact.source.rows'));
+});
+
+test('Worker startup failures terminate the mission instead of leaving an inert RUNNING screen', async () => {
+  const { kernel, runtime } = await setup('id,amount\\n1,10.25\\n2,20.50');
+  runtime.start = async () => { throw new Error('Worker unavailable'); };
+  const result = await kernel.invoke('run_autopilot', { outcome: 'database_ready' });
+  assert.equal(result.ok, false);
+  assert.equal(result.state.phase, PHASES.FAILED);
+  assert.equal(kernel.snapshot().job.phase, PHASES.FAILED);
+  assert.equal(kernel.snapshot().mission.status, 'FAILED');
+  assert.match(kernel.snapshot().lastError.message, /Worker unavailable/);
+  const reset = await kernel.invoke('start_new_migration', {});
+  assert.equal(reset.ok, true);
+  assert.equal(reset.state.phase, PHASES.EMPTY);
+});
+
+test('checkpoint write failure fails the run visibly instead of poisoning all subsequent Worker events', async () => {
+  let saved = null;
+  const store = {
+    async load() { return saved ? structuredClone(saved) : null; },
+    async save(workspace) {
+      if (workspace.job.phase === PHASES.RUNNING && workspace.job.processedRows > 0) {
+        throw new Error('simulated checkpoint failure');
+      }
+      saved = structuredClone(workspace);
+    }
+  };
+  const runtime = new ControlledRuntime();
+  const kernel = new CommandKernel({ store, runtime });
+  await kernel.initialize();
+  await kernel.loadSourceText('id,amount\\n1,10.25\\n2,20.50', 'small.csv');
+  const started = await kernel.invoke('run_autopilot', { outcome: 'database_ready' });
+  assert.equal(started.ok, true);
+  runtime.startCalls[0].handlers.onProgress({
+    processedRows: 1, validRows: 1, invalidRows: 0,
+    outputChunk: [{ id: 1, amount: 10.25 }], violations: []
+  });
+  await kernel.whenRuntimeIdle();
+  assert.equal(kernel.snapshot().job.phase, PHASES.FAILED);
+  assert.match(kernel.snapshot().lastError.message, /checkpoint failure/);
+  assert.equal(kernel.snapshot().mission.status, 'FAILED');
+  assert.equal(saved.job.phase, PHASES.FAILED);
+  assert.equal((await kernel.invoke('start_new_migration', {})).ok, true);
 });
