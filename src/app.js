@@ -646,6 +646,7 @@ async function boot() {
     invoke: (name, args = {}) => kernel.invoke(name, args),
     navigate,
     loadDemo: () => loadText(createDemoCsv(25000), 'customer-export-25k.csv'),
+    loadCsv: (value, filename = 'browser-recovery.csv') => loadText(value, filename),
     runAutopilot: outcome => kernel.invoke('run_autopilot', { outcome: outcome ?? selectedOutcome })
   });
 }
