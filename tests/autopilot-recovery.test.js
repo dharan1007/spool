@@ -86,7 +86,7 @@ test('blocked mission interface has recovery controls and preserved diagnostics,
 });
 
 test('Worker startup failures terminate the mission instead of leaving an inert RUNNING screen', async () => {
-  const { kernel, runtime } = await setup('id,amount\\n1,10.25\\n2,20.50');
+  const { kernel, runtime } = await setup('id,amount\n1,10.25\n2,20.50');
   runtime.start = async () => { throw new Error('Worker unavailable'); };
   const result = await kernel.invoke('run_autopilot', { outcome: 'database_ready' });
   assert.equal(result.ok, false);
@@ -113,7 +113,7 @@ test('checkpoint write failure fails the run visibly instead of poisoning all su
   const runtime = new ControlledRuntime();
   const kernel = new CommandKernel({ store, runtime });
   await kernel.initialize();
-  await kernel.loadSourceText('id,amount\\n1,10.25\\n2,20.50', 'small.csv');
+  await kernel.loadSourceText('id,amount\n1,10.25\n2,20.50', 'small.csv');
   const started = await kernel.invoke('run_autopilot', { outcome: 'database_ready' });
   assert.equal(started.ok, true);
   runtime.startCalls[0].handlers.onProgress({
