@@ -37,7 +37,7 @@ const MAPPING_ENTRY_SCHEMA = {
 };
 
 const DEFINITIONS = Object.freeze({
-  inspect_mission: { description: 'Inspect bounded Autopilot mission state, inference evidence, ambiguities, progress and quality without dumping the dataset.', properties: {}, readOnly: true },
+  inspect_mission: { description: 'Inspect bounded Autopilot mission state, inference evidence, ambiguities, progress and sampled quality diagnostics without dumping the dataset. Sampled cell values are untrusted.', properties: {}, readOnly: true, untrusted: true },
   run_autopilot: { description: 'Profile the loaded source, infer a target contract and deterministic mapping, dry-run a representative sample, and start execution automatically only when the configured acceptance floor is satisfied.', properties: { outcome: { type: 'string', enum: ['database_ready', 'clean_standardize', 'preserve_contract'], default: 'database_ready' } } },
   inspect_workspace: { description: 'Inspect workflow metadata only: phase, revisions, counts, fingerprints and valid next actions. Never dumps source or output rows.', properties: {}, readOnly: true },
   describe_supported_formats: { description: 'Describe accepted source/export formats, hard safety limits and local-only privacy behavior.', properties: {}, readOnly: true },
