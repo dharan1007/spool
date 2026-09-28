@@ -57,12 +57,12 @@ export class MigrationEngine {
     });
   }
 
-  run(rows, mappingEntries, revision = 1, targetSchema = null) {
+  run(rows, mappingEntries, revision = 1, targetSchema = null, sourceIndexes = null) {
     const accumulator = this.createAccumulator(mappingEntries, revision, targetSchema);
     const output = [];
     const rowRevisions = [];
     for (let i = 0; i < rows.length; i++) {
-      const result = accumulator.process(rows[i], i);
+      const result = accumulator.process(rows[i], sourceIndexes?.[i] ?? i);
       if (result.ok) {
         output.push(result.row);
         rowRevisions.push(revision);
