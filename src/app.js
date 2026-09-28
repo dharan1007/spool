@@ -470,6 +470,11 @@ function render() {
     const buttons = appRoot.querySelectorAll('[data-action], [data-outcome], #source-file');
     buttons.forEach(button => { button.disabled = true; });
     appRoot.setAttribute('aria-busy', 'true');
+    const processing = document.createElement('div');
+    processing.className = 'processing-banner';
+    processing.setAttribute('role', 'status');
+    processing.textContent = 'Processing locally. This view will update when the current step finishes.';
+    appRoot.prepend(processing);
   } else appRoot.removeAttribute('aria-busy');
   document.title = `${pageTitle(path)} — SPOOL`;
 }
@@ -498,6 +503,8 @@ function toast(message, tone = 'neutral') {
 
 async function loadText(text, fileName) {
   if (isBusy) return;
+  if ([PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(latestState?.job?.phase)
+    && !window.confirm('Replace the source? This will stop the active migration and discard its current output.')) return;
   isBusy = true;
   render();
   try {
@@ -515,6 +522,8 @@ async function loadText(text, fileName) {
 
 async function loadFile(file) {
   if (!file || isBusy) return;
+  if ([PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(latestState?.job?.phase)
+    && !window.confirm('Replace the source? This will stop the active migration and discard its current output.')) return;
   if (file.size > 50 * 1024 * 1024) return toast('This UI currently limits file selection to 50 MB. Use a smaller CSV for this release.', 'danger');
   if (!file.name.toLowerCase().endsWith('.csv') && file.type !== 'text/csv') return toast('SPOOL currently accepts CSV source files.', 'danger');
   isBusy = true;
