@@ -51,6 +51,63 @@ export function validateExpr(expr, options = {}, depth = 0) {
 const isEmptyValue = value => value === null || value === undefined || String(value).trim() === '';
 const asNullableNumber = value => isEmptyValue(value) ? null : parseDeterministicNumber(value);
 
+// Return the exact source-field dependency set of a validated transform
+// expression. CDC uses this to prove that a mapped TARGET primary key can be
+// reconstructed from PostgreSQL's old replica-identity tuple. This is a
+// structural dependency analysis, not value sampling: every field reachable
+// from conditional/coalesce/etc. is considered a dependency because any of
+// those branches may be selected by a future source row.
+export function expressionSourceFields(expr, options = {}) {
+  validateExpr(expr, options);
+  const fields = new Set();
+  const visit = node => {
+    switch (node.op) {
+      case 'field':
+      case 'copy':
+        fields.add(node.name);
+        return;
+      case 'literal':
+        return;
+      case 'trim':
+      case 'lowercase':
+      case 'uppercase':
+      case 'cast_string':
+      case 'cast_number':
+      case 'cast_boolean':
+      case 'parse_date':
+      case 'parse_local_datetime':
+      case 'format_date':
+      case 'regex_replace':
+      case 'enum_map':
+      case 'round':
+      case 'split':
+        visit(node.value);
+        return;
+      case 'multiply':
+      case 'divide':
+        visit(node.left);
+        visit(node.right);
+        return;
+      case 'join':
+      case 'coalesce':
+      case 'concat':
+        for (const value of node.values) visit(value);
+        return;
+      case 'conditional':
+        visit(node.if);
+        visit(node.then);
+        visit(node.else);
+        return;
+      default:
+        // validateExpr above makes this unreachable, but fail closed if the
+        // operator set and dependency walker ever drift apart.
+        fail('UNKNOWN_OPERATOR', `Dependency analysis does not support operator ${node.op}`);
+    }
+  };
+  visit(expr);
+  return Object.freeze([...fields].sort());
+}
+
 export function evaluateExpr(expr, row) {
   switch (expr.op) {
     case 'field': case 'copy': return row?.[expr.name];

@@ -12,9 +12,9 @@ const user = process.env.SPOOL_TEST_POSTGRES_USER ?? 'spooltest';
 const password = process.env.SPOOL_TEST_PG_PASSWORD ?? '';
 const enabled = Boolean(endpoint && password);
 const secretRef = { provider: 'env', key: 'SPOOL_TEST_PG_PASSWORD' };
-// A wide replay window (60 batches with the tampered rows in the last one)
-// keeps the concurrent-tamper fault deterministic: verification cannot reach
-// the tampered last batch before the tamper lands.
+// The concurrent-tamper fault targets early rows (written once by the first
+// batches, never rewritten by the INSERT-mode load): the tamper strictly
+// precedes all verification reads with no timing race at any pipeline speed.
 const ROWS = 120;
 const BATCH = 2;
 
@@ -128,11 +128,16 @@ async function leaseResourceFor(table) {
 async function driveToVerificationFailed(service, request, sourceTable, targetTable) {
   const approval = await service.approve(request, { expiresAt: '2099-01-01T00:00:00.000Z', nonce: `repair-${request.migrationId}` });
   const runPromise = service.run(request, { approval });
-  await waitForTargetCount(targetTable, ROWS);
+  // Tamper EARLY rows (written by the first batches, never rewritten by the
+  // INSERT-mode load): the tamper strictly precedes verification reads with
+  // no timing race, regardless of load/verification speed. Tampering the
+  // last rows instead races verification and loses as the pipeline gets
+  // faster. Expected diff is unchanged: id 1 mismatched, id 2 missing.
+  await waitForTargetCount(targetTable, 2);
   const tamper = await adminClient();
   try {
-    await tamper.query(`UPDATE public."${targetTable}" SET name='tampered' WHERE id=${ROWS - 1}`);
-    await tamper.query(`DELETE FROM public."${targetTable}" WHERE id=${ROWS}`);
+    await tamper.query(`UPDATE public."${targetTable}" SET name='tampered' WHERE id=1`);
+    await tamper.query(`DELETE FROM public."${targetTable}" WHERE id=2`);
   } finally { await tamper.end(); }
   const locker = await adminClient();
   try {

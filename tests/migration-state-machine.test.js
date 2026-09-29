@@ -15,8 +15,10 @@ import {
   assertTransitionPreconditions,
   buildSnapshotCdcBinding,
   snapshotCdcBindingId,
+  buildCutoverAttemptId,
   decideRecoveryAction
 } from '../src/protocol/migration-state-machine.js';
+import { verificationSemanticId } from '../src/protocol/verification-coordinator.js';
 
 function H(n) { return `sha256:${Number(n).toString(16).padStart(64, '0')}`; }
 const HASH = n => H(typeof n === 'number' ? n : String(n).charCodeAt(0));
@@ -70,10 +72,14 @@ async function storeWithState(path, migrationId, targetState, { principal = 'tes
       store.setSnapshotCdcBinding(migrationId, binding);
       context = { cdcBinding: binding, sourceStateId };
     }
-    if (next === MIGRATION_STATES.READY_FOR_CUTOVER) context = { verification };
-    if (next === MIGRATION_STATES.CUTOVER_ARMED) context = { receipt: { receiptId: HASH('e') }, verification, planId, targetContractId };
-    if (next === MIGRATION_STATES.CUTOVER_COMMITTED) context = { fenceToken: 99, finalVerification: verification };
-    if (next === MIGRATION_STATES.COMPLETED) context = { verification, postCutoverVerification: verification };
+  if (next === MIGRATION_STATES.READY_FOR_CUTOVER) context = { verification };
+  if (next === MIGRATION_STATES.CUTOVER_ARMED) context = { receipt: { receiptId: HASH('e') }, verification, planId, targetContractId };
+  if (next === MIGRATION_STATES.CUTOVER_ARMED || next === MIGRATION_STATES.FINAL_DRAIN || next === MIGRATION_STATES.FINAL_VERIFY || next === MIGRATION_STATES.CUTOVER_COMMITTED) {
+    throw new Error('storeWithState cannot reach cutover states without persisted verification; use armCutoverState()');
+  }
+  if (next === MIGRATION_STATES.COMPLETED) {
+    throw new Error('storeWithState cannot reach COMPLETED without persisted verifications; use the cutover fixtures');
+  }
     // For transitions that require fence, supply it
     let fenceToken = null;
     if ([MIGRATION_STATES.FULL_LOAD_RUNNING, MIGRATION_STATES.CUTOVER_COMMITTED].includes(next)) fenceToken = 1;
@@ -91,12 +97,93 @@ async function storeWithState(path, migrationId, targetState, { principal = 'tes
   return store;
 }
 
+// Build a coordinator-shaped verification record with a valid semantic
+// identity. completedAt defaults to "now" so the record postdates the
+// arming/drain transitions created earlier in the fixture.
+function verificationRecord({ migrationId, mode, planId, sourceStateId, targetContractId, cutoverAttemptId, status = 'VERIFIED', withDiff = false, completedAt = null, contentRoot = null, counts = null }) {
+  const semantic = {
+    schemaVersion: 1,
+    migrationId,
+    mode,
+    planId,
+    mappingRevision: 1,
+    sourceStateId,
+    targetContractId,
+    cutoverAttemptId,
+    sourceBoundary: { snapshotId: sourceStateId },
+    targetBoundary: { contractId: targetContractId },
+    cdc: null,
+    counts: counts ?? { sourceRows: 10, validRows: 10, invalidRows: 0 },
+    contentRoot: contentRoot ?? H(200),
+    levels: { required: ['ROW_COUNT'], completed: ['ROW_COUNT'] },
+    invariants: withDiff ? [{ code: 'CONTENT_VERIFICATION_DIFF', message: 'fixture diff' }] : null,
+    release: { version: '9.9.9-test', commitSha: '1'.repeat(40) }
+  };
+  const verificationId = verificationSemanticId(semantic);
+  return {
+    ...semantic,
+    verificationId,
+    fenceToken: 7,
+    startedAt: '2026-09-13T00:00:00.000Z',
+    completedAt: completedAt ?? new Date().toISOString(),
+    contentProof: null,
+    status
+  };
+}
+
+// Arm a cutover through the atomic operation with a real attempt identity.
+// Returns { attemptId, armedAt }.
+function armCutoverState(store, migrationId, target, { principal = 'test', planId, sourceStateId, targetContractId }) {
+  const { attemptId } = armCutoverFixture(store, migrationId, { planId, sourceStateId, targetContractId });
+  if (target === MIGRATION_STATES.CUTOVER_ARMED) return { attemptId };
+  if (target === MIGRATION_STATES.FINAL_DRAIN) {
+    store.transition(migrationId, {
+      nextState: MIGRATION_STATES.FINAL_DRAIN, principal, reason: 'final drain',
+      planId, sourceStateId, targetContractId, fenceToken: 5,
+      context: { fenceToken: 5 }
+    });
+    return { attemptId };
+  }
+  const finalRecord = verificationRecord({ migrationId, mode: 'FINAL_PRE_CUTOVER', planId, sourceStateId, targetContractId, cutoverAttemptId: attemptId });
+  if (target === MIGRATION_STATES.FINAL_VERIFY) {
+    store.recordFinalVerificationAtomic({ migrationId, principal, verification: finalRecord, fenceToken: 5, planId, sourceStateId, targetContractId });
+    return { attemptId };
+  }
+  if (target === MIGRATION_STATES.CUTOVER_COMMITTED) {
+    store.recordFinalVerificationAtomic({ migrationId, principal, verification: finalRecord, fenceToken: 5, planId, sourceStateId, targetContractId });
+    store.commitCutoverAtomic({
+      migrationId, principal,
+      commitEvidence: { targetContractId, fencingToken: 6, fenced: true, committedAt: new Date().toISOString() },
+      decidedAt: new Date().toISOString(), finalVerificationId: finalRecord.verificationId,
+      fenceToken: 6, planId, sourceStateId, targetContractId
+    });
+    return { attemptId };
+  }
+  throw new Error(`armCutoverState cannot reach ${target}`);
+}
+
+function armCutoverFixture(store, migrationId, { planId, sourceStateId, targetContractId, receiptId = HASH('e'), receiptKind = 'migration' }) {
+  const armedAt = new Date().toISOString();
+  const cutoverAttemptId = buildCutoverAttemptId({ migrationId, receiptId, receiptKind, planId, sourceStateId, targetContractId, armedAt });
+  const armed = store.armCutoverAtomic({
+    migrationId, principal: 'alice', receiptId, receiptKind, planId, sourceSnapshotId: sourceStateId,
+    targetIdentity: { connector: 'sqlite', resource: 'rows' }, targetContractId, armedAt, cutoverAttemptId
+  });
+  return { armed, attemptId: cutoverAttemptId, armedAt };
+}
+
 test('migration state machine allows valid linear progression and rejects illegal jumps', () => {
   const hash = HASH('a');
   assert.equal(isAllowedTransition(null, MIGRATION_STATES.CREATED), true);
   assert.equal(isAllowedTransition(MIGRATION_STATES.CREATED, MIGRATION_STATES.DISCOVERING), true);
   assert.equal(isAllowedTransition(MIGRATION_STATES.CREATED, MIGRATION_STATES.COMPLETED), false);
   assert.equal(isAllowedTransition(MIGRATION_STATES.READY_FOR_CUTOVER, MIGRATION_STATES.CUTOVER_ARMED), true);
+  // Removed bypasses: commit is reachable only from FINAL_VERIFY, and
+  // COMPLETED only from POST_CUTOVER_VERIFY.
+  assert.equal(isAllowedTransition(MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.CUTOVER_COMMITTED), false);
+  assert.equal(isAllowedTransition(MIGRATION_STATES.READY_FOR_CUTOVER, MIGRATION_STATES.COMPLETED), false);
+  assert.equal(isAllowedTransition(MIGRATION_STATES.FINAL_VERIFY, MIGRATION_STATES.CUTOVER_COMMITTED), true);
+  assert.equal(isAllowedTransition(MIGRATION_STATES.POST_CUTOVER_VERIFY, MIGRATION_STATES.COMPLETED), true);
   assert.equal(isAllowedTransition(MIGRATION_STATES.CUTOVER_COMMITTED, MIGRATION_STATES.FULL_LOAD_RUNNING), false);
   assert.equal(isAllowedTransition(MIGRATION_STATES.VERIFYING, MIGRATION_STATES.READY_FOR_CUTOVER), true);
   assert.equal(isAllowedTransition(MIGRATION_STATES.VERIFYING, MIGRATION_STATES.CUTOVER_COMMITTED), false);
@@ -291,7 +378,7 @@ test('READY_FOR_CUTOVER requires verified verification and acceptable lag', asyn
   }
 });
 
-test('CUTOVER_COMMITTED requires fresh fence and final verification, COMPLETED requires post verification', async () => {
+test('CUTOVER_COMMITTED requires fresh fence and bound final verification, COMPLETED requires post verification', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'spool-msm-'));
   const path = join(dir, 'state.db');
   const store = new RunStore({ path });
@@ -307,43 +394,60 @@ test('CUTOVER_COMMITTED requires fresh fence and final verification, COMPLETED r
     store.transition(mig, { nextState: MIGRATION_STATES.FULL_LOAD_RUNNING, principal: 'alice', reason: 'x', fenceToken: 1 });
     store.transition(mig, { nextState: MIGRATION_STATES.VERIFYING, principal: 'alice', reason: 'x' });
     store.transition(mig, { nextState: MIGRATION_STATES.READY_FOR_CUTOVER, principal: 'alice', reason: 'ready', context: { verification: { status: 'VERIFIED' } } });
-    store.transition(mig, { nextState: MIGRATION_STATES.CUTOVER_ARMED, principal: 'alice', reason: 'armed', context: { receipt: { receiptId: HASH('r') }, verification: { status: 'VERIFIED' } } });
-    store.transition(mig, { nextState: MIGRATION_STATES.FINAL_VERIFY, principal: 'alice', reason: 'final verify' });
+    const { attemptId } = armCutoverFixture(store, mig, { planId, sourceStateId, targetContractId });
+    // Persist a real FINAL_PRE_CUTOVER record bound to this attempt.
+    const finalRecord = verificationRecord({ migrationId: mig, mode: 'FINAL_PRE_CUTOVER', planId, sourceStateId, targetContractId, cutoverAttemptId: attemptId });
+    store.recordFinalVerificationAtomic({ migrationId: mig, principal: 'alice', verification: finalRecord, fenceToken: 2, planId, sourceStateId, targetContractId });
+    assert.equal(store.getMigrationState(mig).currentState, MIGRATION_STATES.FINAL_VERIFY);
     // Try commit without fence -> fail
-    assert.throws(() => store.transition(mig, {
-      nextState: MIGRATION_STATES.CUTOVER_COMMITTED,
-      principal: 'alice',
-      reason: 'commit',
-      context: { finalVerification: { status: 'VERIFIED' } }
+    assert.throws(() => store.commitCutoverAtomic({
+      migrationId: mig, principal: 'alice',
+      commitEvidence: { targetContractId, fencingToken: 2, fenced: true, committedAt: new Date().toISOString() },
+      decidedAt: new Date().toISOString(), finalVerificationId: finalRecord.verificationId,
+      fenceToken: null, planId, sourceStateId, targetContractId
     }), /FENCE_REQUIRED/);
-    // Try commit with failed verification -> fail
-    assert.throws(() => store.transition(mig, {
-      nextState: MIGRATION_STATES.CUTOVER_COMMITTED,
-      principal: 'alice',
-      reason: 'commit',
-      fenceToken: 2,
-      context: { fenceToken: 2, finalVerification: { status: 'DIFF' } }
+    // Commit with a FAILED verification record -> fail
+    const diffRecord = verificationRecord({ migrationId: mig, mode: 'FINAL_PRE_CUTOVER', planId, sourceStateId, targetContractId, cutoverAttemptId: attemptId, withDiff: true, status: 'FAILED' });
+    store.saveVerification(mig, diffRecord);
+    assert.throws(() => store.commitCutoverAtomic({
+      migrationId: mig, principal: 'alice',
+      commitEvidence: { targetContractId, fencingToken: 3, fenced: true, committedAt: new Date().toISOString() },
+      decidedAt: new Date().toISOString(), finalVerificationId: diffRecord.verificationId,
+      fenceToken: 3, planId, sourceStateId, targetContractId
     }), /VERIFICATION_REQUIRED/);
-    // Success
-    store.transition(mig, {
-      nextState: MIGRATION_STATES.CUTOVER_COMMITTED,
-      principal: 'alice',
-      reason: 'commit',
-      fenceToken: 2,
-      context: { fenceToken: 2, finalVerification: { status: 'VERIFIED' } }
+    // Commit with an unknown verification id -> fail
+    assert.throws(() => store.commitCutoverAtomic({
+      migrationId: mig, principal: 'alice',
+      commitEvidence: { targetContractId, fencingToken: 3, fenced: true, committedAt: new Date().toISOString() },
+      decidedAt: new Date().toISOString(), finalVerificationId: HASH('z'),
+      fenceToken: 3, planId, sourceStateId, targetContractId
+    }), /VERIFICATION_REQUIRED/);
+    // Success with the bound VERIFIED record
+    const committed = store.commitCutoverAtomic({
+      migrationId: mig, principal: 'alice',
+      commitEvidence: { targetContractId, fencingToken: 4, fenced: true, committedAt: new Date().toISOString() },
+      decidedAt: new Date().toISOString(), finalVerificationId: finalRecord.verificationId,
+      fenceToken: 4, planId, sourceStateId, targetContractId
     });
-    store.transition(mig, { nextState: MIGRATION_STATES.POST_CUTOVER_VERIFY, principal: 'alice', reason: 'post' });
-    assert.throws(() => store.transition(mig, {
-      nextState: MIGRATION_STATES.COMPLETED,
-      principal: 'alice',
-      reason: 'complete',
-      context: { verification: { status: 'DIFF' } }
+    assert.equal(committed.status, 'COMMITTED');
+    assert.equal(committed.cutoverAttemptId, attemptId);
+    assert.equal(store.getMigrationState(mig).currentState, MIGRATION_STATES.CUTOVER_COMMITTED);
+    // Post-cutover: a DIFF record cannot authorize COMPLETED. First reach
+    // POST_CUTOVER_VERIFY with a valid record, then prove the gate rejects
+    // the DIFF identity.
+    const postRecord = verificationRecord({ migrationId: mig, mode: 'POST_CUTOVER', planId, sourceStateId, targetContractId, cutoverAttemptId: attemptId });
+    store.recordPostCutoverVerificationAtomic({ migrationId: mig, principal: 'alice', verification: postRecord });
+    assert.equal(store.getMigrationState(mig).currentState, MIGRATION_STATES.POST_CUTOVER_VERIFY);
+    const postDiff = verificationRecord({ migrationId: mig, mode: 'POST_CUTOVER', planId, sourceStateId, targetContractId, cutoverAttemptId: attemptId, withDiff: true, status: 'FAILED' });
+    store.saveVerification(mig, postDiff);
+    assert.throws(() => store.completeMigrationAtomic({
+      migrationId: mig, principal: 'alice', postCutoverVerificationId: postDiff.verificationId,
+      planId, sourceStateId, targetContractId
     }), /VERIFICATION_REQUIRED/);
-    store.transition(mig, {
-      nextState: MIGRATION_STATES.COMPLETED,
-      principal: 'alice',
-      reason: 'complete',
-      context: { verification: { status: 'VERIFIED' }, postCutoverVerification: { status: 'VERIFIED' } }
+    // Success with the bound VERIFIED post-cutover record.
+    store.completeMigrationAtomic({
+      migrationId: mig, principal: 'alice', postCutoverVerificationId: postRecord.verificationId,
+      planId, sourceStateId, targetContractId
     });
     assert.equal(store.getMigrationState(mig).currentState, MIGRATION_STATES.COMPLETED);
   } finally {
@@ -530,27 +634,78 @@ test('old fence cannot commit after takeover (stale fence rejected inside TX is 
   await rm(dir, { recursive: true, force: true });
 });
 
-test('duplicate identical transition is idempotent, conflicting evidence rejected', async () => {
+test('stable command identity: same command retries idempotently, conflicting command rejected', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'spool-idem-'));
   const path = join(dir, 'state.db');
   const store = new RunStore({ path });
   const mig = 'mig-idem';
   store.initializeMigration(mig, { principal: 'alice', reason: 'init' });
-  const t1 = store.transition(mig, { nextState: MIGRATION_STATES.DISCOVERING, principal: 'alice', reason: 'same', evidence: { foo: 'bar' } });
-  const seqBefore = store.getMigrationState(mig).sequence;
-  // Idempotent retry with same record (same timestamp? need same timestamp to be identical hash — but our transition uses Date.now, so second call will have different timestamp and thus different hash.
-  // To test idempotent, we need to use same evidence and allow timestamp difference? Our transitionId includes timestamp, so identical retry would have different timestamp and not be idempotent.
-  // Instead we test that same sequence with different evidence is rejected as TRANSITION_CONFLICT via direct DB injection.
-  // Simulate by directly inserting conflicting transition via second RunStore instance with same sequence but different evidence
-  // First, test that normal duplicate with same evidence but different timestamp is treated as conflict (since timestamp differs)
-  // That's expected behavior: each transition has unique timestamp, so no idempotent without same timestamp. We instead test TRANSITION_CONFLICT via stale sequence.
+  // Same logical command retried (e.g. crash before the result was observed):
+  // identical command id + identical semantic evidence -> same stored transition,
+  // no sequence advance, stable transitionId across process restarts. The stable
+  // command identity is caller-supplied; wall-clock timestamps and fresh fence
+  // tokens are execution metadata and never enter it.
+  const t1 = store.transition(mig, {
+    nextState: MIGRATION_STATES.DISCOVERING, principal: 'alice', reason: 'same',
+    evidence: { foo: 'bar' }, commandId: 'cmd-op-1'
+  });
+  const seqAfterFirst = store.getMigrationState(mig).sequence;
+  const t2 = store.transition(mig, {
+    nextState: MIGRATION_STATES.DISCOVERING, principal: 'alice', reason: 'same retried with fresh wall-clock',
+    evidence: { foo: 'bar' }, commandId: 'cmd-op-1'
+  });
+  assert.equal(t2.transitionId, t1.transitionId);
+  assert.equal(t2.commandId, 'cmd-op-1');
+  assert.equal(store.getMigrationState(mig).sequence, seqAfterFirst);
+  // Same sequence, different command identity -> TRANSITION_CONFLICT.
+  // Simulated white-box: a concurrently-committed racing transaction left a
+  // row at the next sequence with a different command identity (in production
+  // this arises from two writers racing inside overlapping transactions).
+  {
+    const Database = (await import('better-sqlite3')).default;
+    const raw = new Database(path);
+    try {
+      raw.prepare(`INSERT INTO spool_transitions (migration_id, sequence, transition_id, command_id, previous_transition_id, previous_state, next_state, principal, reason, timestamp, transition_json)
+        VALUES (?, 2, ?, 'cmd-racer', NULL, 'DISCOVERING', 'PREFLIGHTED', 'bob', 'race', '2026-09-13T00:00:00.000Z', '{}')`)
+        .run(mig, `sha256:${'c'.repeat(64)}`);
+      assert.throws(() => store.transition(mig, {
+        nextState: MIGRATION_STATES.PREFLIGHTED,
+        principal: 'alice',
+        reason: 'conflict',
+        evidence: { foo: 'different' }, commandId: 'cmd-op-2'
+      }), /TRANSITION_CONFLICT/);
+    } finally {
+      raw.prepare('DELETE FROM spool_transitions WHERE migration_id = ? AND sequence = 2').run(mig);
+      raw.close();
+    }
+  }
+  // Same command id but a different requested transition -> TRANSITION_CONFLICT.
+  assert.throws(() => store.transition(mig, {
+    nextState: MIGRATION_STATES.PREFLIGHTED,
+    principal: 'alice',
+    reason: 'conflict',
+    evidence: { foo: 'different' }, commandId: 'cmd-op-1'
+  }), /TRANSITION_CONFLICT/);
+  // Stale expectedSequence still rejected.
   assert.throws(() => store.transition(mig, {
     nextState: MIGRATION_STATES.PREFLIGHTED,
     principal: 'alice',
     reason: 'conflict',
     expectedSequence: 0 // stale, current is 1
   }), /STALE_TRANSITION_VERSION/);
+  // Idempotent replay recognized across a fresh process (restart): same
+  // command yields the stored transition without advancing the log.
   store.close();
+  const reopened = new RunStore({ path });
+  const found = reopened.findTransitionByCommand(mig, t1.commandId);
+  assert.ok(found);
+  assert.equal(found.transitionId, t1.transitionId);
+  const t3 = reopened.transition(mig, {
+    nextState: MIGRATION_STATES.DISCOVERING, principal: 'alice', reason: 'retry after restart',
+    evidence: { foo: 'bar' }, commandId: 'cmd-op-1'
+  });
+  assert.equal(t3.transitionId, t1.transitionId);
+  reopened.close();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -606,11 +761,21 @@ test('illegal transitions return ILLEGAL_STATE_TRANSITION', async () => {
   store.transition(mig, { nextState: MIGRATION_STATES.FULL_LOAD_RUNNING, principal: 'alice', reason: 'x', fenceToken: 1 });
   store.transition(mig, { nextState: MIGRATION_STATES.VERIFYING, principal: 'alice', reason: 'x' });
   store.transition(mig, { nextState: MIGRATION_STATES.READY_FOR_CUTOVER, principal: 'alice', reason: 'x', context: { verification: { status: 'VERIFIED' } } });
-  store.transition(mig, { nextState: MIGRATION_STATES.CUTOVER_ARMED, principal: 'alice', reason: 'x', context: { receipt: { receiptId: HASH('r') }, verification: { status: 'VERIFIED' } } });
-  store.transition(mig, { nextState: MIGRATION_STATES.FINAL_VERIFY, principal: 'alice', reason: 'x' });
-  store.transition(mig, { nextState: MIGRATION_STATES.CUTOVER_COMMITTED, principal: 'alice', reason: 'x', fenceToken: 2, context: { fenceToken: 2, finalVerification: { status: 'VERIFIED' } } });
-  store.transition(mig, { nextState: MIGRATION_STATES.POST_CUTOVER_VERIFY, principal: 'alice', reason: 'x' });
-  store.transition(mig, { nextState: MIGRATION_STATES.COMPLETED, principal: 'alice', reason: 'x', context: { verification: { status: 'VERIFIED' }, postCutoverVerification: { status: 'VERIFIED' } } });
+  const { attemptId } = armCutoverFixture(store, mig, { planId, sourceStateId, targetContractId, receiptId: HASH('r') });
+  const finalRecord = verificationRecord({ migrationId: mig, mode: 'FINAL_PRE_CUTOVER', planId, sourceStateId, targetContractId, cutoverAttemptId: attemptId });
+  store.recordFinalVerificationAtomic({ migrationId: mig, principal: 'alice', verification: finalRecord, fenceToken: 2, planId, sourceStateId, targetContractId });
+  store.commitCutoverAtomic({
+    migrationId: mig, principal: 'alice',
+    commitEvidence: { targetContractId, fencingToken: 2, fenced: true, committedAt: new Date().toISOString() },
+    decidedAt: new Date().toISOString(), finalVerificationId: finalRecord.verificationId,
+    fenceToken: 2, planId, sourceStateId, targetContractId
+  });
+  const postRecord = verificationRecord({ migrationId: mig, mode: 'POST_CUTOVER', planId, sourceStateId, targetContractId, cutoverAttemptId: attemptId });
+  store.recordPostCutoverVerificationAtomic({ migrationId: mig, principal: 'alice', verification: postRecord });
+  store.completeMigrationAtomic({
+    migrationId: mig, principal: 'alice', postCutoverVerificationId: postRecord.verificationId,
+    planId, sourceStateId, targetContractId
+  });
   // Now try backwards
   assert.throws(() => store.transition(mig, { nextState: MIGRATION_STATES.FULL_LOAD_RUNNING, principal: 'alice', reason: 'backwards' }), /ILLEGAL_STATE_TRANSITION/);
   store.close();
@@ -701,6 +866,9 @@ test('restart at 10 boundaries via fresh process simulation', async () => {
         store.transition(mig, { nextState: MIGRATION_STATES.REPAIR_PLANNED, principal: 'alice', reason: 'x' });
         store.transition(mig, { nextState: MIGRATION_STATES.REPAIR_APPROVED, principal: 'alice', reason: 'x', context: { repairApproval: { approvalId: 'r1' } } });
         store.transition(mig, { nextState: MIGRATION_STATES.REPAIRING, principal: 'alice', reason: 'x', fenceToken: 2, context: { repairApproval: { approvalId: 'r1' }, fenceToken: 2 } });
+      } else if ([MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN, MIGRATION_STATES.FINAL_VERIFY, MIGRATION_STATES.CUTOVER_COMMITTED].includes(b.target)) {
+        store = await storeWithState(path, mig, MIGRATION_STATES.READY_FOR_CUTOVER);
+        armCutoverState(store, mig, b.target, { planId: HASH('a'), sourceStateId: HASH('b'), targetContractId: HASH('c') });
       } else {
         store = await storeWithState(path, mig, b.target);
       }

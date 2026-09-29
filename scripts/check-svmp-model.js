@@ -29,7 +29,8 @@ const requiredInvariants = [
   'cdc_ack_not_beyond_applied',
   'no_plan_drift',
   'no_backwards_after_cutover',
-  'no_completed_after_failed'
+  'no_completed_after_failed',
+  'cutover_committed_requires_final_verify'
 ];
 const proved = new Set(safe.invariantsProved);
 for (const invariant of requiredInvariants) {
@@ -95,6 +96,13 @@ const completedAfterFailedMutation = checkSvmpExecutionModel({ mutation: UNSAFE_
 if (completedAfterFailedMutation.ok || !completedAfterFailedMutation.violations.some(item => item.invariant === 'no_completed_after_failed')) {
   fail('mutation test failed to detect completed after failed verification', completedAfterFailedMutation);
 }
+const noFinalVerifyMutation = checkSvmpExecutionModel({ mutation: UNSAFE_MODEL_MUTATIONS.ALLOW_CUTOVER_WITHOUT_FINAL_VERIFY });
+if (noFinalVerifyMutation.ok || !noFinalVerifyMutation.violations.some(item => item.invariant === 'cutover_committed_requires_final_verify')) {
+  fail('mutation test failed to detect cutover commit without a prior FINAL_VERIFY in the same attempt', noFinalVerifyMutation);
+}
+if (!noFinalVerifyMutation.violations.some(item => Array.isArray(item.trace) && item.trace.length > 0)) {
+  fail('cutover-without-final-verify mutation failure did not produce a counterexample trace', noFinalVerifyMutation);
+}
 
 console.log(JSON.stringify({
   ok: true,
@@ -112,6 +120,7 @@ console.log(JSON.stringify({
     cdcAckBeyond: 'counterexample detected',
     planDrift: 'counterexample detected',
     backwardsAfterCutover: 'counterexample detected',
-    completedAfterFailed: 'counterexample detected'
+    completedAfterFailed: 'counterexample detected',
+    cutoverWithoutFinalVerify: 'counterexample detected'
   }
 }, null, 2));

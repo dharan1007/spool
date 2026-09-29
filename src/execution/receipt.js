@@ -1,6 +1,8 @@
+import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { fail } from '../core/errors.js';
 import { canonicalJson, sha256Canonical } from '../platform/canonical-json.js';
 import { connectorIdentity } from '../platform/contracts.js';
+import { publicKeyId, requirePublicKeyId, signCanonical, verifyCanonical } from '../platform/signing.js';
 
 const RECEIPT_DOMAIN = 'spool-migration-receipt-v1';
 const REPAIR_RECEIPT_DOMAIN = 'spool-repair-receipt-v1';
@@ -104,4 +106,80 @@ export function createRepairReceipt(input = {}) {
   const canonicalRecord = JSON.parse(canonicalJson(record));
   const receiptId = sha256Canonical(REPAIR_RECEIPT_DOMAIN, canonicalRecord);
   return Object.freeze({ receiptId, record: Object.freeze(canonicalRecord) });
+}
+
+const RECEIPT_SIGNATURE_DOMAIN = 'spool-receipt-signature-v1';
+
+// Cryptographic execution evidence: a detached Ed25519 signature over the
+// domain-separated canonical {receiptId, record} binding. Key lifecycle:
+// keyId IS the SPKI fingerprint (ed25519:fpr:...); verification accepts a
+// trust-roots set of {keyId, publicKey} entries so retired keys keep
+// verifying old receipts while only active keys sign new ones. Provider
+// support is local PEM only — no KMS/HSM is claimed.
+export function signReceiptEnvelope({ receipt, privateKey, keyId = null } = {}) {
+  if (!receipt || typeof receipt !== 'object' || typeof receipt.receiptId !== 'string' || !receipt.record || typeof receipt.record !== 'object') {
+    fail('INVALID_RECEIPT_INPUT', 'signReceiptEnvelope requires a {receiptId, record} receipt');
+  }
+  if (typeof privateKey !== 'string' || !privateKey) fail('INVALID_SIGNING_KEY', 'A PEM private key is required to sign a receipt');
+  const parsed = createPrivateKey(privateKey);
+  const derived = createPublicKey(parsed).export({ type: 'spki', format: 'pem' });
+  const fingerprint = publicKeyId(derived);
+  if (keyId != null && requirePublicKeyId(keyId) !== fingerprint) {
+    fail('KEY_FINGERPRINT_MISMATCH', 'Claimed keyId does not match the signing key');
+  }
+  const payload = { receiptId: receipt.receiptId, record: receipt.record };
+  const signed = signCanonical(RECEIPT_SIGNATURE_DOMAIN, payload, privateKey);
+  return Object.freeze({
+    kind: 'spool-signed-receipt-v1',
+    receiptId: receipt.receiptId,
+    record: receipt.record,
+    signature: Object.freeze({
+      algorithm: signed.algorithm,
+      domain: RECEIPT_SIGNATURE_DOMAIN,
+      keyId: fingerprint,
+      keyFingerprint: fingerprint,
+      signature: signed.signature,
+      signedAt: new Date().toISOString()
+    })
+  });
+}
+
+// Offline verification: recompute the content identity from the record,
+// then verify the detached signature against the trust roots. No daemon,
+// no network, no database. Any semantic tampering (record field, receiptId
+// swap, signature, keyId) fails closed.
+export function verifySignedReceiptEnvelope(envelope, { trustRoots = [] } = {}) {
+  if (!envelope || typeof envelope !== 'object' || envelope.kind !== 'spool-signed-receipt-v1') {
+    fail('INVALID_SIGNED_RECEIPT', 'Envelope kind must be spool-signed-receipt-v1');
+  }
+  if (typeof envelope.receiptId !== 'string' || !envelope.record || typeof envelope.record !== 'object') {
+    fail('INVALID_SIGNED_RECEIPT', 'Envelope must carry receiptId and record');
+  }
+  const signature = envelope.signature;
+  if (!signature || typeof signature !== 'object' || signature.domain !== RECEIPT_SIGNATURE_DOMAIN) {
+    fail('INVALID_SIGNED_RECEIPT', 'Envelope signature must use the receipt signature domain');
+  }
+  if (!Array.isArray(trustRoots) || trustRoots.length === 0) fail('RECEIPT_TRUST_ROOTS_REQUIRED', 'Offline verification requires at least one trusted public key');
+  // Content identity first: a record edit invalidates the receiptId binding
+  // even if the signature somehow verified.
+  const domain = envelope.record?.kind === 'repair' ? REPAIR_RECEIPT_DOMAIN : RECEIPT_DOMAIN;
+  const recomputed = sha256Canonical(domain, JSON.parse(canonicalJson(envelope.record)));
+  if (recomputed !== envelope.receiptId) {
+    fail('RECEIPT_IDENTITY_MISMATCH', 'Envelope record does not match its receiptId; the record was modified', {
+      recomputed, claimed: envelope.receiptId
+    });
+  }
+  const keyFingerprint = requirePublicKeyId(signature.keyFingerprint ?? signature.keyId);
+  const root = trustRoots.find(entry => entry && entry.keyId === keyFingerprint);
+  if (!root) fail('RECEIPT_KEY_UNTRUSTED', 'Envelope signing key is not in the trust roots', { keyId: keyFingerprint });
+  if (!root.publicKey) fail('RECEIPT_TRUST_ROOTS_REQUIRED', 'Trust root entry must carry its public key');
+  const payload = { receiptId: envelope.receiptId, record: envelope.record };
+  let authentic = false;
+  try {
+    authentic = verifyCanonical(RECEIPT_SIGNATURE_DOMAIN, payload, signature.signature, root.publicKey, { keyFingerprint });
+  } catch {
+    authentic = false;
+  }
+  if (authentic !== true) fail('RECEIPT_SIGNATURE_INVALID', 'Envelope signature does not verify against the trusted key', { keyId: keyFingerprint });
+  return Object.freeze({ authentic: true, receiptId: envelope.receiptId, keyId: keyFingerprint });
 }

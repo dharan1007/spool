@@ -84,7 +84,7 @@ function approvalEffects(plan) {
 }
 
 class PostgresTargetExecution {
-  constructor({ migrationId, targetRef, credentialBroker, leaseTtlMs }) {
+  constructor({ migrationId, targetRef, credentialBroker, leaseTtlMs, faultInjector = null }) {
     this.migrationId = requireMigrationId(migrationId);
     this.targetRef = Object.freeze(structuredClone(requirePostgresTargetRef(targetRef)));
     this.credentialBroker = credentialBroker;
@@ -94,6 +94,7 @@ class PostgresTargetExecution {
     this.lease = null;
     this.target = null;
     this.closed = false;
+    this.faultInjector = faultInjector;
   }
 
   #assertOpen() {
@@ -102,7 +103,42 @@ class PostgresTargetExecution {
 
   async renewLease() {
     this.#assertOpen();
-    this.lease = await acquirePostgresLease({ targetRef: this.targetRef, credentialBroker: this.credentialBroker, resource: this.leaseResource, owner: this.leaseOwner, ttlMs: this.leaseTtlMs });
+    const previous = this.lease;
+    const renewed = await acquirePostgresLease({
+      targetRef: this.targetRef,
+      credentialBroker: this.credentialBroker,
+      resource: this.leaseResource,
+      owner: this.leaseOwner,
+      ttlMs: this.leaseTtlMs
+    });
+
+    // One execution is one fencing lineage. If this owner lost the lease and
+    // another owner acquired the resource, PostgreSQL increments the fencing
+    // token. A later re-acquire by this still-live JS object MUST NOT silently
+    // adopt that newer token: work/proofs produced under the old token may
+    // have raced with the intervening owner. Force the caller to abandon this
+    // execution and rebuild/re-verify from durable state.
+    if (previous && renewed.fencingToken !== previous.fencingToken) {
+      try {
+        await releasePostgresLease({
+          targetRef: this.targetRef,
+          credentialBroker: this.credentialBroker,
+          resource: renewed.resource,
+          owner: renewed.owner,
+          fencingToken: renewed.fencingToken
+        });
+      } catch {
+        // Releasing the accidentally re-acquired lease is best-effort. The
+        // primary safety property is refusal to continue on a changed token.
+      }
+      fail('FENCING_LINEAGE_CHANGED', 'PostgreSQL execution lost lease ownership and cannot continue on a new fencing token', {
+        resource: this.leaseResource,
+        previousFencingToken: previous.fencingToken,
+        renewedFencingToken: renewed.fencingToken
+      });
+    }
+
+    this.lease = renewed;
     return this.lease;
   }
 
@@ -110,7 +146,7 @@ class PostgresTargetExecution {
     this.#assertOpen();
     if (!this.lease) fail('EXECUTION_LEASE_REQUIRED', 'PostgreSQL target execution requires a durable lease before opening the target');
     if (!this.target) {
-      this.target = new PostgresTarget({ targetRef: this.targetRef, credentialBroker: this.credentialBroker, requireFencing: true, fenceResource: this.leaseResource, fenceOwner: this.leaseOwner });
+      this.target = new PostgresTarget({ targetRef: this.targetRef, credentialBroker: this.credentialBroker, requireFencing: true, fenceResource: this.leaseResource, fenceOwner: this.leaseOwner, faultInjector: this.faultInjector });
     }
     return this.target;
   }
@@ -171,11 +207,12 @@ class PostgresTargetExecution {
 }
 
 class PostgresTargetRuntime {
-  constructor({ credentialBroker, leaseTtlMs }) {
+  constructor({ credentialBroker, leaseTtlMs, faultInjector = null }) {
     if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_POSTGRES_RUNTIME_CONFIG', 'credentialBroker.withSecret() is required');
     this.descriptor = POSTGRES_TARGET_DESCRIPTOR;
     this.credentialBroker = credentialBroker;
     this.leaseTtlMs = requireLeaseTtlMs(leaseTtlMs);
+    this.faultInjector = faultInjector;
   }
 
   async normalizePlanInput(input = {}) {
@@ -209,10 +246,14 @@ class PostgresTargetRuntime {
   }
 
   createExecution({ migrationId, targetRef } = {}) {
-    return new PostgresTargetExecution({ migrationId, targetRef, credentialBroker: this.credentialBroker, leaseTtlMs: this.leaseTtlMs });
+    return new PostgresTargetExecution({ migrationId, targetRef, credentialBroker: this.credentialBroker, leaseTtlMs: this.leaseTtlMs, faultInjector: this.faultInjector });
+  }
+
+  async close() {
+    // No persistent connections at runtime level; executions manage their own connections
   }
 }
 
-export function createPostgresTargetRuntime({ credentialBroker, leaseTtlMs = DEFAULT_LEASE_TTL_MS } = {}) {
-  return new PostgresTargetRuntime({ credentialBroker, leaseTtlMs: requireLeaseTtlMs(leaseTtlMs) });
+export function createPostgresTargetRuntime({ credentialBroker, leaseTtlMs = DEFAULT_LEASE_TTL_MS, faultInjector = null } = {}) {
+  return new PostgresTargetRuntime({ credentialBroker, leaseTtlMs: requireLeaseTtlMs(leaseTtlMs), faultInjector });
 }

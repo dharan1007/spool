@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "commit": "f46c0e74675506c34c4c6419479757a0054df995",
+  "branch": "feat/industrial-postgres-qualification",
+  "createdAt": "2026-09-20T07:45:38.762Z",
+  "qualificationRun": "spool-qualify-2026-09-20T07-26-45-892Z-3b4d1862",
+  "results": {
+    "unit": {
+      "tests": 486,
+      "pass": 419,
+      "fail": 0,
+      "skipped": 67
+    },
+    "postgresConformance": {
+      "tests": 56,
+      "pass": 56,
+      "fail": 0
+    },
+    "svmpModel": {
+      "ok": true,
+      "states": 1640
+    },
+    "qualification": {
+      "result": "PASS",
+      "scenarios": 9,
+      "unexpectedFailures": 0,
+      "stubs": 0,
+      "releaseGrade": true
+    },
+    "evidenceVerify": {
+      "exit": 0
+    }
+  },
+  "artifacts": {
+    "REPORT.md": "sha256:a68a043f04e9351bb03c9b427e95c658eb6db9c562acbc8ff370d5fc2c3eaf92",
+    "gates\\build.log": "sha256:8b9150fb256675760f2b4e1893ac9fe045d20c1ee51f9dfa136d31034d18ad49",
+    "gates\\check.log": "sha256:38f580f495ec422090725f408364339ee52fef4806ec5abf4237287dea3e4811",
+    "gates\\evidence-verify.log": "sha256:c389aae3a89cc6c4d1163c1ba4a71bf89ca374451a0eb35da929ab9cb1041595",
+    "gates\\postgres-conformance.log": "sha256:d5ee5733184c4569d751fe4a6b8ce815448e3e4d993fcee9e8bc8cd1baef6bc9",
+    "gates\\qualification-run.log": "sha256:9a6026f8668eaac8ed680f24d0f8ee0bc1025611859b51e77e3a90a19f55b508",
+    "gates\\static-check.log": "sha256:9ed308749f48b4a53b1e664584b5e51d87a6631124c08b9b44739b1114a17dd3",
+    "gates\\svmp-model.log": "sha256:8be6399324eca656eee4e0dc3ae2b862fac48c82e3ea429612233cdbee167d6f",
+    "gates\\unit.log": "sha256:5cc5fd13d093e1e00513cb99ef41f2862cc61c2c0e59ed62c99c6bc88af97e62",
+    "qualification\\config.json": "sha256:1c97cb67e76445201fe712ebc9219e655eae1d6c352f27ca103a59d735574792",
+    "qualification\\environment.json": "sha256:e63f57c4b3155e22d834a30987a152b5994befa0561e0e53c5b1f91c09cbca16",
+    "qualification\\failures.json": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "qualification\\manifest.json": "sha256:a44fd8bf62c2a3aa4cfff4fa541726a0af941f035df6b94f914b939a0c931fd7",
+    "qualification\\metrics.json": "sha256:1efb080e9805c7dd4abdb5be73b43e1e26710541adcb8a3e79a55068c294bcc9",
+    "qualification\\raw.jsonl": "sha256:19ca4fe5fbd57f8e0930e2d4c05683c64f5708aa02e2b2ebf959e0ba8e27eb4d",
+    "qualification\\report.md": "sha256:6cbf681652502d1e6051750bf14b3c10174c64172cbd75c1cae302233bdee8ce",
+    "qualification\\sha256sums.txt": "sha256:795e732e75b5d4cc65dc1589d6f3a06bda55ef510af45821456dba785e7d9f7c"
+  }
+}

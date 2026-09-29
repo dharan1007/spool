@@ -137,6 +137,10 @@ class SqliteTargetRuntime {
   createExecution({ migrationId, targetRef } = {}) {
     return new SqliteTargetExecution({ migrationId, targetRef, leaseTtlMs: this.leaseTtlMs });
   }
+
+  close() {
+    // No persistent connections to close for SQLite runtime
+  }
 }
 
 export async function createSqliteTargetRuntime({ targetRoot, leaseTtlMs = DEFAULT_LEASE_TTL_MS } = {}) {

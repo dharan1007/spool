@@ -67,7 +67,7 @@ _Gate F production claim: Ed25519 PEM key management, domain-bound signatures, k
 
 _Gate F production claim: two independent builds over the same committed source must produce the identical artifact root._
 
-## EXPERIMENTAL (22)
+## EXPERIMENTAL (26)
 
 ### `sqlite.target` — SQLite target
 
@@ -306,6 +306,36 @@ _Audit logging, session management, and policy enforcement proven; load and benc
 
 _Missing fault, security and load evidence._
 
+### `postgres.cdc.transaction-atomicity` — PostgreSQL CDC source-transaction atomicity
+
+- implementation: src/connectors/postgres/target.js, src/connectors/postgres/cdc-apply.js
+- integrationTests: tests/conformance/postgres-cdc-transaction-atomicity.test.js
+- faultTests: tests/conformance/postgres-cdc-transaction-atomicity.test.js
+
+_Implemented with unit-tested streaming identity and fault points; one-source-transaction-to-one-target-commit is NOT yet proven against live PostgreSQL (environment PG unreachable at implementation time). EXPERIMENTAL until the atomicity conformance passes live._
+
+### `postgres.cdc.production-lifecycle` — PostgreSQL CDC production lifecycle qualification
+
+- implementation: scripts/qualify/postgres/cdc-production-lifecycle.js
+- integrationTests: scripts/qualify/postgres/cdc-production-lifecycle.js
+
+_Scenario drives the customer path (boundary/approve/run/catchUpCdc/beginCutover/commitCutover/release) with exact convergence checks; no live run yet. EXPERIMENTAL until a CI-or-larger profile passes with a verified bundle._
+
+### `execution.receipt-signing` — Signed execution receipts with offline verification
+
+- implementation: src/execution/receipt.js, src/platform/signing.js, scripts/verify-receipt.js
+- integrationTests: tests/receipt.test.js
+
+_Unit-proven with per-field tamper tests; not yet bound into migration completion output or proven on a live migration receipt. Key lifecycle is local PEM only; no KMS/HSM._
+
+### `cutover.write-barrier` — Source write barriers for cutover
+
+- implementation: src/cutover/write-barrier.js
+- integrationTests: tests/write-barrier.test.js, tests/conformance/postgres-write-barrier-conformance.test.js, tests/conformance/postgres-cdc-lifecycle.test.js
+- faultTests: tests/conformance/postgres-write-barrier-conformance.test.js, tests/conformance/postgres-cutover-crash-matrix.test.js
+
+_`DATABASE_READ_ONLY` is disabled because it cannot fence already-connected PostgreSQL writers. `POSTGRES_TABLE_SHARE_LOCK` holds a real PostgreSQL `SHARE` lock, independently proves `ROW EXCLUSIVE` refusal, captures the final LSN while fenced, and is re-verified before the cutover decision. PostgreSQL `commitCutover` also requires a server-minted HMAC-authenticated `EXTERNAL_OPERATOR_BARRIER` attestation bound to the exact cutover attempt, request principal, live WAL position and explicit routing decision; no zero-downtime claim is made. EXPERIMENTAL until the current live conformance/qualification gates pass._
+
 ## PLANNED (9)
 
 ### `oracle` — Oracle verification
@@ -362,7 +392,7 @@ _Wire-compatible by design with the MySQL connector; blocked: Aurora instance fo
 
 _Blocked: vendor sandbox access._
 
-## UNSUPPORTED (13)
+## UNSUPPORTED (14)
 
 ### `filesystem.target` — Filesystem target
 
@@ -441,5 +471,11 @@ _No bulk load path on SQL Server._
 - _no evidence claimed_
 
 _No change-tracking capture exists._
+
+### `postgres.cdc.truncate` — PostgreSQL CDC source TRUNCATE handling
+
+- _no evidence claimed_
+
+_Officially unsupported by decision: source TRUNCATE fails closed with CDC_TRUNCATE_REQUIRES_OPERATOR. No approved CDC truncate path exists; do not rely on truncate propagation._
 
 > Generated from capabilities/matrix.json. Do not edit by hand.

@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 2,
+  "qualificationRunId": "spool-qualify-2026-09-20T07-26-45-892Z-3b4d1862",
+  "suiteVersion": "industrial-postgres-v1",
+  "repository": "dharan1007/spool",
+  "commitSha": "f46c0e74675506c34c4c6419479757a0054df995",
+  "dirty": false,
+  "profile": "CI",
+  "profileConfig": {
+    "name": "CI",
+    "rows": 100000,
+    "payloadBytes": 256,
+    "batchSize": 5000,
+    "writers": 2,
+    "workers": 2,
+    "cdcDurationSeconds": 30,
+    "largeTransactionRows": 10000,
+    "maxRssBytes": 805306368,
+    "description": "CI: minimal sustained load for PR gate (30s CDC)"
+  },
+  "datasetId": "sha256:adddd6aecc767d9903c0ade59ab987f78d7ae2cedc435bfc28f411e5216d1ed9",
+  "seed": "qualify-spool-qualify-2026-09-20T07-26-45-892Z-3b4d1862-CI",
+  "startTime": "2026-09-20T07:26:46.364Z",
+  "endTime": "2026-09-20T07:33:53.880Z",
+  "durationMs": 427516.4995,
+  "environmentDigest": "sha256:f376c1e6e65dce204bf835f30be0d6216b69d176815d5d76b5b76d1bbc95c957",
+  "configDigest": "sha256:ca703496a70ea8c32373a3e8e69fbeecf484cc04a35501d05f66dfc64bbf194f",
+  "result": "PASS",
+  "releaseGrade": true,
+  "evidence": {
+    "files": [
+      "config.json",
+      "environment.json",
+      "failures.json",
+      "manifest.json",
+      "metrics.json",
+      "raw.jsonl",
+      "report.md"
+    ]
+  },
+  "scenarios": {
+    "postgres.target.load": "PASS",
+    "postgres.bulk.load": "PASS",
+    "postgres.content-exact.verification": "PASS",
+    "postgres.repair.load": "PASS",
+    "postgres.cdc.soak": "PASS",
+    "postgres.workers.load": "PASS",
+    "postgres.largeTransactions": "PASS",
+    "postgres.database-source.load": "PASS",
+    "postgres.crashRecovery": "PASS"
+  },
+  "summary": {
+    "totalScenarios": 9,
+    "scenariosRun": 9,
+    "failures": 0,
+    "expectedRefusals": 0,
+    "unexpectedFailures": 0,
+    "stubs": 0
+  },
+  "releaseGradeReason": null
+}

@@ -5,7 +5,8 @@ import { fail, toErrorEnvelope } from '../core/errors.js';
 const COMMANDS = new Set([
   'inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt',
   'repair-evidence', 'approve-repair', 'run-repair', 'repair-receipt',
-  'begin-cutover', 'commit-cutover', 'abort-cutover', 'cutover'
+  'begin-cutover', 'rearm-cutover', 'attest-cutover-barrier', 'commit-cutover', 'abort-cutover', 'cutover',
+  'begin-recovery', 'establish-cdc-boundary', 'catch-up-cdc', 'release-cdc-boundary'
 ]);
 
 function safeTokenEqual(expected, actual) {
@@ -70,9 +71,15 @@ async function dispatch(service, body) {
     case 'run-repair': return service.runRepair(body.request, body.options ?? {});
     case 'repair-receipt': return service.repairReceipt(body.migrationId);
     case 'begin-cutover': return service.beginCutover(body.request, body.options ?? {});
-    case 'commit-cutover': return service.commitCutover(body.request);
+    case 'rearm-cutover': return service.rearmCutover(body.request, body.options ?? {});
+    case 'attest-cutover-barrier': return service.attestCutoverBarrier(body.request, body.options ?? {});
+    case 'commit-cutover': return service.commitCutover(body.request, body.options ?? {});
     case 'abort-cutover': return service.abortCutover(body.migrationId, body.options ?? {});
     case 'cutover': return service.cutover(body.migrationId);
+    case 'begin-recovery': return service.beginRecovery(body.request, body.options ?? {});
+    case 'establish-cdc-boundary': return service.establishCdcBoundary(body.request, body.options ?? {});
+    case 'catch-up-cdc': return service.catchUpCdc(body.request, body.options ?? {});
+    case 'release-cdc-boundary': return service.releaseCdcBoundary(body.request);
     default: fail('INVALID_COMMAND', 'Unsupported command');
   }
 }

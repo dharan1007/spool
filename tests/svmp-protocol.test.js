@@ -20,6 +20,8 @@ test('SVMP exposes the canonical success path and explicit exceptional states', 
     SVMP_STATES.VERIFYING,
     SVMP_STATES.VERIFIED,
     SVMP_STATES.CUTOVER_ARMED,
+    SVMP_STATES.FINAL_DRAIN,
+    SVMP_STATES.FINAL_VERIFY,
     SVMP_STATES.CUTOVER_COMMITTED
   ]);
   assert.deepEqual([...SVMP_EXCEPTION_STATES].sort(), [
@@ -43,8 +45,14 @@ test('SVMP rejects phase skipping and allows only declared recovery transitions'
 test('SVMP cutover arms only from verified evidence and commits, aborts or re-arms explicitly', async () => {
   const { SVMP_STATES, assertSvmpTransition, listSvmpTransitions } = await loadProtocol();
   assert.equal(assertSvmpTransition('VERIFIED', 'CUTOVER_ARMED'), true);
-  assert.equal(assertSvmpTransition('CUTOVER_ARMED', 'CUTOVER_COMMITTED'), true);
+  // No direct CUTOVER_ARMED -> CUTOVER_COMMITTED bypass: commit requires FINAL_VERIFY.
+  assert.throws(() => assertSvmpTransition('CUTOVER_ARMED', 'CUTOVER_COMMITTED'), error => error?.code === 'SVMP_INVALID_TRANSITION');
+  assert.equal(assertSvmpTransition('CUTOVER_ARMED', 'FINAL_DRAIN'), true);
+  assert.equal(assertSvmpTransition('CUTOVER_ARMED', 'FINAL_VERIFY'), true);
+  assert.equal(assertSvmpTransition('FINAL_DRAIN', 'FINAL_VERIFY'), true);
+  assert.equal(assertSvmpTransition('FINAL_VERIFY', 'CUTOVER_COMMITTED'), true);
   assert.equal(assertSvmpTransition('CUTOVER_ARMED', 'CUTOVER_ABORTED'), true);
+  assert.equal(assertSvmpTransition('FINAL_VERIFY', 'CUTOVER_ABORTED'), true);
   assert.equal(assertSvmpTransition('CUTOVER_ARMED', 'TARGET_DRIFT'), true);
   assert.equal(assertSvmpTransition('CUTOVER_ABORTED', 'CUTOVER_ARMED'), true);
   assert.deepEqual(listSvmpTransitions('CUTOVER_COMMITTED'), []);

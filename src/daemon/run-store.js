@@ -11,8 +11,15 @@ import {
   buildTransitionRecord,
   createTransitionId,
   validateTransitionRecord,
-  buildSnapshotCdcBinding
+  buildSnapshotCdcBinding,
+  buildCutoverAttemptId,
+  requireCutoverAttemptId
 } from '../protocol/migration-state-machine.js';
+import {
+  verificationSemanticId,
+  verificationStatus,
+  assertVerificationIdentity
+} from '../protocol/verification-coordinator.js';
 
 function text(value, label = 'value') {
   if (typeof value !== 'string' || !value) fail('INVALID_RUN_STORE_INPUT', `${label} must be a non-empty string`);
@@ -28,6 +35,7 @@ function parse(json) { return json == null ? null : JSON.parse(json); }
 
 const STATE_CHECKSUM_DOMAIN = 'spool-migration-state-v1';
 const BINDING_CHECKSUM_DOMAIN = 'spool-snapshot-cdc-binding-v1';
+const BOUNDARY_CHECKSUM_DOMAIN = 'spool-cdc-boundary-record-v1';
 
 function computeStateChecksum(stateWithoutChecksum) {
   return sha256Canonical(STATE_CHECKSUM_DOMAIN, stateWithoutChecksum);
@@ -97,9 +105,19 @@ export class RunStore {
         target_contract_id TEXT NOT NULL,
         commit_evidence_json TEXT,
         abort_reason TEXT,
+        cutover_attempt_id TEXT,
         armed_at TEXT NOT NULL,
         decided_at TEXT
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS spool_verifications (
+        migration_id TEXT NOT NULL,
+        verification_id TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        verification_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (migration_id, verification_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS spool_verifications_migration_mode ON spool_verifications(migration_id, mode);
       CREATE TABLE IF NOT EXISTS spool_migration_state (
         migration_id TEXT PRIMARY KEY NOT NULL,
         run_id TEXT NOT NULL,
@@ -117,6 +135,8 @@ export class RunStore {
         migration_id TEXT NOT NULL,
         sequence INTEGER NOT NULL,
         transition_id TEXT NOT NULL,
+        command_id TEXT,
+        previous_transition_id TEXT,
         previous_state TEXT,
         next_state TEXT NOT NULL,
         principal TEXT NOT NULL,
@@ -150,7 +170,40 @@ export class RunStore {
         updated_at TEXT NOT NULL,
         checksum TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS spool_cdc_checkpoints (
+        migration_id TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        owner_epoch TEXT NOT NULL,
+        fence_token INTEGER NOT NULL,
+        version INTEGER NOT NULL,
+        received_lsn TEXT,
+        applied_lsn TEXT,
+        acknowledged_lsn TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (migration_id, slot)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS spool_cdc_boundaries (
+        migration_id TEXT PRIMARY KEY NOT NULL,
+        boundary_json TEXT NOT NULL,
+        boundary_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        slot_name TEXT NOT NULL,
+        publication_name TEXT NOT NULL,
+        consistent_point TEXT NOT NULL,
+        exported_snapshot_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        checksum TEXT NOT NULL
+      ) STRICT;
       `);
+      // Schema evolution for databases created before these columns existed.
+      // Fresh databases already have them via CREATE TABLE above; the guards
+      // keep this idempotent for pre-existing state files.
+      const transitionColumns = new Set(this.db.prepare('PRAGMA table_info(spool_transitions)').all().map(column => column.name));
+      if (!transitionColumns.has('command_id')) this.db.exec('ALTER TABLE spool_transitions ADD COLUMN command_id TEXT');
+      if (!transitionColumns.has('previous_transition_id')) this.db.exec('ALTER TABLE spool_transitions ADD COLUMN previous_transition_id TEXT');
+      this.db.exec('CREATE INDEX IF NOT EXISTS spool_transitions_migration_command ON spool_transitions(migration_id, command_id)');
+      const cutoverColumns = new Set(this.db.prepare('PRAGMA table_info(spool_cutovers)').all().map(column => column.name));
+      if (!cutoverColumns.has('cutover_attempt_id')) this.db.exec('ALTER TABLE spool_cutovers ADD COLUMN cutover_attempt_id TEXT');
     } catch (error) {
       try { this.db.close(); } catch { /* preserve the original error */ }
       throw error;
@@ -330,10 +383,21 @@ export class RunStore {
   /**
    * Durable CAS transition. expectedSequence if provided must match current sequence.
    * expectedRunId if provided must match current runId (epoch fencing).
+   *
+   * Idempotency: every transition carries a stable command identity
+   * (transitionCommandId) derived from migrationId + runId + expected sequence +
+   * from/to + semantic evidence identity + caller idempotency key. Wall-clock
+   * timestamps and fresh fence tokens are execution metadata and are excluded,
+   * so retrying the same logical command after a crash (e.g. commit observed
+   * lost) recognizes the already-committed transition instead of conflicting:
+   * - same command id -> return the STORED transition (idempotent success)
+   * - same sequence, different command id -> TRANSITION_CONFLICT
+   * - stale expectedSequence -> STALE_TRANSITION_VERSION
    */
-  transition(migrationId, { expectedSequence = null, expectedRunId = null, runId = null, previousState = undefined, nextState, principal, reason = '', planId = null, sourceStateId = null, targetContractId = null, fenceToken = null, evidence = null, context = {} } = {}) {
+  transition(migrationId, { expectedSequence = null, expectedRunId = null, runId = null, previousState = undefined, nextState, principal, reason = '', planId = null, sourceStateId = null, targetContractId = null, fenceToken = null, evidence = null, context = {}, commandId = null, semanticEvidenceId = null, idempotencyKey = null } = {}) {
     this.#open(); text(migrationId, 'migrationId');
     if (!nextState) fail('INVALID_TRANSITION_INPUT', 'nextState is required');
+    if (commandId != null && (typeof commandId !== 'string' || !commandId)) fail('INVALID_TRANSITION_INPUT', 'commandId must be a non-empty string');
     const now = new Date().toISOString();
     const principalText = typeof principal === 'string' && principal.trim() ? principal.trim() : fail('INVALID_PRINCIPAL', 'principal is required');
 
@@ -347,6 +411,35 @@ export class RunStore {
         currentState = stateRow.current_state;
         currentSequence = Number(stateRow.sequence);
         storedRunId = stateRow.run_id;
+        // Explicit command identity is recognized BEFORE sequence/version
+        // checks: a retry issued after a crash (stale sequence, fresh fence)
+        // must resolve to the already-committed transition, not fail stale.
+        // Same identity + different target transition or different semantic
+        // evidence fails closed as a conflict instead of replaying.
+        if (commandId != null) {
+          const priorCommand = this.db.prepare('SELECT * FROM spool_transitions WHERE migration_id = ? AND command_id = ?').get(migrationId, commandId);
+          if (priorCommand) {
+            if (priorCommand.next_state !== nextState) {
+              fail('TRANSITION_CONFLICT', 'Command identity already committed a different transition', {
+                migrationId, commandId,
+                committedTransition: priorCommand.next_state, requestedTransition: nextState
+              });
+            }
+            if (priorCommand.evidence_json !== (evidence ? canonicalJson(evidence) : null)) {
+              fail('TRANSITION_CONFLICT', 'Command identity already committed with different evidence', {
+                migrationId, commandId, existingTransitionId: priorCommand.transition_id
+              });
+            }
+            const priorRecord = JSON.parse(priorCommand.transition_json);
+            if (priorRecord.principal !== principalText) {
+              fail('TRANSITION_CONFLICT', 'Command identity already committed by a different principal', {
+                migrationId, commandId, existingPrincipal: priorRecord.principal
+              });
+            }
+            const stored = JSON.parse(priorCommand.transition_json);
+            return { transition: Object.freeze({ ...stored, transitionId: priorCommand.transition_id, commandId: priorCommand.command_id }), idempotent: true };
+          }
+        }
         // epoch fencing
         const effectiveRunId = runId ?? storedRunId;
         if (expectedRunId && expectedRunId !== storedRunId) fail('STALE_COORDINATOR_EPOCH', 'Stale coordinator epoch — runId mismatch', { migrationId, expectedRunId, actualRunId: storedRunId });
@@ -361,10 +454,51 @@ export class RunStore {
         const effectiveSourceStateId = sourceStateId ?? stateRow.source_state_id ?? null;
         const effectiveTargetContractId = targetContractId ?? stateRow.target_contract_id ?? null;
         const effectiveFenceToken = fenceToken ?? (stateRow.fence_token == null ? null : Number(stateRow.fence_token));
-        // check duplicate idempotent: if transition already exists at sequence+1 with same hash, return it
+        // Stable command identity for idempotent retry recognition. Volatile
+        // execution metadata (timestamps, fresh fence tokens) is excluded on
+        // purpose: a retried command carries a new fence but the same semantics.
         const nextSequence = currentSequence + 1;
+        const effectiveCommandId = commandId ?? sha256Canonical('spool-transition-command-v1', {
+          migrationId,
+          runId: storedRunId,
+          sequence: nextSequence,
+          from: currentState,
+          to: nextState,
+          semantic: semanticEvidenceId ?? canonicalJson(evidence ?? null),
+          key: idempotencyKey ?? ''
+        });
         const existingNext = this.db.prepare('SELECT * FROM spool_transitions WHERE migration_id = ? AND sequence = ?').get(migrationId, nextSequence);
-        // Build record to compare — use effective values for deterministic identity
+        if (existingNext) {
+          if (existingNext.command_id != null && existingNext.command_id === effectiveCommandId) {
+            // Same logical command retried (e.g. crash before the result was
+            // observed): return the STORED transition so identities stay stable.
+            const stored = JSON.parse(existingNext.transition_json);
+            return { transition: Object.freeze({ ...stored, transitionId: existingNext.transition_id, commandId: existingNext.command_id }), idempotent: true };
+          }
+          const probeForConflict = buildTransitionRecord({
+            migrationId,
+            runId: storedRunId,
+            previousState: currentState,
+            nextState,
+            sequence: nextSequence,
+            principal: principalText,
+            reason,
+            timestamp: now,
+            planId: effectivePlanId,
+            sourceStateId: effectiveSourceStateId,
+            targetContractId: effectiveTargetContractId,
+            fenceToken: effectiveFenceToken,
+            evidence
+          });
+          if (existingNext.transition_id === createTransitionId(probeForConflict)) {
+            // byte-identical duplicate (same timestamp too)
+            const stored = JSON.parse(existingNext.transition_json);
+            return { transition: Object.freeze({ ...stored, transitionId: existingNext.transition_id, commandId: existingNext.command_id ?? effectiveCommandId }), idempotent: true };
+          }
+          // same sequence but different command -> conflict
+          fail('TRANSITION_CONFLICT', 'Same transition sequence exists with a different command identity', { migrationId, sequence: nextSequence, existingTransitionId: existingNext.transition_id, existingCommandId: existingNext.command_id ?? null, attemptedCommandId: effectiveCommandId });
+        }
+        // Build record — use effective values for deterministic identity
         const probeRecord = buildTransitionRecord({
           migrationId,
           runId: storedRunId,
@@ -381,21 +515,17 @@ export class RunStore {
           evidence
         });
         const probeId = createTransitionId(probeRecord);
-        if (existingNext) {
-          if (existingNext.transition_id === probeId) {
-            // idempotent duplicate
-            return { transition: Object.freeze({ ...probeRecord, transitionId: probeId }), idempotent: true };
-          }
-          // same sequence but different content -> conflict
-          fail('TRANSITION_CONFLICT', 'Same transition sequence exists with conflicting evidence/record', { migrationId, sequence: nextSequence, existingTransitionId: existingNext.transition_id, attemptedTransitionId: probeId });
-        }
         // precondition checks beyond graph
         assertTransitionPreconditions({ from: currentState, to: nextState, context });
+        // Cutover-grade transitions additionally validate the persisted
+        // verification evidence inside the same transaction.
+        this.#assertPersistedCutoverVerification({ migrationId, to: nextState, context, effectivePlanId, effectiveSourceStateId, effectiveTargetContractId });
         const transitionJson = canonicalJson(probeRecord);
+        const previousTransitionId = stateRow.transition_id;
         this.db.prepare(`
-          INSERT INTO spool_transitions (migration_id, sequence, transition_id, previous_state, next_state, principal, reason, plan_id, source_state_id, target_contract_id, fence_token, evidence_json, timestamp, transition_json)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(migrationId, nextSequence, probeId, currentState, nextState, principalText, reason, effectivePlanId, effectiveSourceStateId, effectiveTargetContractId, effectiveFenceToken, evidence ? canonicalJson(evidence) : null, now, transitionJson);
+          INSERT INTO spool_transitions (migration_id, sequence, transition_id, command_id, previous_transition_id, previous_state, next_state, principal, reason, plan_id, source_state_id, target_contract_id, fence_token, evidence_json, timestamp, transition_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(migrationId, nextSequence, probeId, effectiveCommandId, previousTransitionId, currentState, nextState, principalText, reason, effectivePlanId, effectiveSourceStateId, effectiveTargetContractId, effectiveFenceToken, evidence ? canonicalJson(evidence) : null, now, transitionJson);
         const newStateChecksum = computeStateChecksum({
           schemaVersion: 1,
           migrationId,
@@ -415,7 +545,7 @@ export class RunStore {
         `).run(nextState, nextSequence, probeId, effectivePlanId, effectiveSourceStateId, effectiveTargetContractId, effectiveFenceToken, now, newStateChecksum, migrationId);
         // keep spool_runs coarse status in sync for legacy callers (best effort)
         this._syncLegacyRunStatus(migrationId, nextState, { planId, sourceStateId, targetContractId });
-        return { transition: Object.freeze({ ...probeRecord, transitionId: probeId }), idempotent: false };
+        return { transition: Object.freeze({ ...probeRecord, transitionId: probeId, commandId: effectiveCommandId }), idempotent: false };
       } else {
         // No state yet — only allowed if nextState === CREATED and previousState null
         if (nextState !== MIGRATION_STATES.CREATED) fail('ILLEGAL_STATE_TRANSITION', 'No migration state exists; first transition must be to CREATED');
@@ -475,6 +605,77 @@ export class RunStore {
 
     const result = tx();
     return result.transition;
+  }
+
+  findTransitionByCommand(migrationId, commandId) {
+    this.#open(); text(migrationId, 'migrationId');
+    if (typeof commandId !== 'string' || !commandId) fail('INVALID_TRANSITION_INPUT', 'commandId must be a non-empty string');
+    const row = this.db.prepare('SELECT * FROM spool_transitions WHERE migration_id = ? AND command_id = ?').get(migrationId, commandId);
+    if (!row) return null;
+    const stored = JSON.parse(row.transition_json);
+    return Object.freeze({ ...stored, transitionId: row.transition_id, commandId: row.command_id });
+  }
+
+  // Validate persisted cutover verification evidence inside the committing
+  // transaction. Object presence in context is never sufficient: the exact
+  // persisted record is loaded by identity and checked for existence, mode,
+  // derived status, plan/source/contract bindings, cutover attempt binding,
+  // and recency relative to the drain/armed transition of this attempt.
+  #assertPersistedCutoverVerification({ migrationId, to, context, effectivePlanId, effectiveSourceStateId, effectiveTargetContractId }) {
+    const wantFinal = to === MIGRATION_STATES.CUTOVER_COMMITTED;
+    const wantPost = to === MIGRATION_STATES.COMPLETED;
+    if (!wantFinal && !wantPost) return;
+    const verificationId = wantFinal ? context?.finalVerificationId : context?.postCutoverVerificationId;
+    if (typeof verificationId !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(verificationId)) {
+      fail('VERIFICATION_REQUIRED', `${wantFinal ? 'CUTOVER_COMMITTED' : 'COMPLETED'} requires the exact persisted verification identity`);
+    }
+    const row = this.db.prepare('SELECT verification_json FROM spool_verifications WHERE migration_id = ? AND verification_id = ?').get(migrationId, verificationId);
+    if (!row) fail('VERIFICATION_REQUIRED', 'Persisted verification evidence is absent for the bound verification identity', { verificationId });
+    const record = JSON.parse(row.verification_json);
+    // Authenticity first: identity must match canonical semantic contents.
+    assertVerificationIdentity(record);
+    // Status is derived from content, never trusted from storage.
+    if (verificationStatus(record) !== 'VERIFIED' || record.status !== 'VERIFIED') {
+      fail('VERIFICATION_REQUIRED', 'Persisted verification is not VERIFIED', { verificationId, status: record.status });
+    }
+    const expectedMode = wantFinal ? 'FINAL_PRE_CUTOVER' : 'POST_CUTOVER';
+    if (record.mode !== expectedMode) {
+      fail('VERIFICATION_MODE_MISMATCH', `Persisted verification mode ${record.mode} cannot authorize ${to}; expected ${expectedMode}`, { verificationId });
+    }
+    if (record.migrationId !== migrationId
+      || record.planId !== effectivePlanId
+      || record.sourceStateId !== effectiveSourceStateId
+      || record.targetContractId !== effectiveTargetContractId) {
+      fail('VERIFICATION_BINDING_MISMATCH', 'Persisted verification is bound to different plan/source/contract than the committing transition', {
+        verificationId,
+        record: { planId: record.planId, sourceStateId: record.sourceStateId, targetContractId: record.targetContractId },
+        transition: { planId: effectivePlanId, sourceStateId: effectiveSourceStateId, targetContractId: effectiveTargetContractId }
+      });
+    }
+    const cutoverRow = this.db.prepare('SELECT cutover_attempt_id FROM spool_cutovers WHERE migration_id = ?').get(migrationId);
+    if (!cutoverRow?.cutover_attempt_id || record.cutoverAttemptId !== cutoverRow.cutover_attempt_id) {
+      fail('CUTOVER_ATTEMPT_MISMATCH', 'Persisted verification belongs to a different cutover attempt than the committing transition', {
+        verificationId,
+        verificationAttempt: record.cutoverAttemptId ?? null,
+        currentAttempt: cutoverRow?.cutover_attempt_id ?? null
+      });
+    }
+    // Recency: the verification must have been created after the drain (CDC)
+    // or arming (non-CDC) transition of this attempt — never before it.
+    const anchor = wantFinal
+      ? this.db.prepare(`SELECT timestamp FROM spool_transitions WHERE migration_id = ? AND next_state IN ('FINAL_DRAIN','CUTOVER_ARMED') ORDER BY sequence DESC LIMIT 1`).get(migrationId)
+      : this.db.prepare(`SELECT timestamp FROM spool_transitions WHERE migration_id = ? AND next_state = 'CUTOVER_COMMITTED' ORDER BY sequence DESC LIMIT 1`).get(migrationId);
+    if (!anchor?.timestamp) fail('VERIFICATION_REQUIRED', 'Cutover attempt has no drain/arming/commit anchor for verification recency', { verificationId });
+    // completedAt is execution metadata (not part of the semantic identity),
+    // but it must still postdate the attempt anchor: evidence created before
+    // the final drain finished cannot authorize the commit.
+    if (typeof record.completedAt !== 'string' || record.completedAt < anchor.timestamp) {
+      fail('STALE_VERIFICATION', 'Persisted verification predates the current cutover attempt anchor; a fresh verification is required', {
+        verificationId,
+        verificationCompletedAt: record.completedAt ?? null,
+        anchorTimestamp: anchor.timestamp
+      });
+    }
   }
 
   _syncLegacyRunStatus(migrationId, newState, { planId, sourceStateId, targetContractId } = {}) {
@@ -543,8 +744,8 @@ export class RunStore {
       if (!state) fail('MIGRATION_NOT_FOUND', 'Snapshot/CDC binding requires an existing migration state');
       this._validateStateChecksum(state);
       // binding must be created in correct sequence: snapshot and CDC boundary must be set before CDC_RUNNING
-      // For now allow any state >= APPROVED
-      const allowedStates = new Set([MIGRATION_STATES.APPROVED, MIGRATION_STATES.SNAPSHOT_ARMED, MIGRATION_STATES.SNAPSHOT_RUNNING, MIGRATION_STATES.FULL_LOAD_RUNNING, MIGRATION_STATES.CDC_RUNNING, MIGRATION_STATES.CATCHING_UP, MIGRATION_STATES.VERIFYING, MIGRATION_STATES.READY_FOR_CUTOVER]);
+      // For now allow any state >= APPROVED, including FINAL_DRAIN (drain progress writes during cutover commit)
+      const allowedStates = new Set([MIGRATION_STATES.APPROVED, MIGRATION_STATES.SNAPSHOT_ARMED, MIGRATION_STATES.SNAPSHOT_RUNNING, MIGRATION_STATES.FULL_LOAD_RUNNING, MIGRATION_STATES.CDC_RUNNING, MIGRATION_STATES.CATCHING_UP, MIGRATION_STATES.VERIFYING, MIGRATION_STATES.READY_FOR_CUTOVER, MIGRATION_STATES.FINAL_DRAIN]);
       if (!allowedStates.has(state.current_state)) {
         fail('ILLEGAL_STATE_TRANSITION', `Snapshot/CDC binding can only be set from ${[...allowedStates].join(',')} not ${state.current_state}`);
       }
@@ -570,6 +771,213 @@ export class RunStore {
     if (expected !== row.checksum) fail('RUN_STATE_CORRUPT', 'Snapshot/CDC binding checksum mismatch');
     if (parsed.sourceStateId !== row.source_state_id) fail('RUN_STATE_CORRUPT', 'Snapshot/CDC binding row mismatch');
     return Object.freeze(parsed);
+  }
+
+  // ---------- CDC boundary records (pre-approval slot ownership) ----------
+  //
+  // A boundary record proves the migration owns a source replication slot
+  // created before the approved snapshot was read, with the slot's WAL
+  // reservation point, the exported snapshot token the full load must join,
+  // and the slot/publication ownership flags that authorize release.
+
+  setCdcBoundary(migrationId, record) {
+    this.#open(); text(migrationId, 'migrationId');
+    if (!record || typeof record !== 'object' || Array.isArray(record)) fail('INVALID_CDC_BOUNDARY_RECORD', 'CDC boundary record must be an object');
+    const boundaryId = typeof record.boundaryId === 'string' && /^sha256:[a-f0-9]{64}$/.test(record.boundaryId)
+      ? record.boundaryId : fail('INVALID_CDC_BOUNDARY_RECORD', 'boundaryId must be canonical sha256');
+    const snapshotId = typeof record.snapshotId === 'string' && /^sha256:[a-f0-9]{64}$/.test(record.snapshotId)
+      ? record.snapshotId : fail('INVALID_CDC_BOUNDARY_RECORD', 'snapshotId must be canonical sha256');
+    const slotName = typeof record.slotName === 'string' && /^[a-z0-9_]{1,63}$/.test(record.slotName)
+      ? record.slotName : fail('INVALID_CDC_BOUNDARY_RECORD', 'slotName is invalid');
+    const publicationName = typeof record.publicationName === 'string' && record.publicationName
+      ? record.publicationName : fail('INVALID_CDC_BOUNDARY_RECORD', 'publicationName is required');
+    const consistentPoint = typeof record.consistentPoint === 'string' && record.consistentPoint
+      ? record.consistentPoint.toUpperCase() : fail('INVALID_CDC_BOUNDARY_RECORD', 'consistentPoint is required');
+    const exportedSnapshotId = typeof record.exportedSnapshotId === 'string' && record.exportedSnapshotId
+      ? record.exportedSnapshotId : fail('INVALID_CDC_BOUNDARY_RECORD', 'exportedSnapshotId is required');
+    const sourceRef = record.sourceRef ?? null;
+    if (sourceRef != null) {
+      if (!sourceRef || typeof sourceRef !== 'object' || Array.isArray(sourceRef)) {
+        fail('INVALID_CDC_BOUNDARY_RECORD', 'sourceRef must be an object');
+      }
+      const secretRef = sourceRef.secretRef ?? null;
+      if (typeof sourceRef.endpoint !== 'string' || !sourceRef.endpoint
+        || typeof sourceRef.database !== 'string' || !sourceRef.database
+        || typeof sourceRef.identity?.user !== 'string' || !sourceRef.identity.user
+        || !secretRef || typeof secretRef !== 'object' || Array.isArray(secretRef)
+        || typeof secretRef.provider !== 'string' || !secretRef.provider
+        || typeof secretRef.key !== 'string' || !secretRef.key) {
+        fail('INVALID_CDC_BOUNDARY_RECORD', 'sourceRef must carry endpoint, database, identity.user and secretRef');
+      }
+    }
+    const normalized = Object.freeze({
+      boundaryId,
+      snapshotId,
+      slotName,
+      publicationName,
+      consistentPoint,
+      exportedSnapshotId,
+      publicationCreated: record.publicationCreated === true,
+      slotExisted: record.slotExisted === true,
+      snapshotXmin: record.snapshotXmin ?? null,
+      snapshotXmax: record.snapshotXmax ?? null,
+      snapshotXip: Array.isArray(record.snapshotXip) ? Object.freeze([...record.snapshotXip]) : [],
+      planningSourceStateId: typeof record.planningSourceStateId === 'string' ? record.planningSourceStateId : null,
+      sourceRef: sourceRef == null ? null : Object.freeze({
+        endpoint: sourceRef.endpoint,
+        database: sourceRef.database,
+        identity: Object.freeze({ user: sourceRef.identity.user }),
+        secretRef: Object.freeze({ provider: sourceRef.secretRef.provider, key: sourceRef.secretRef.key })
+      }),
+      createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString()
+    });
+    const boundaryJson = canonicalJson(normalized);
+    const checksum = sha256Canonical(BOUNDARY_CHECKSUM_DOMAIN, normalized);
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO spool_cdc_boundaries (migration_id, boundary_json, boundary_id, snapshot_id, slot_name, publication_name, consistent_point, exported_snapshot_id, updated_at, checksum)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(migration_id) DO UPDATE SET
+        boundary_json=excluded.boundary_json, boundary_id=excluded.boundary_id, snapshot_id=excluded.snapshot_id,
+        slot_name=excluded.slot_name, publication_name=excluded.publication_name, consistent_point=excluded.consistent_point,
+        exported_snapshot_id=excluded.exported_snapshot_id, updated_at=excluded.updated_at, checksum=excluded.checksum
+    `).run(migrationId, boundaryJson, boundaryId, snapshotId, slotName, publicationName, consistentPoint, exportedSnapshotId, now, checksum);
+    return this.getCdcBoundary(migrationId);
+  }
+
+  getCdcBoundary(migrationId) {
+    this.#open(); text(migrationId, 'migrationId');
+    const row = this.db.prepare('SELECT * FROM spool_cdc_boundaries WHERE migration_id = ?').get(migrationId);
+    if (!row) return null;
+    const parsed = JSON.parse(row.boundary_json);
+    const expected = sha256Canonical(BOUNDARY_CHECKSUM_DOMAIN, parsed);
+    if (expected !== row.checksum) fail('RUN_STATE_CORRUPT', 'CDC boundary record checksum mismatch');
+    if (parsed.boundaryId !== row.boundary_id || parsed.snapshotId !== row.snapshot_id) {
+      fail('RUN_STATE_CORRUPT', 'CDC boundary record row mismatch');
+    }
+    return Object.freeze(parsed);
+  }
+
+  deleteCdcBoundary(migrationId) {
+    this.#open(); text(migrationId, 'migrationId');
+    this.db.prepare('DELETE FROM spool_cdc_boundaries WHERE migration_id = ?').run(migrationId);
+    return true;
+  }
+
+  // ---------- Fenced CAS CDC checkpoints ----------
+  //
+  // Watermark movement is compare-and-swap on (ownerEpoch, version) with fence
+  // validation: a stale worker or coordinator can neither advance, regress,
+  // nor overwrite a newer checkpoint. Invariant enforced at storage:
+  //   acknowledged <= applied <= received   (LSN order)
+  //   version strictly increases per update
+  // Per-transaction outcome counts are NOT duplicated here: they ride in the
+  // target ledger row inside the same transaction as the mutation, so replay
+  // returns the original exact counts from the ledger itself.
+  getCdcCheckpoint(migrationId, slot) {
+    this.#open(); text(migrationId, 'migrationId'); text(slot, 'slot');
+    const row = this.db.prepare('SELECT * FROM spool_cdc_checkpoints WHERE migration_id = ? AND slot = ?').get(migrationId, slot);
+    if (!row) return null;
+    return Object.freeze({
+      migrationId: row.migration_id,
+      slot: row.slot,
+      ownerEpoch: row.owner_epoch,
+      fenceToken: Number(row.fence_token),
+      version: Number(row.version),
+      receivedLsn: row.received_lsn,
+      appliedLsn: row.applied_lsn,
+      acknowledgedLsn: row.acknowledged_lsn,
+      updatedAt: row.updated_at
+    });
+  }
+
+  saveCdcCheckpoint(migrationId, { slot, ownerEpoch, fenceToken, expectedVersion = null, receivedLsn = null, appliedLsn = null, acknowledgedLsn = null } = {}) {
+    this.#open(); text(migrationId, 'migrationId'); text(slot, 'slot');
+    if (typeof ownerEpoch !== 'string' || !ownerEpoch) fail('INVALID_CDC_CHECKPOINT', 'ownerEpoch is required');
+    if (!Number.isSafeInteger(fenceToken) || fenceToken < 1) fail('FENCE_REQUIRED', 'CDC checkpoint save requires a valid fence token');
+    for (const [label, value] of [['receivedLsn', receivedLsn], ['appliedLsn', appliedLsn], ['acknowledgedLsn', acknowledgedLsn]]) {
+      if (value != null && (typeof value !== 'string' || !/^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/.test(value))) {
+        fail('INVALID_CDC_POSITION', `${label} must be a valid PostgreSQL LSN`);
+      }
+    }
+    const tx = this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT * FROM spool_cdc_checkpoints WHERE migration_id = ? AND slot = ?').get(migrationId, slot);
+      if (existing) {
+        if (expectedVersion != null && Number(existing.version) !== Number(expectedVersion)) {
+          fail('CHECKPOINT_CONFLICT', 'CDC checkpoint version mismatch; another writer advanced the cursor', {
+            expectedVersion, actualVersion: Number(existing.version)
+          });
+        }
+        // Ownership rule: the same epoch may rewrite with its fence token;
+        // a NEW epoch is legitimate only with a strictly newer fence token
+        // (proving lease succession after takeover). Anything else is stale.
+        const storedFence = Number(existing.fence_token);
+        const sameEpoch = existing.owner_epoch === ownerEpoch;
+        if ((!sameEpoch && !(Number(fenceToken) > storedFence)) || Number(fenceToken) < storedFence) {
+          fail('STALE_FENCE', 'CDC checkpoint writer is stale: epoch mismatch without fence succession', {
+            storedOwner: existing.owner_epoch, storedFence, ownerEpoch, fenceToken
+          });
+        }
+      } else if (expectedVersion != null && Number(expectedVersion) !== 0) {
+        fail('CHECKPOINT_CONFLICT', 'CDC checkpoint does not exist; expected version must be 0 for creation', { expectedVersion });
+      }
+      const upper = value => (typeof value === 'string' ? value.toUpperCase() : value);
+      const next = {
+        receivedLsn: upper(receivedLsn ?? existing?.received_lsn ?? null),
+        appliedLsn: upper(appliedLsn ?? existing?.applied_lsn ?? null),
+        acknowledgedLsn: upper(acknowledgedLsn ?? existing?.acknowledged_lsn ?? null)
+      };
+      // No backward movement.
+      const atOrAfter = (candidate, baseline) => {
+        if (candidate == null || baseline == null) return true;
+        const [chi, clo] = candidate.split('/');
+        const [bhi, blo] = baseline.split('/');
+        const diff = ((BigInt(`0x${chi}`) << 32n) | BigInt(`0x${clo}`)) - ((BigInt(`0x${bhi}`) << 32n) | BigInt(`0x${blo}`));
+        return diff >= 0n;
+      };
+      if (existing) {
+        if (!atOrAfter(next.receivedLsn, existing.received_lsn)) fail('CHECKPOINT_BACKWARD_MOVE', 'CDC received watermark moved backwards', { previous: existing.received_lsn });
+        if (!atOrAfter(next.appliedLsn, existing.applied_lsn)) fail('CHECKPOINT_BACKWARD_MOVE', 'CDC applied watermark moved backwards', { previous: existing.applied_lsn });
+        if (!atOrAfter(next.acknowledgedLsn, existing.acknowledged_lsn)) fail('CHECKPOINT_BACKWARD_MOVE', 'CDC acknowledged watermark moved backwards', { previous: existing.acknowledged_lsn });
+      }
+      // acknowledged <= applied <= received.
+      const lte = (left, right) => {
+        if (left == null || right == null) return true;
+        const [lhi, llo] = left.split('/');
+        const [rhi, rlo] = right.split('/');
+        return (((BigInt(`0x${lhi}`) << 32n) | BigInt(`0x${llo}`)) - ((BigInt(`0x${rhi}`) << 32n) | BigInt(`0x${rlo}`))) <= 0n;
+      };
+      if (!lte(next.acknowledgedLsn, next.appliedLsn)) fail('CHECKPOINT_WATERMARK_VIOLATION', 'CDC acknowledged watermark exceeds applied watermark');
+      if (!lte(next.appliedLsn, next.receivedLsn)) fail('CHECKPOINT_WATERMARK_VIOLATION', 'CDC applied watermark exceeds received watermark');
+      const version = (existing ? Number(existing.version) : 0) + 1;
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        INSERT INTO spool_cdc_checkpoints (migration_id, slot, owner_epoch, fence_token, version, received_lsn, applied_lsn, acknowledged_lsn, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(migration_id, slot) DO UPDATE SET
+          owner_epoch=excluded.owner_epoch, fence_token=excluded.fence_token, version=excluded.version,
+          received_lsn=excluded.received_lsn, applied_lsn=excluded.applied_lsn, acknowledged_lsn=excluded.acknowledged_lsn,
+          updated_at=excluded.updated_at
+      `).run(migrationId, slot, ownerEpoch, fenceToken, version, next.receivedLsn, next.appliedLsn, next.acknowledgedLsn, now);
+      // Keep the coarse binding watermarks in the same transaction so the two
+      // progress views cannot diverge across a crash. Checksums are recomputed
+      // so binding reads keep validating.
+      const bindingRow = this.db.prepare('SELECT binding_json FROM spool_snapshot_cdc_bindings WHERE migration_id = ?').get(migrationId);
+      if (bindingRow) {
+        const binding = JSON.parse(bindingRow.binding_json);
+        const updated = { ...binding };
+        if (next.receivedLsn != null) updated.receivedLsn = next.receivedLsn;
+        if (next.appliedLsn != null) updated.appliedLsn = next.appliedLsn;
+        if (next.acknowledgedLsn != null) updated.acknowledgedLsn = next.acknowledgedLsn;
+        const updatedJson = canonicalJson(updated);
+        const updatedBindingId = sha256Canonical('spool-snapshot-cdc-binding-v1', updated);
+        const updatedChecksum = sha256Canonical(BINDING_CHECKSUM_DOMAIN, updated);
+        this.db.prepare('UPDATE spool_snapshot_cdc_bindings SET binding_json = ?, binding_id = ?, received_lsn = ?, applied_lsn = ?, acknowledged_lsn = ?, updated_at = ?, checksum = ? WHERE migration_id = ?')
+          .run(updatedJson, updatedBindingId, updated.receivedLsn ?? null, updated.appliedLsn ?? null, updated.acknowledgedLsn ?? null, now, updatedChecksum, migrationId);
+      }
+      return this.getCdcCheckpoint(migrationId, slot);
+    });
+    return tx();
   }
 
   updateCdcProgress(migrationId, { receivedLsn = null, appliedLsn = null, acknowledgedLsn = null } = {}) {
@@ -652,45 +1060,50 @@ export class RunStore {
         }
         const cur2 = this.getMigrationState(migrationId);
         if (cur2 && [MIGRATION_STATES.APPROVED, MIGRATION_STATES.SNAPSHOT_ARMED].includes(cur2.currentState)) {
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.SNAPSHOT_RUNNING, principal: 'system', reason: 'legacy start', planId, sourceStateId: sourceSnapshotId }); } catch {}
+          try { this.transition(migrationId, { nextState: MIGRATION_STATES.SNAPSHOT_RUNNING, principal: 'system', reason: 'legacy start', planId, sourceStateId: sourceSnapshotId }); } catch (e) { this.#tolerateAutoAdvanceRace(e); }
         }
         const cur3 = this.getMigrationState(migrationId);
         if (cur3 && cur3.currentState === MIGRATION_STATES.SNAPSHOT_RUNNING) {
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.FULL_LOAD_RUNNING, principal: 'system', reason: 'legacy start', planId, sourceStateId: sourceSnapshotId }); } catch {}
+          try { this.transition(migrationId, { nextState: MIGRATION_STATES.FULL_LOAD_RUNNING, principal: 'system', reason: 'legacy start', planId, sourceStateId: sourceSnapshotId }); } catch (e) { this.#tolerateAutoAdvanceRace(e); }
         }
         // If still in APPROVED, jump to FULL_LOAD_RUNNING directly (allowed edge)
         const cur4 = this.getMigrationState(migrationId);
         if (cur4 && cur4.currentState === MIGRATION_STATES.APPROVED) {
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.FULL_LOAD_RUNNING, principal: 'system', reason: 'legacy start', planId, sourceStateId: sourceSnapshotId }); } catch {}
+          try { this.transition(migrationId, { nextState: MIGRATION_STATES.FULL_LOAD_RUNNING, principal: 'system', reason: 'legacy start', planId, sourceStateId: sourceSnapshotId }); } catch (e) { this.#tolerateAutoAdvanceRace(e); }
         }
       }
     } catch (e) {
-      // Do not fail legacy start on state machine issues; log? But spec says production path must use state machine — for legacy tests we keep best-effort.
-      // If it's RUN_STATE_CORRUPT, propagate
-      if (e?.code === 'RUN_STATE_CORRUPT' || e?.code === 'TRANSITION_CONFLICT' || e?.code === 'STALE_TRANSITION_VERSION') throw e;
+      // Canonical advancement failure aborts start: proceeding with a diverged
+      // legacy projection would hide protocol errors from the caller.
+      throw e;
     }
+  }
+
+  // Tolerate only the concurrent-auto-advance race in legacy best-effort
+  // paths: the guard just observed the source state, so ILLEGAL means another
+  // process already advanced past it. Every other protocol error propagates.
+  #tolerateAutoAdvanceRace(error) {
+    if (error?.code === 'ILLEGAL_STATE_TRANSITION') return;
+    throw error;
   }
   complete({ migrationId, verification, receipt, completedAt }) {
     this.#open();
     this.db.prepare(`UPDATE spool_runs SET status='COMPLETE', verification_json=?, receipt_json=?, repair_json=NULL, completed_at=?, last_error_code=NULL WHERE migration_id=?`)
       .run(canonicalJson(verification), canonicalJson(receipt), text(completedAt, 'completedAt'), text(migrationId, 'migrationId'));
-    try {
-      const state = this.getMigrationState(migrationId);
-      if (state) {
-        // Move through VERIFYING -> READY_FOR_CUTOVER if not already
-        if ([MIGRATION_STATES.FULL_LOAD_RUNNING, MIGRATION_STATES.CDC_RUNNING, MIGRATION_STATES.CATCHING_UP].includes(state.currentState)) {
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.VERIFYING, principal: 'system', reason: 'verify' }); } catch {}
-        }
-        const cur = this.getMigrationState(migrationId);
-        if (cur && cur.currentState === MIGRATION_STATES.VERIFYING) {
-          try {
-            this.transition(migrationId, { nextState: MIGRATION_STATES.READY_FOR_CUTOVER, principal: 'system', reason: 'verified', context: { verification } });
-          } catch {}
-        }
-        // Note: complete does not yet go to COMPLETED; that requires post-cutover verify. Keep legacy COMPLETE mapping.
+    // Canonical advancement participates in the same atomicity contract as the
+    // legacy row update above is single-statement; only the concurrent-advance
+    // race is tolerated, every other protocol error propagates.
+    const state = this.getMigrationState(migrationId);
+    if (state) {
+      // Move through VERIFYING -> READY_FOR_CUTOVER if not already
+      if ([MIGRATION_STATES.FULL_LOAD_RUNNING, MIGRATION_STATES.CDC_RUNNING, MIGRATION_STATES.CATCHING_UP].includes(state.currentState)) {
+        try { this.transition(migrationId, { nextState: MIGRATION_STATES.VERIFYING, principal: 'system', reason: 'verify' }); } catch (e) { this.#tolerateAutoAdvanceRace(e); }
       }
-    } catch (e) {
-      if (e?.code === 'RUN_STATE_CORRUPT') throw e;
+      const cur = this.getMigrationState(migrationId);
+      if (cur && cur.currentState === MIGRATION_STATES.VERIFYING) {
+        this.transition(migrationId, { nextState: MIGRATION_STATES.READY_FOR_CUTOVER, principal: 'system', reason: 'verified', context: { verification } });
+      }
+      // Note: complete does not yet go to COMPLETED; that requires post-cutover verify. Keep legacy COMPLETE mapping.
     }
   }
   verificationFailed({ migrationId, verification }) {
@@ -698,26 +1111,22 @@ export class RunStore {
     this.db.prepare(`UPDATE spool_runs SET status='VERIFICATION_FAILED', verification_json=?, receipt_json=NULL, repair_json=NULL, completed_at=NULL, last_error_code='VERIFICATION_FAILED' WHERE migration_id=?`)
       .run(canonicalJson(verification), text(migrationId, 'migrationId'));
     this.db.prepare('DELETE FROM spool_repair_operations WHERE migration_id=?').run(text(migrationId, 'migrationId'));
-    try {
-      const state = this.getMigrationState(migrationId);
-      if (state && state.currentState === MIGRATION_STATES.VERIFYING) {
-        try { this.transition(migrationId, { nextState: MIGRATION_STATES.VERIFICATION_FAILED, principal: 'system', reason: 'verification failed', evidence: { verification } }); } catch {}
-      } else if (state && state.currentState === MIGRATION_STATES.REVERIFYING) {
-        try { this.transition(migrationId, { nextState: MIGRATION_STATES.VERIFICATION_FAILED, principal: 'system', reason: 'reverification failed', evidence: { verification } }); } catch {}
-      }
-    } catch (e) { if (e?.code === 'RUN_STATE_CORRUPT') throw e; }
+    const state = this.getMigrationState(migrationId);
+    if (state && state.currentState === MIGRATION_STATES.VERIFYING) {
+      try { this.transition(migrationId, { nextState: MIGRATION_STATES.VERIFICATION_FAILED, principal: 'system', reason: 'verification failed', evidence: { verification } }); } catch (e) { this.#tolerateAutoAdvanceRace(e); }
+    } else if (state && state.currentState === MIGRATION_STATES.REVERIFYING) {
+      try { this.transition(migrationId, { nextState: MIGRATION_STATES.VERIFICATION_FAILED, principal: 'system', reason: 'reverification failed', evidence: { verification } }); } catch (e) { this.#tolerateAutoAdvanceRace(e); }
+    }
   }
   fail({ migrationId, errorCode }) {
     this.#open();
     this.db.prepare(`UPDATE spool_runs SET status='FAILED', last_error_code=? WHERE migration_id=?`)
       .run(text(errorCode, 'errorCode'), text(migrationId, 'migrationId'));
-    try {
-      const state = this.getMigrationState(migrationId);
-      if (state && !['FAILED_RECOVERABLE','FAILED_OPERATOR_REQUIRED','COMPLETED','ABORTED'].includes(state.currentState)) {
-        const to = errorCode === 'OPERATOR_REQUIRED' ? MIGRATION_STATES.FAILED_OPERATOR_REQUIRED : MIGRATION_STATES.FAILED_RECOVERABLE;
-        try { this.transition(migrationId, { nextState: to, principal: 'system', reason: errorCode }); } catch {}
-      }
-    } catch (e) { if (e?.code === 'RUN_STATE_CORRUPT') throw e; }
+    const state = this.getMigrationState(migrationId);
+    if (state && !['FAILED_RECOVERABLE','FAILED_OPERATOR_REQUIRED','COMPLETED','ABORTED'].includes(state.currentState)) {
+      const to = errorCode === 'OPERATOR_REQUIRED' ? MIGRATION_STATES.FAILED_OPERATOR_REQUIRED : MIGRATION_STATES.FAILED_RECOVERABLE;
+      try { this.transition(migrationId, { nextState: to, principal: 'system', reason: errorCode }); } catch (e) { this.#tolerateAutoAdvanceRace(e); }
+    }
   }
   saveVerificationBatch({ migrationId, ordinal, sourceRange, verification, repair = null }) {
     this.#open();
@@ -796,110 +1205,312 @@ export class RunStore {
   completeRepair({ migrationId, repair, completedAt }) {
     this.#open();
     if (!repair || typeof repair !== 'object' || Array.isArray(repair)) fail('INVALID_RUN_STORE_INPUT', 'repair record is required');
-    this.db.prepare(`UPDATE spool_runs SET status='REPAIR_COMPLETE', repair_json=?, completed_at=?, last_error_code=NULL WHERE migration_id=?`)
-      .run(canonicalJson(repair), text(completedAt, 'completedAt'), text(migrationId, 'migrationId'));
-    try {
+    // One transaction: legacy projection update + canonical transitions move
+    // together, so a crash cannot leave REPAIR_COMPLETE recorded while the
+    // canonical state still says REPAIRING.
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`UPDATE spool_runs SET status='REPAIR_COMPLETE', repair_json=?, completed_at=?, last_error_code=NULL WHERE migration_id=?`)
+        .run(canonicalJson(repair), text(completedAt, 'completedAt'), text(migrationId, 'migrationId'));
       const state = this.getMigrationState(migrationId);
       if (state) {
         // REPAIRING -> REVERIFYING
         if (state.currentState === MIGRATION_STATES.REPAIRING) {
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.REVERIFYING, principal: 'system', reason: 'repair complete' }); } catch {}
+          this.transition(migrationId, { nextState: MIGRATION_STATES.REVERIFYING, principal: 'system', reason: 'repair complete' });
         }
         const cur = this.getMigrationState(migrationId);
         if (cur && cur.currentState === MIGRATION_STATES.REVERIFYING) {
           // reverify succeeded implies READY_FOR_CUTOVER
-          try {
-            const verification = repair.verification ?? repair?.receipt?.record?.verification ?? null;
-            this.transition(migrationId, { nextState: MIGRATION_STATES.READY_FOR_CUTOVER, principal: 'system', reason: 'reverified', context: { verification: verification ?? { status: 'VERIFIED' } } });
-          } catch {}
+          const verification = repair.verification ?? repair?.receipt?.record?.verification ?? null;
+          if (!verification || verification.status !== 'VERIFIED') {
+            fail('VERIFICATION_REQUIRED', 'READY_FOR_CUTOVER requires a successful reverification');
+          }
+          this.transition(migrationId, { nextState: MIGRATION_STATES.READY_FOR_CUTOVER, principal: 'system', reason: 'reverified', context: { verification } });
         }
       }
-    } catch (e) { if (e?.code === 'RUN_STATE_CORRUPT') throw e; }
+    });
+    tx();
   }
-  beginCutover({ migrationId, receiptId, receiptKind, planId, sourceSnapshotId, targetIdentity, targetContractId, armedAt }) {
+  // ---------- Atomic cutover operations ----------
+  // Each operation below performs its cutover-row write AND its canonical
+  // state transition(s) inside ONE SQLite transaction, so a crash can never
+  // leave the cutover record and the canonical migration state diverged:
+  // either everything for the operation is durable, or nothing is.
+
+  #requireCutoverAttempt({ migrationId, cutoverAttemptId, armedAt, receiptId, receiptKind, planId, sourceSnapshotId, targetContractId }) {
+    requireCutoverAttemptId(cutoverAttemptId);
+    const expected = buildCutoverAttemptId({ migrationId, receiptId, receiptKind, planId, sourceStateId: sourceSnapshotId, targetContractId, armedAt });
+    if (expected !== cutoverAttemptId) {
+      fail('CUTOVER_ATTEMPT_MISMATCH', 'Supplied cutoverAttemptId does not match the canonical identity of these arming inputs', {
+        supplied: cutoverAttemptId,
+        expected
+      });
+    }
+    return expected;
+  }
+
+  armCutoverAtomic({ migrationId, principal, receiptId, receiptKind, planId, sourceSnapshotId, targetIdentity, targetContractId, armedAt, cutoverAttemptId, commandId = null }) {
     this.#open();
     text(migrationId, 'migrationId'); text(receiptId, 'receiptId'); text(planId, 'planId');
     text(sourceSnapshotId, 'sourceSnapshotId'); text(targetContractId, 'targetContractId'); text(armedAt, 'armedAt');
+    if (typeof principal !== 'string' || !principal.trim()) fail('INVALID_PRINCIPAL', 'principal is required');
     if (receiptKind !== 'migration' && receiptKind !== 'repair') fail('INVALID_RUN_STORE_INPUT', 'receiptKind must be migration or repair');
-    const existing = this.cutover(migrationId);
-    if (existing && existing.status === 'COMMITTED') fail('CUTOVER_STATE_CONFLICT', 'Cutover is already committed');
-    if (existing && existing.status === 'ARMED') return existing;
-    this.db.prepare(`
-      INSERT INTO spool_cutovers (
-        migration_id, status, receipt_id, receipt_kind, plan_id, source_snapshot_id,
-        target_identity_json, target_contract_id, commit_evidence_json, abort_reason, armed_at, decided_at
-      ) VALUES (?, 'ARMED', ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)
-      ON CONFLICT(migration_id) DO UPDATE SET
-        status='ARMED', receipt_id=excluded.receipt_id, receipt_kind=excluded.receipt_kind,
-        plan_id=excluded.plan_id, source_snapshot_id=excluded.source_snapshot_id,
-        target_identity_json=excluded.target_identity_json, target_contract_id=excluded.target_contract_id,
-        commit_evidence_json=NULL, abort_reason=NULL, armed_at=excluded.armed_at, decided_at=NULL
-    `).run(
-      migrationId, receiptId, receiptKind, planId, sourceSnapshotId,
-      canonicalJson(targetIdentity), targetContractId, armedAt
-    );
-    try {
-      const state = this.getMigrationState(migrationId);
-      if (state && state.currentState === MIGRATION_STATES.READY_FOR_CUTOVER) {
-        try { this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_ARMED, principal: 'system', reason: 'cutover armed', planId, sourceStateId: sourceSnapshotId, targetContractId, evidence: { receiptId, receiptKind } }); } catch {}
-      } else if (state && state.currentState === MIGRATION_STATES.ABORTED) {
-        try { this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_ARMED, principal: 'system', reason: 'cutover re-armed', planId, sourceStateId: sourceSnapshotId, targetContractId, evidence: { receiptId, receiptKind } }); } catch {
-          // fallback to READY_FOR_CUTOVER then ARMED
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.READY_FOR_CUTOVER, principal: 'system', reason: 're-arm via ready', context: { verification: { status: 'VERIFIED' } } }); } catch {}
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_ARMED, principal: 'system', reason: 'cutover re-armed', planId, sourceStateId: sourceSnapshotId, targetContractId }); } catch {}
-        }
+    this.#requireCutoverAttempt({ migrationId, cutoverAttemptId, armedAt, receiptId, receiptKind, planId, sourceSnapshotId, targetContractId });
+    const tx = this.db.transaction(() => {
+      const existing = this.cutover(migrationId);
+      if (existing?.status === 'COMMITTED') fail('CUTOVER_STATE_CONFLICT', 'Cutover is already committed');
+      if (existing?.status === 'ARMED') {
+        if (existing.cutoverAttemptId === cutoverAttemptId) return existing;
+        fail('CUTOVER_STATE_CONFLICT', 'A different cutover attempt is already armed; abort or re-arm it first', {
+          armedAttempt: existing.cutoverAttemptId ?? null
+        });
       }
-    } catch (e) { if (e?.code === 'RUN_STATE_CORRUPT') throw e; }
-    return this.cutover(migrationId);
+      this.db.prepare(`
+        INSERT INTO spool_cutovers (
+          migration_id, status, receipt_id, receipt_kind, plan_id, source_snapshot_id,
+          target_identity_json, target_contract_id, commit_evidence_json, abort_reason, cutover_attempt_id, armed_at, decided_at
+        ) VALUES (?, 'ARMED', ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)
+        ON CONFLICT(migration_id) DO UPDATE SET
+          status='ARMED', receipt_id=excluded.receipt_id, receipt_kind=excluded.receipt_kind,
+          plan_id=excluded.plan_id, source_snapshot_id=excluded.source_snapshot_id,
+          target_identity_json=excluded.target_identity_json, target_contract_id=excluded.target_contract_id,
+          commit_evidence_json=NULL, abort_reason=NULL, cutover_attempt_id=excluded.cutover_attempt_id,
+          armed_at=excluded.armed_at, decided_at=NULL
+      `).run(
+        migrationId, receiptId, receiptKind, planId, sourceSnapshotId,
+        canonicalJson(targetIdentity), targetContractId, cutoverAttemptId, armedAt
+      );
+      this.transition(migrationId, {
+        nextState: MIGRATION_STATES.CUTOVER_ARMED, principal, reason: 'cutover armed',
+        planId, sourceStateId: sourceSnapshotId, targetContractId,
+        evidence: { receiptId, receiptKind, cutoverAttemptId },
+        context: { cutoverEvidence: { receiptId, receiptKind, cutoverAttemptId }, receiptId, receiptKind, cutoverAttemptId, planId, targetContractId },
+        commandId: commandId ?? `cutover-arm:${cutoverAttemptId}`
+      });
+      return this.cutover(migrationId);
+    });
+    return tx();
   }
-  commitCutover({ migrationId, commitEvidence, decidedAt }) {
+
+  // Explicit re-arm after abort. Mints nothing implicitly: the caller supplies
+  // a FRESH attempt id (new armedAt); reusing the aborted attempt's id fails.
+  // Re-arm re-validates plan and contract against the CURRENT canonical state
+  // bindings rather than trusting the aborted attempt's values.
+  rearmCutoverAtomic({ migrationId, principal, reason, receiptId, receiptKind, planId, sourceSnapshotId, targetIdentity, targetContractId, armedAt, cutoverAttemptId, commandId = null }) {
+    this.#open();
+    text(migrationId, 'migrationId');
+    if (typeof principal !== 'string' || !principal.trim()) fail('INVALID_PRINCIPAL', 'principal is required');
+    if (typeof reason !== 'string' || !reason.trim()) fail('INVALID_CUTOVER_REQUEST', 're-arm reason must be a non-empty bounded string');
+    if (receiptKind !== 'migration' && receiptKind !== 'repair') fail('INVALID_RUN_STORE_INPUT', 'receiptKind must be migration or repair');
+    this.#requireCutoverAttempt({ migrationId, cutoverAttemptId, armedAt, receiptId, receiptKind, planId, sourceSnapshotId, targetContractId });
+    const tx = this.db.transaction(() => {
+      const existing = this.cutover(migrationId);
+      if (!existing) fail('CUTOVER_STATE_CONFLICT', 'Re-arm requires a previously aborted cutover attempt');
+      if (existing.status === 'COMMITTED') fail('CUTOVER_ALREADY_COMMITTED', 'A committed cutover cannot be re-armed');
+      if (existing.cutoverAttemptId === cutoverAttemptId) {
+        fail('CUTOVER_ATTEMPT_MISMATCH', 'Re-arm requires a fresh cutover attempt identity, not the aborted attempt', {
+          abortedAttempt: existing.cutoverAttemptId ?? null
+        });
+      }
+      const state = this.getMigrationState(migrationId);
+      if (!state || state.currentState !== MIGRATION_STATES.ABORTED) {
+        fail('CUTOVER_STATE_CONFLICT', `Re-arm requires canonical state ABORTED, not ${state?.currentState ?? 'absent'}`);
+      }
+      if (planId !== state.planId || sourceSnapshotId !== state.sourceStateId || targetContractId !== state.targetContractId) {
+        fail('CUTOVER_REARM_BINDING_MISMATCH', 'Re-arm plan/source/contract must match the current canonical bindings', {
+          canonical: { planId: state.planId, sourceStateId: state.sourceStateId, targetContractId: state.targetContractId }
+        });
+      }
+      this.db.prepare(`
+        UPDATE spool_cutovers SET status='ARMED', receipt_id=?, receipt_kind=?, plan_id=?, source_snapshot_id=?,
+          target_identity_json=?, target_contract_id=?, commit_evidence_json=NULL, abort_reason=NULL,
+          cutover_attempt_id=?, armed_at=?, decided_at=NULL WHERE migration_id=?
+      `).run(
+        receiptId, receiptKind, planId, sourceSnapshotId,
+        canonicalJson(targetIdentity), targetContractId, cutoverAttemptId, armedAt, migrationId
+      );
+      this.transition(migrationId, {
+        nextState: MIGRATION_STATES.CUTOVER_ARMED, principal, reason: `cutover re-armed: ${reason}`.slice(0, 256),
+        planId, sourceStateId: sourceSnapshotId, targetContractId,
+        evidence: { receiptId, receiptKind, cutoverAttemptId, rearmReason: reason },
+        context: {
+          cutoverEvidence: { receiptId, receiptKind, cutoverAttemptId }, receiptId, receiptKind, cutoverAttemptId, planId, targetContractId,
+          rearm: { cutoverAttemptId, principal, reason }
+        },
+        commandId: commandId ?? `cutover-rearm:${cutoverAttemptId}`
+      });
+      return this.cutover(migrationId);
+    });
+    return tx();
+  }
+
+  // Persist FINAL_PRE_CUTOVER evidence and enter FINAL_VERIFY atomically.
+  recordFinalVerificationAtomic({ migrationId, principal, verification, fenceToken, planId, sourceStateId, targetContractId, commandId = null }) {
+    this.#open();
+    text(migrationId, 'migrationId');
+    if (typeof principal !== 'string' || !principal.trim()) fail('INVALID_PRINCIPAL', 'principal is required');
+    if (!verification || typeof verification !== 'object') fail('INVALID_VERIFICATION', 'Final verification record is required');
+    if (verification.mode !== 'FINAL_PRE_CUTOVER') fail('VERIFICATION_MODE_MISMATCH', 'FINAL_VERIFY requires a FINAL_PRE_CUTOVER verification record');
+    if (verification.status !== 'VERIFIED') fail('VERIFICATION_REQUIRED', 'FINAL_VERIFY requires a VERIFIED final verification record');
+    assertVerificationIdentity(verification);
+    if (!Number.isSafeInteger(fenceToken) || fenceToken < 1) fail('FENCE_REQUIRED', 'FINAL_VERIFY requires a fresh fence token');
+    const tx = this.db.transaction(() => {
+      this.saveVerification(migrationId, verification);
+      this.transition(migrationId, {
+        nextState: MIGRATION_STATES.FINAL_VERIFY, principal, reason: 'final verify',
+        planId, sourceStateId, targetContractId, fenceToken,
+        evidence: { fencingToken: fenceToken, finalVerificationId: verification.verificationId },
+        context: { fenceToken, finalVerificationId: verification.verificationId },
+        commandId: commandId ?? `cutover-final-verify:${verification.cutoverAttemptId ?? verification.verificationId}`
+      });
+      return this.getVerificationById(migrationId, verification.verificationId);
+    });
+    return tx();
+  }
+
+  commitCutoverAtomic({ migrationId, principal, commitEvidence, decidedAt, finalVerificationId, fenceToken, planId, sourceStateId, targetContractId, commandId = null }) {
     this.#open();
     if (!commitEvidence || typeof commitEvidence !== 'object' || Array.isArray(commitEvidence)) fail('INVALID_RUN_STORE_INPUT', 'commit evidence is required');
-    const existing = this.cutover(migrationId);
-    if (!existing || existing.status !== 'ARMED') fail('CUTOVER_STATE_CONFLICT', 'Cutover commit requires an armed cutover');
-    this.db.prepare(`UPDATE spool_cutovers SET status='COMMITTED', commit_evidence_json=?, decided_at=? WHERE migration_id=?`)
-      .run(canonicalJson(commitEvidence), text(decidedAt, 'decidedAt'), text(migrationId, 'migrationId'));
-    try {
-      const state = this.getMigrationState(migrationId);
-      if (state) {
-        // CUTOVER_ARMED -> FINAL_DRAIN -> FINAL_VERIFY -> CUTOVER_COMMITTED  (or direct if not using drain)
-        if (state.currentState === MIGRATION_STATES.CUTOVER_ARMED) {
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.FINAL_VERIFY, principal: 'system', reason: 'cutover commit', fenceToken: commitEvidence.fencingToken, context: { fenceToken: commitEvidence.fencingToken, finalVerification: { status: 'VERIFIED' } } }); } catch {
-            try { this.transition(migrationId, { nextState: MIGRATION_STATES.FINAL_DRAIN, principal: 'system', reason: 'cutover final drain' }); } catch {}
-            const cur = this.getMigrationState(migrationId);
-            if (cur && cur.currentState === MIGRATION_STATES.FINAL_DRAIN) {
-              try { this.transition(migrationId, { nextState: MIGRATION_STATES.FINAL_VERIFY, principal: 'system', reason: 'final verify' }); } catch {}
-            }
-          }
-        }
-        if (state.currentState === MIGRATION_STATES.FINAL_VERIFY || state.currentState === MIGRATION_STATES.FINAL_DRAIN) {
-          // advance to FINAL_VERIFY if needed
-          const cur = this.getMigrationState(migrationId);
-          if (cur && cur.currentState === MIGRATION_STATES.FINAL_DRAIN) {
-            try { this.transition(migrationId, { nextState: MIGRATION_STATES.FINAL_VERIFY, principal: 'system', reason: 'final verify' }); } catch {}
-          }
-        }
-        const cur2 = this.getMigrationState(migrationId);
-        if (cur2 && [MIGRATION_STATES.FINAL_VERIFY, MIGRATION_STATES.CUTOVER_ARMED].includes(cur2.currentState)) {
-          try { this.transition(migrationId, { nextState: MIGRATION_STATES.CUTOVER_COMMITTED, principal: 'system', reason: 'cutover committed', fenceToken: commitEvidence.fencingToken, context: { fenceToken: commitEvidence.fencingToken, finalVerification: { status: 'VERIFIED' } } }); } catch {}
-        }
+    if (typeof principal !== 'string' || !principal.trim()) fail('INVALID_PRINCIPAL', 'principal is required');
+    const tx = this.db.transaction(() => {
+      const existing = this.cutover(migrationId);
+      if (!existing) fail('CUTOVER_STATE_CONFLICT', 'Cutover commit requires an armed cutover');
+      if (existing.status === 'COMMITTED') {
+        // Crash-after-commit retry with the same bound verification is
+        // idempotent; anything else on a committed migration is refused.
+        const commitRow = this.db.prepare(`SELECT evidence_json FROM spool_transitions WHERE migration_id = ? AND next_state = 'CUTOVER_COMMITTED' ORDER BY sequence DESC LIMIT 1`).get(migrationId);
+        const committedVerificationId = commitRow ? JSON.parse(commitRow.evidence_json ?? '{}')?.finalVerificationId ?? null : null;
+        if (committedVerificationId != null && committedVerificationId === finalVerificationId) return existing;
+        fail('CUTOVER_ALREADY_COMMITTED', 'Cutover is already committed');
       }
-    } catch (e) { if (e?.code === 'RUN_STATE_CORRUPT') throw e; }
-    return this.cutover(migrationId);
+      if (existing.status !== 'ARMED') fail('CUTOVER_STATE_CONFLICT', 'Cutover commit requires an armed cutover');
+      this.transition(migrationId, {
+        nextState: MIGRATION_STATES.CUTOVER_COMMITTED, principal, reason: 'cutover committed',
+        planId, sourceStateId, targetContractId, fenceToken,
+        evidence: { fencingToken: fenceToken, targetContractId, finalVerificationId },
+        context: { fenceToken, finalVerificationId },
+        commandId: commandId ?? `cutover-commit:${existing.cutoverAttemptId ?? finalVerificationId}`
+      });
+      this.db.prepare(`UPDATE spool_cutovers SET status='COMMITTED', commit_evidence_json=?, decided_at=? WHERE migration_id=?`)
+        .run(canonicalJson(commitEvidence), text(decidedAt, 'decidedAt'), text(migrationId, 'migrationId'));
+      return this.cutover(migrationId);
+    });
+    return tx();
   }
-  abortCutover({ migrationId, reason, decidedAt }) {
+
+  recordPostCutoverVerificationAtomic({ migrationId, principal, verification, commandId = null }) {
     this.#open();
-    const existing = this.cutover(migrationId);
-    if (!existing || existing.status !== 'ARMED') fail('CUTOVER_STATE_CONFLICT', 'Cutover abort requires an armed cutover');
-    this.db.prepare(`UPDATE spool_cutovers SET status='ABORTED', abort_reason=?, decided_at=? WHERE migration_id=?`)
-      .run(text(reason, 'reason'), text(decidedAt, 'decidedAt'), text(migrationId, 'migrationId'));
-    try {
+    text(migrationId, 'migrationId');
+    if (typeof principal !== 'string' || !principal.trim()) fail('INVALID_PRINCIPAL', 'principal is required');
+    if (!verification || typeof verification !== 'object') fail('INVALID_VERIFICATION', 'Post-cutover verification record is required');
+    if (verification.mode !== 'POST_CUTOVER') fail('VERIFICATION_MODE_MISMATCH', 'POST_CUTOVER_VERIFY requires a POST_CUTOVER verification record');
+    if (verification.status !== 'VERIFIED') fail('VERIFICATION_REQUIRED', 'POST_CUTOVER_VERIFY requires a VERIFIED post-cutover verification record');
+    assertVerificationIdentity(verification);
+    const tx = this.db.transaction(() => {
+      this.saveVerification(migrationId, verification);
+      this.transition(migrationId, {
+        nextState: MIGRATION_STATES.POST_CUTOVER_VERIFY, principal, reason: 'post cutover verify',
+        planId: verification.planId, sourceStateId: verification.sourceStateId, targetContractId: verification.targetContractId,
+        evidence: { postCutoverVerificationId: verification.verificationId },
+        context: { postCutoverVerificationId: verification.verificationId },
+        commandId: commandId ?? `cutover-post-verify:${verification.cutoverAttemptId ?? verification.verificationId}`
+      });
+      return this.getVerificationById(migrationId, verification.verificationId);
+    });
+    return tx();
+  }
+
+  completeMigrationAtomic({ migrationId, principal, postCutoverVerificationId, planId, sourceStateId, targetContractId, commandId = null }) {
+    this.#open();
+    text(migrationId, 'migrationId');
+    if (typeof principal !== 'string' || !principal.trim()) fail('INVALID_PRINCIPAL', 'principal is required');
+    const tx = this.db.transaction(() => {
+      this.transition(migrationId, {
+        nextState: MIGRATION_STATES.COMPLETED, principal, reason: 'completed',
+        planId, sourceStateId, targetContractId,
+        evidence: { postCutoverVerificationId },
+        context: { postCutoverVerificationId },
+        commandId: commandId ?? `cutover-complete:${postCutoverVerificationId}`
+      });
+      return this.getMigrationState(migrationId);
+    });
+    return tx();
+  }
+
+  abortCutoverAtomic({ migrationId, principal, reason, decidedAt, commandId = null }) {
+    this.#open();
+    if (typeof principal !== 'string' || !principal.trim()) fail('INVALID_PRINCIPAL', 'principal is required');
+    if (typeof reason !== 'string' || !reason.trim() || reason.length > 256) fail('INVALID_CUTOVER_REQUEST', 'abort reason must be a non-empty bounded string');
+    const tx = this.db.transaction(() => {
+      const existing = this.cutover(migrationId);
+      if (!existing) fail('CUTOVER_STATE_CONFLICT', 'Cutover abort requires an armed cutover');
+      if (existing.status === 'COMMITTED') fail('CUTOVER_ALREADY_COMMITTED', 'A committed cutover cannot be aborted');
+      if (existing.status !== 'ARMED') fail('CUTOVER_STATE_CONFLICT', 'Cutover abort requires an armed cutover');
+      this.db.prepare(`UPDATE spool_cutovers SET status='ABORTED', abort_reason=?, decided_at=? WHERE migration_id=?`)
+        .run(text(reason, 'reason'), text(decidedAt, 'decidedAt'), text(migrationId, 'migrationId'));
       const state = this.getMigrationState(migrationId);
-      if (state && state.currentState === MIGRATION_STATES.CUTOVER_ARMED) {
-        try { this.transition(migrationId, { nextState: MIGRATION_STATES.ABORTED, principal: 'system', reason }); } catch {}
+      if (state && [MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN, MIGRATION_STATES.FINAL_VERIFY].includes(state.currentState)) {
+        this.transition(migrationId, {
+          nextState: MIGRATION_STATES.ABORTED, principal, reason: reason.trim(),
+          evidence: { cutoverAttemptId: existing.cutoverAttemptId ?? null },
+          commandId: commandId ?? `cutover-abort:${existing.cutoverAttemptId ?? migrationId}:${decidedAt}`
+        });
       }
-    } catch (e) { if (e?.code === 'RUN_STATE_CORRUPT') throw e; }
-    return this.cutover(migrationId);
+      return this.cutover(migrationId);
+    });
+    return tx();
+  }
+
+  // Explicit operator-initiated recovery from FAILED_RECOVERABLE. The intent
+  // (target resume point + justification) and the effect (arrival at the
+  // resume point) commit atomically, so a crash leaves either the original
+  // FAILED_RECOVERABLE state or the fully recorded recovery — never a bare
+  // RECOVERY_PENDING without effect, and never an effect without intent.
+  beginRecovery({ migrationId, principal, reason, targetState, commandId = null }) {
+    this.#open();
+    text(migrationId, 'migrationId');
+    if (typeof principal !== 'string' || !principal.trim()) fail('INVALID_PRINCIPAL', 'principal is required');
+    if (typeof reason !== 'string' || !reason.trim()) fail('RECOVERY_EVIDENCE_REQUIRED', 'Recovery requires a reason describing the resolved failure cause');
+    if (![MIGRATION_STATES.SNAPSHOT_ARMED, MIGRATION_STATES.FULL_LOAD_RUNNING].includes(targetState)) {
+      fail('RECOVERY_TARGET_INVALID', 'Recovery target must be a safe resume point (SNAPSHOT_ARMED or FULL_LOAD_RUNNING)', { targetState: targetState ?? null });
+    }
+    // Idempotent retry: the same recovery command issued after a crash finds
+    // its committed intent and returns the current state instead of failing.
+    if (commandId != null) {
+      const prior = this.findTransitionByCommand(migrationId, commandId);
+      if (prior) return this.getMigrationState(migrationId);
+    }
+    const tx = this.db.transaction(() => {
+      const state = this.getMigrationState(migrationId);
+      if (!state || state.currentState !== MIGRATION_STATES.FAILED_RECOVERABLE) {
+        fail('RECOVERY_NOT_REQUIRED', `Recovery requires canonical state FAILED_RECOVERABLE, not ${state?.currentState ?? 'absent'}`);
+      }
+      if (targetState === MIGRATION_STATES.FULL_LOAD_RUNNING) {
+        // Resume requires durable proof of partial progress bound to this
+        // migration/plan/snapshot; otherwise restart from SNAPSHOT_ARMED.
+        const checkpointRow = this.db.prepare('SELECT checkpoint_json FROM spool_checkpoints WHERE migration_id = ?').get(migrationId);
+        const checkpoint = checkpointRow ? JSON.parse(checkpointRow.checkpoint_json) : null;
+        if (!checkpoint || typeof checkpoint.nextOffset !== 'number' || checkpoint.nextOffset <= 0) {
+          fail('RECOVERY_EVIDENCE_REQUIRED', 'Recovery to FULL_LOAD_RUNNING requires a durable checkpoint with partial progress', { targetState });
+        }
+        if (checkpoint.migrationId !== migrationId || (state.planId && checkpoint.planId !== state.planId) || (state.sourceStateId && checkpoint.sourceSnapshotId !== state.sourceStateId)) {
+          fail('RECOVERY_EVIDENCE_REQUIRED', 'Durable checkpoint is not bound to this migration/plan/snapshot', { targetState });
+        }
+      }
+      const recovery = { targetState, principal, reason };
+      this.transition(migrationId, {
+        nextState: MIGRATION_STATES.RECOVERY_PENDING, principal, reason: `recovery pending: ${reason}`.slice(0, 256),
+        evidence: { recovery },
+        context: { recovery },
+        commandId: commandId ?? `recovery-begin:${migrationId}:${targetState}`
+      });
+      this.transition(migrationId, {
+        nextState: targetState, principal, reason: `recovered: ${reason}`.slice(0, 256),
+        context: { recovery },
+        commandId: commandId ? `${commandId}:arrive` : `recovery-arrive:${migrationId}:${targetState}`
+      });
+      return this.getMigrationState(migrationId);
+    });
+    return tx();
   }
   cutover(migrationId) {
     this.#open(); text(migrationId, 'migrationId');
@@ -916,6 +1527,7 @@ export class RunStore {
       targetContractId: row.target_contract_id,
       commitEvidence: parse(row.commit_evidence_json),
       abortReason: row.abort_reason,
+      cutoverAttemptId: row.cutover_attempt_id ?? null,
       armedAt: row.armed_at,
       decidedAt: row.decided_at
     });
@@ -938,11 +1550,69 @@ export class RunStore {
   clearCheckpoint(migrationId) {
     this.#open(); this.db.prepare('DELETE FROM spool_checkpoints WHERE migration_id=?').run(text(migrationId, 'migrationId'));
   }
+
+  // Immutable verification evidence store. The supplied verificationId must
+  // equal the recomputed semantic identity; a mismatch means the record was
+  // mutated after minting (VERIFICATION_ID_MISMATCH). An existing row with the
+  // same identity but different payload is a conflict (VERIFICATION_ID_CONFLICT);
+  // byte-identical re-save is idempotent. Evidence is never overwritten.
+  saveVerification(migrationId, verification) {
+    this.#open(); text(migrationId, 'migrationId');
+    if (!verification || typeof verification !== 'object' || Array.isArray(verification)) fail('INVALID_VERIFICATION', 'Verification record is required');
+    assertVerificationIdentity(verification);
+    if (typeof verification.mode !== 'string' || !verification.mode) fail('INVALID_VERIFICATION', 'Verification mode is required');
+    const verificationJson = canonicalJson(verification);
+    const existing = this.db.prepare('SELECT verification_json FROM spool_verifications WHERE migration_id = ? AND verification_id = ?').get(migrationId, verification.verificationId);
+    if (existing) {
+      if (existing.verification_json !== verificationJson) {
+        fail('VERIFICATION_ID_CONFLICT', 'A different verification payload already exists under this verification identity', {
+          verificationId: verification.verificationId
+        });
+      }
+      return this.getVerificationById(migrationId, verification.verificationId);
+    }
+    this.db.prepare(`
+      INSERT INTO spool_verifications (migration_id, verification_id, mode, verification_json, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(text(migrationId, 'migrationId'), text(verification.verificationId, 'verificationId'), text(verification.mode, 'mode'), verificationJson, text(new Date().toISOString(), 'createdAt'));
+    return this.getVerificationById(migrationId, verification.verificationId);
+  }
+
+  getVerification(migrationId) {
+    this.#open(); text(migrationId, 'migrationId');
+    const row = this.db.prepare('SELECT verification_json FROM spool_verifications WHERE migration_id = ? ORDER BY created_at DESC LIMIT 1').get(migrationId);
+    if (!row) return null;
+    return Object.freeze(JSON.parse(row.verification_json));
+  }
+
+  getVerificationById(migrationId, verificationId) {
+    this.#open(); text(migrationId, 'migrationId'); text(verificationId, 'verificationId');
+    const row = this.db.prepare('SELECT verification_json FROM spool_verifications WHERE migration_id = ? AND verification_id = ?').get(migrationId, verificationId);
+    if (!row) return null;
+    return Object.freeze(JSON.parse(row.verification_json));
+  }
+
+  // Latest persisted verification for an attempt+mode, if any. Used by
+  // crash-recovery paths to resume without minting duplicate evidence.
+  findVerification({ migrationId, mode = null, cutoverAttemptId = null } = {}) {
+    this.#open(); text(migrationId, 'migrationId');
+    const rows = this.db.prepare('SELECT verification_json, created_at FROM spool_verifications WHERE migration_id = ? ORDER BY created_at DESC').all(migrationId);
+    for (const row of rows) {
+      const record = JSON.parse(row.verification_json);
+      if (mode != null && record.mode !== mode) continue;
+      if (cutoverAttemptId != null && record.cutoverAttemptId !== cutoverAttemptId) continue;
+      return Object.freeze(record);
+    }
+    return null;
+  }
+
   close() {
     if (!this.closed) {
       try { this.db.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
       this.db.close();
       this.closed = true;
+      // Small delay to allow OS to release file locks on Windows
+      const start = Date.now(); while (Date.now() - start < 50) {}
     }
   }
 }

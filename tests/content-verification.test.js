@@ -117,6 +117,40 @@ test('repair plan is deterministic, credential-reference-free and binds every op
   assert.doesNotMatch(JSON.stringify(first), /SPOOL_REF/);
 });
 
+test('repair plan binds an effect budget and fails closed on over-budget sets', () => {
+  const actual = [
+    { tenant_id: 1, id: 10, name: 'alpha', amount: 12.5 },
+    { tenant_id: 1, id: 11, name: 'changed', amount: 20 },
+    { tenant_id: 9, id: 99, name: 'extra', amount: 1 }
+  ];
+  const verification = verifyContentProjection({ expectedRows: expected, actualRows: actual, ...config });
+  const base = {
+    migrationId: 'migration-1',
+    planId: PLAN_ID,
+    sourceSnapshotId: SNAPSHOT_ID,
+    targetIdentity,
+    targetContractId: TARGET_CONTRACT_ID,
+    verification
+  };
+  // Absent budget binds exactly the derived set (no slack).
+  const exact = createRepairPlan(base);
+  assert.equal(exact.effectBudget.maxOperations, 3);
+  assert.equal(exact.operations.length, 3);
+  // Explicit sufficient budget is recorded in the plan identity.
+  const generous = createRepairPlan({ ...base, effectBudget: { maxOperations: 10 } });
+  assert.equal(generous.effectBudget.maxOperations, 10);
+  assert.notEqual(generous.repairPlanId, exact.repairPlanId);
+  // Over-budget fails closed.
+  assert.throws(
+    () => createRepairPlan({ ...base, effectBudget: { maxOperations: 2 } }),
+    error => error?.code === 'REPAIR_BUDGET_EXCEEDED'
+  );
+  assert.throws(
+    () => createRepairPlan({ ...base, effectBudget: { maxOperations: -1 } }),
+    error => error?.code === 'INVALID_REPAIR_PLAN_INPUT'
+  );
+});
+
 test('verified content cannot produce a repair plan', () => {
   const verification = verifyContentProjection({ expectedRows: expected, actualRows: expected, ...config });
   assert.throws(

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "description": "Maps SPOOL product capabilities to the industrial PostgreSQL qualification evidence that proves them. Evidence is in qualification/<runId>/ and verified via sha256sums.",
+  "evidenceClasses": {
+    "LOCAL": "Developer-local run (dirty worktree allowed, not release-grade). Produced by `npm run qualify:postgres:ci` on a developer machine.",
+    "CI": "CI PR gate run (clean worktree required for release-grade). Same harness, enforced via SPOOL_COMMIT_SHA and dirty check; releaseGrade = !dirty.",
+    "QUALIFICATION": "Longer profiles (SMALL/MEDIUM) with larger scale and CDC soak, same evidence bundle schema but larger rows/duration.",
+    "RELEASE": "Immutable GitHub release with attached evidence bundle checksums and publication via scripts/publish-release.sh (requires SPOOL_RELEASE_PRIVATE_KEY)."
+  },
+  "mappings": [
+    { "capability": "postgres:insert_rows", "scenario": "postgres.target.load", "evidence": ["metrics.json:postgres.target.load.rowsPerSec", "raw.jsonl:scenario_completed", "manifest.json:datasetId"] },
+    { "capability": "postgres:bulk_copy_write", "scenario": "postgres.bulk.load", "evidence": ["metrics.json:postgres.bulk.load", "raw.jsonl:bulk_load_completed"] },
+    { "capability": "postgres:read_after_write_verify", "scenario": "postgres.content-exact.verification", "evidence": ["metrics.json:postgres.content-exact.verification", "raw.jsonl:verification_completed"] },
+    { "capability": "postgres:repairExecution", "scenario": "postgres.repair.load", "evidence": ["metrics.json:postgres.repair.load", "raw.jsonl:repair_completed", "failures.json:VERIFICATION_FAILED expected then REPAIR_COMPLETE"] },
+    { "capability": "postgres:cdc_stream", "scenario": "postgres.cdc.soak", "evidence": ["metrics.json:postgres.cdc.soak", "raw.jsonl:cdc_chunk_captured", "raw.jsonl:cdc_cursor_restart", "raw.jsonl:slot_loss_fail_closed"] },
+    { "capability": "postgres:fencing", "scenario": "postgres.workers.load", "evidence": ["metrics.json:postgres.workers.load", "raw.jsonl:worker_load_completed"] },
+    { "capability": "postgres:transactions", "scenario": "postgres.largeTransactions", "evidence": ["metrics.json:postgres.largeTransactions", "raw.jsonl:large_transactions_completed"] },
+    { "capability": "source:snapshotBinding", "scenario": "postgres.database-source.load", "evidence": ["metrics.json:postgres.database-source.load", "raw.jsonl:database_source_completed"] },
+    { "capability": "target:atomicBatchLedger", "scenario": "postgres.crashRecovery", "evidence": ["raw.jsonl:initial_run_completed", "raw.jsonl:crash_child_ready", "raw.jsonl:crash_kill_signal", "raw.jsonl:crash_recovery_checkpoint", "metrics.json:postgres.crashRecovery.rpoRto"] },
+    { "capability": "target:reconcileAfterCrash", "scenario": "postgres.crashRecovery", "evidence": ["raw.jsonl:crash_recovery_checkpoint", "raw.jsonl:crash_kill_recovery_completed", "spool_internal.batch_ledger reconciliation"] }
+  ],
+  "explicitBoundaries": {
+    "credentialSeparation": "PostgreSQL qualification uses a single superuser (spooltest) for setup and target writes for harness simplicity. Least-privilege separation (writer vs reader) is proven separately in mssql-production-conformance via spool_reader (see .github/workflows/ci.yml mssql job and tests/conformance/mssql-*.test.js). PostgreSQL least-privilege reader proof is an explicit non-goal for the CI profile.",
+    "evidenceClasses": "LOCAL/CI/QUALIFICATION/RELEASE are logical tiers on the same evidence schema (manifest.json releaseGrade flag + dirty check). No separate code paths; promotion is by scale and cleanliness (CI requires clean worktree and commit SHA). LARGE/INDUSTRIAL profiles are defined but not run in PR gate due to duration (documented in profiles.js).",
+    "faultInjectorWiring": "Fault injectors are wired into the production Postgres target (TARGET_* points) and MigrationRunner (TARGET_* and checkpoint points). CDC/verify/repair deep fault points beyond target commit remain explicit non-goals for CI; they are covered by unit-level fault tests and the conformance suite's faultAfterTargetCommit injection."
+  }
+}
