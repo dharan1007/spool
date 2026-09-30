@@ -51,6 +51,41 @@ that — never `PASS`.
 - `node scripts/static-check.js` → PASS (19 required artifacts, stable
   SQLite runtime, no source-network primitives, JS syntax valid).
 
+### R6 — Standalone runner `--profile quick` (STEP 21 proof)
+
+- Command: `node scripts/qualify/run-standalone.js --profile quick`
+- SHA `81ffe72`, tree clean at start and end; evidence dir
+  `qualification/standalone-quick-2026-09-30T18-15-08-280Z` (gitignored).
+- Result: **PASS**, exit 0, self-verification OK.
+- Stages (all PASS): disk-preflight (conformance tier, 4.54 GiB free),
+  dependency-validation (`npm ls --depth=0`), static-check (marker
+  `Static release check passed`), core-unit (12 tests), browser-source
+  (8 tests). Aggregate: **20 tests / 20 pass / 0 fail / 0 skipped**,
+  class `SMOKE`, manifest binds git SHA start==end and clean tree.
+
+### R7 — Standalone runner `--profile postgres` with live PostgreSQL (STEP 21 proof)
+
+- Command: `node scripts/qualify/run-standalone.js --profile postgres`
+  with `spooltest.env` loaded; SHA `4d605fc`, clean tree.
+- Result: **PASS**, exit 0, self-verification OK.
+- Stages: disk-preflight PASS; `postgres-probe` PASS (316ms,
+  `LIVE_PG_PROBE OK` + meta: host 127.0.0.1:5433, database spooltest,
+  user spooltest, `PostgreSQL 17.5 on x86_64-windows`, wal_level
+  logical); `postgres-live-suite` PASS (339s).
+- Aggregate: **586 tests / 566 pass / 0 fail / 20 skipped / 566 executed**.
+  The 20 skips are exactly the allowlisted set enforced by the stage
+  contract (`FULL_SUITE_SKIP_ALLOW`): 8 SQL Server, 7 MySQL, 3 SIGKILL on
+  Windows, 2 POSIX-only. Any other skip would have forced NOT_EXECUTED.
+- Class reported: **NOT_ESTABLISHED** — correct, because no workload
+  envelope is bound in this profile (class-claim gate, commit `4d605fc`).
+
+### R8 — Adversarial qualification suite (STEP 22 proof)
+
+- Command: `node --test tests/qualify-standalone.test.js`
+- Result: **20 / 20 passed / 0 failed / 0 skipped**, exit 0.
+- Covers all 18 section-11 invariants plus sound-PASS happy path plus the
+  workload-gated class claim.
+
 ### PostgreSQL live status summary
 
 | Area | Tests | Live result |
@@ -61,6 +96,8 @@ that — never `PASS`.
 | Cutover crash matrix | 3 executed + 3 WIN32 skips | PASS (R4, R5) |
 | Verification, repair, lease/fencing, catalog, snapshot, soak, fault-injection | all gated | PASS (R4, R5) |
 | **Total formerly-gated PG tests executed** | **72** | **0 failures** |
+| Standalone runner profiles (R6 quick, R7 postgres) | 5 stages each | PASS, self-verified, exit 0 |
+| Adversarial qualification suite (R8) | 20 | PASS |
 
 ## Environment
 
@@ -105,7 +142,12 @@ boundaries and fail-closed malformed inputs.
 
 - Run logs for R2-R5 were captured during execution
   (`%TEMP%\opencode\*.log`); counts above are transcribed verbatim.
+- R6/R7/R8 evidence lives in gitignored
+  `qualification/standalone-*` directories with `sha256sums.txt`; the
+  runner's `--verify` command re-checks checksums, file set, stage logs,
+  counts, git binding and class claim independently (fails closed).
 - No evidence file contains secret values (record scanned against the env
   file; only `password_encryption` setting names appear).
-- CI_CORRECTNESS profile run (Step 28) is NOT YET EXECUTED; no class claim
-  exists until it is.
+- CI_CORRECTNESS profile run (Step 28) is NOT YET EXECUTED; every profile
+  currently reports `NOT_ESTABLISHED` for workload-requiring classes until
+  the 100k-row/30s-CDC envelope is bound.

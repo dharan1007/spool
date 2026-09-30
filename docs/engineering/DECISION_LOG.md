@@ -121,3 +121,26 @@ tests. PILOT+ tiers are blocked by disk policy (D2) and by CI_CORRECTNESS
 not yet being established.
 **Why:** sections 23/24; claiming higher classes without evidence is
 forbidden (section 25).
+
+## D11 — Class claims are gated on bound workload evidence
+
+**Date:** 2026-09-30
+**Decision:** `qualificationClass` may only be `CI_CORRECTNESS`/`PILOT`
+when the run is PASS **and** the profile's workload envelope is bound in
+the manifest; otherwise `NOT_ESTABLISHED`. The verifier independently
+checks `class-claim` and `workload-claim`.
+**Why:** a live `--profile postgres` run initially reported
+`CI_CORRECTNESS` with `workload: null` — evidence-less class claim,
+exactly what section 25 forbids. Fixed in `4d605fc` with adversarial test
+20.
+
+## D12 — Skips are an explicit profile contract
+
+**Date:** 2026-09-30
+**Decision:** each `node --test` stage declares `skipAllow` patterns
+(`FULL_SUITE_SKIP_ALLOW` = SQL Server, MySQL, SIGKILL, POSIX-only tests on
+this host). A skip outside the contract makes the mandatory stage
+NOT_EXECUTED, which prevents overall PASS. Skip counts are cross-checked
+against named skip lines so unattributable skips fail closed.
+**Why:** section 10 ("a skipped mandatory test is NOT_EXECUTED, not PASS");
+counting skip numbers alone cannot prove *which* tests skipped.

@@ -35,11 +35,11 @@ nothing is estimated. States:
 | C-12 | SIGKILL crash recovery at every boundary | P1 | real SIGKILL matrix | PARTIAL | PARTIAL | NOT_EXECUTED | P1 | 3 tests WIN32-skipped | prior | needs POSIX host to qualify |
 | C-13 | Built-browser smoke of app surface | P1 | launched-browser evidence | PARTIAL | NONE | NOT_EXECUTED | P1 | `scripts/browser-smoke.py` | prior | not executed this session |
 | C-14 | Main blocked-Autopilot recovery fixes preserved | — | merged-suite proof | COMPLETE | PASSING | QUALIFIED | — | `tests/autopilot-recovery.test.js` in R5 | `1d3b3a6` | 12 listed behaviors covered by main's tests |
-| Q-01 | Standalone qualification runner profiles | P0 | `run-standalone.js` 5 profiles | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned `scripts/qualify/run-standalone.js`) | — | Step 21 |
-| Q-02 | Qualification outcome model + manifest binding | P0 | PASS/FAIL/NOT_EXECUTED/BLOCKED/NOT_APPLICABLE | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned) | — | Step 21; §10 manifest fields |
-| Q-03 | Adversarial qualification tests (18 invariants) | P0 | fail-closed proofs | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned `tests/qualify-*.test.js`) | — | Step 22 |
-| Q-04 | CI_CORRECTNESS profile execution | P0 | ≥100k rows, ≥30s real CDC + mandatory tests | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned evidence bundle) | — | Step 28; envelope = `PROFILE_DEFINITIONS.CI` |
-| Q-05 | Evidence writer/verifier/checksums | P1 | tamper-detection tests | PARTIAL | PASSING | TESTED | — | `tests/qualify-harness.test.js` (evidence rows) | prior | must be reused by Q-01, not duplicated |
+| Q-01 | Standalone qualification runner profiles | P0 | `run-standalone.js` 5 profiles | COMPLETE | PASSING | QUALIFIED | — | `scripts/qualify/run-standalone.js`; R6/R7 quick+postgres runs | `821aa6b` | STEP 21; exit 0 only on PASS, self-verifying |
+| Q-02 | Qualification outcome model + manifest binding | P0 | PASS/FAIL/NOT_EXECUTED/BLOCKED/NOT_APPLICABLE | COMPLETE | PASSING | QUALIFIED | — | manifest schema v1 (§10 fields), `evaluateOverall` | `821aa6b` | mandatory NOT_EXECUTED/BLOCKED prevent PASS |
+| Q-03 | Adversarial qualification tests (18 invariants) | P0 | fail-closed proofs | COMPLETE | PASSING | QUALIFIED | — | `tests/qualify-standalone.test.js` (20/20) | `81ffe72`, `4d605fc` | STEP 22; verifier fails closed on every contradiction |
+| Q-04 | CI_CORRECTNESS profile execution | P0 | ≥100k rows, ≥30s real CDC + mandatory tests | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned: workload envelope stage bound into correctness profile) | — | Step 28; class claims gated until then (`4d605fc`) |
+| Q-05 | Evidence writer/verifier/checksums | P1 | tamper-detection tests | COMPLETE | PASSING | QUALIFIED | — | `tests/qualify-harness.test.js` + adversarial tests 4/5/14/15 | `821aa6b` | reused by runner (no duplicate implementation) |
 | D-01 | CDC drain/cutover hang: root cause established | P0 | captured position/worker/barrier state | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | scratch probes on `wip/` branch | — | Step 23; no timeouts-as-success |
 | D-02 | Documented drain state-machine invariant | P0 | authoritative lifecycle doc | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned docs entry) | — | Step 24 |
 | D-03 | Drain hang root-cause fix | P0 | repro passes + no regression | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned) | — | Step 25; DRAIN_BLOCKED/OPERATOR_ACTION_REQUIRED if unresolved |
@@ -55,39 +55,37 @@ nothing is estimated. States:
 
 ### IMPLEMENTATION COMPLETION
 
-- `COMPLETE`: **18**
-- `PARTIAL`: **9** (C-08, C-09, C-12, C-13, Q-05, D-04, H-01, H-02, E-01)
-- `NOT_STARTED`: **9** (Q-01..Q-04, D-01..D-03, H-03, H-04)
-- Report: **18/36 complete (9 partial, 9 not started)**
+- `COMPLETE`: **22**
+- `PARTIAL`: **8** (C-08, C-09, C-12, C-13, D-04, H-01, H-02, E-01)
+- `NOT_STARTED`: **6** (Q-04, D-01, D-02, D-03, H-03, H-04)
+- Report: **22/36 complete (8 partial, 6 not started)**
 
 ### QUALIFICATION READINESS
 
-- `QUALIFIED` (live evidence executed and passed): **18**
-- `TESTED` (unit/integration only): **3** (C-08, C-09, Q-05)
-- `NOT_EXECUTED`: **15**
-- Report: **18/36 qualified; 15 not executed**
+- `QUALIFIED` (live evidence executed and passed): **22**
+- `TESTED` (unit/integration only): **2** (C-08, C-09)
+- `NOT_EXECUTED`: **12**
+- Report: **22/36 qualified; 12 not executed**
 
 ### QUALIFICATION CLASS
 
 - Target class: **CI_CORRECTNESS** (envelope: `PROFILE_DEFINITIONS.CI` =
   100,000 rows, 30s real CDC, plus all mandatory correctness tests).
-- Current state: **NOT ESTABLISHED** — Q-04 has not been executed; no class
-  claim may be made until every mandatory CI_CORRECTNESS requirement in this
-  register is QUALIFIED.
+- Current state: **NOT ESTABLISHED** — Q-04 has not been executed; profiles
+  that PASS without a bound workload correctly report `NOT_ESTABLISHED`
+  (class-claim gate, commit `4d605fc`).
 
 ### P0 BLOCKERS
 
-1. Q-01 runner absent
-2. Q-02 outcome model absent
-3. Q-03 adversarial qualification tests absent
-4. Q-04 CI_CORRECTNESS run not executed
-5. D-01 drain-hang root cause not established
-6. D-02 drain invariant not documented
-7. D-03 drain fix not implemented
-8. D-04 permanent CDC drain/cutover/restart tests incomplete
+1. Q-04 CI_CORRECTNESS run not executed (workload envelope not yet bound
+   into the correctness profile)
+2. D-01 drain-hang root cause not established
+3. D-02 drain invariant not documented
+4. D-03 drain fix not implemented
+5. D-04 permanent CDC drain/cutover/restart tests incomplete
 
-**P0 BLOCKERS: 8** — each prevents release regardless of the percentages
-above.
+**P0 BLOCKERS: 5** — each prevents release regardless of the percentages
+above. (Was 8; Q-01/Q-02/Q-03 resolved by `821aa6b`/`81ffe72`/`4d605fc`.)
 
 ### EXTERNAL BLOCKERS
 

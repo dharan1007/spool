@@ -36,16 +36,16 @@ progress" below for the exact step cursor.
 | 17 | Integrate unique industrial content | DONE (merge `b80e534`) |
 | 18 | Preserve main's blocked-Autopilot fixes | DONE — `tests/autopilot-recovery.test.js` and main-side tests execute and pass in the merged suite |
 | 19 | Focused tests per integration unit | DONE throughout |
-| 20 | Engineering state documents (this file set) | DONE — see commit containing `docs/engineering/*` |
-| 21 | Standalone qualification runner profiles | NOT STARTED (`scripts/qualify/run-standalone.js`) |
-| 22 | Adversarial qualification-runner tests (18 invariants) | NOT STARTED |
-| 23 | Reproduce CDC drain/cutover hang live | NOT STARTED |
+| 20 | Engineering state documents (this file set) | DONE (commit `ee4885f`) |
+| 21 | Standalone qualification runner profiles | DONE (`821aa6b`, fix `4d605fc`) — quick + postgres profiles executed end-to-end |
+| 22 | Adversarial qualification-runner tests (18 invariants) | DONE (`81ffe72`) — 20/20 pass (18 invariants + happy path + class-gate) |
+| 23 | Reproduce CDC drain/cutover hang live | NOT STARTED (next) |
 | 24 | Document intended CDC drain state-machine invariant | NOT STARTED |
 | 25 | Fix root cause (no timeout-as-success) | NOT STARTED |
-| 26 | Promote scratch repros to permanent tests | NOT STARTED (see GAP_REGISTER G-23..G-28) |
+| 26 | Promote scratch repros to permanent tests | NOT STARTED (see GAP_REGISTER D-04) |
 | 27 | PostgreSQL correctness/red-team suite | NOT STARTED |
-| 28 | CI_CORRECTNESS profile (only when prerequisites ready) | NOT STARTED |
-| 29 | Record evidence | PARTIAL (see QUALIFICATION_EVIDENCE.md; CI_CORRECTNESS run pending) |
+| 28 | CI_CORRECTNESS profile (only when prerequisites ready) | NOT STARTED — needs workload envelope stage bound into correctness profile (100k rows/30s CDC) |
+| 29 | Record evidence | PARTIAL (R1-R7 in QUALIFICATION_EVIDENCE.md; CI_CORRECTNESS run pending) |
 | 30 | Push integration branch (never main) | NOT STARTED |
 
 ## Completed changes (commits on this lineage)
@@ -74,6 +74,15 @@ progress" below for the exact step cursor.
   acquire releases the inner lock on post-acquire failure (pre-existing
   defects from first live execution of write-barrier conformance).
 - merge `b80e534`: consolidation onto `origin/main` @ `1d3b3a6`.
+- `ee4885f` docs: durable engineering state files (STEP 20).
+- `821aa6b` feat: standalone qualification runner
+  (`scripts/qualify/run-standalone.js`) + live PostgreSQL probe
+  (`scripts/qualify/pg-probe.js`) (STEP 21).
+- `81ffe72` test: adversarial qualification suite, 18 section-11 invariants
+  (STEP 22); also fixes `classifyStage` dropping counts/markers.
+- `80fddd9` fix: npm version bound into environment evidence on Windows.
+- `4d605fc` fix: CI_CORRECTNESS/PILOT class claims require a bound workload
+  envelope (workload-claim + class-claim verifier rules; adversarial test 20).
 
 ## Tested commits and commands (resume exactly)
 
@@ -99,6 +108,13 @@ npm run build
 
 # Disk gate (C: must stay >= 8 GiB free for load/correctness tiers)
 node -e "import('./scripts/qualify/disk-preflight.js').then(m=>console.log(m.measureDisk(process.cwd())))"
+
+# Standalone qualification runner (exit 0 only on PASS; self-verifies)
+node scripts/qualify/run-standalone.js --list
+node scripts/qualify/run-standalone.js --profile quick
+node scripts/qualify/run-standalone.js --profile postgres   # needs spooltest.env loaded
+node scripts/qualify/run-standalone.js --verify <evidence-dir>
+node --test tests/qualify-standalone.test.js                # adversarial suite (20)
 ```
 
 ## Known failures / not executed
@@ -115,10 +131,12 @@ node -e "import('./scripts/qualify/disk-preflight.js').then(m=>console.log(m.mea
 - CDC drain/cutover lifecycle hang (scratch probes on
   `wip/cdc-drain-debugging-20260930`) — root cause NOT yet established;
   Steps 23-25 own this. Do not paper over with timeouts.
-- Qualification runner (`run-standalone.js`) and its adversarial tests do
-  not exist yet — the qualification system itself cannot yet produce
-  trustworthy PASS/FAIL evidence (Steps 21-22).
-- CI_CORRECTNESS class evidence has not been executed (Step 28).
+- CI_CORRECTNESS class evidence has not been executed (Step 28): the
+  correctness profile still lacks the bound workload envelope stage
+  (100k rows / 30s real CDC from `PROFILE_DEFINITIONS.CI`), so any PASS
+  correctly reports `NOT_ESTABLISHED` for that class.
+- Qualification runner exists and is proven on quick + postgres profiles
+  (resolved Steps 21-22; adversarial suite 20/20).
 
 ## Important architectural decisions
 
