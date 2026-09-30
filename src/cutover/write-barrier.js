@@ -133,6 +133,7 @@ async function openBarrierSession({ sourceRef, credentialBroker }) {
     await client.connect();
     const handle = randomUUID().replaceAll('-', '');
     barrierSessions.set(handle, { client, inTransaction: false, released: false });
+    if (process.env.SPOOL_TRACE_DRAIN === '1') console.error(`[trace-barrier ${Date.now()}] opened session ${handle.slice(0, 8)} map=${barrierSessions.size}`);
     return handle;
   });
 }
@@ -144,6 +145,7 @@ function barrierSession(handle) {
 }
 
 async function closeBarrierSession(handle) {
+  if (process.env.SPOOL_TRACE_DRAIN === '1') console.error(`[trace-barrier ${Date.now()}] close ${String(handle).slice(0, 8)} present=${barrierSessions.has(handle)} map=${barrierSessions.size}`);
   const entry = barrierSessions.get(handle);
   if (!entry) return;
   barrierSessions.delete(handle);
@@ -429,6 +431,7 @@ export async function acquirePostgresTableShareLockBarrier({
         return Object.freeze({ barrierId, held: true, backendPid, verifiedAt: new Date().toISOString() });
       },
       async release() {
+        if (process.env.SPOOL_TRACE_DRAIN === '1') console.error(`[trace-barrier ${Date.now()}] release enter ${barrierId.slice(0, 12)} session=${session.slice(0, 8)}`);
         const live = barrierSessions.get(session);
         if (!live || live.released) return Object.freeze({ barrierId, released: true, repeated: true });
         await rollbackAndClose();

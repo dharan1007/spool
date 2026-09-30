@@ -737,6 +737,7 @@ export function createCdcApplier({
         // Server WAL position with no change attached: the only termination
         // signal on a quiesced source. Tracked for the waterline, and wakes
         // the pump so an idle drain can observe it and stop.
+        if (process.env.SPOOL_TRACE_DRAIN === '1') console.error(`[trace-pump ${Date.now()}] heartbeat lsn=${lsn}`);
         trackPosition(lsn);
         wake();
       });
@@ -755,6 +756,7 @@ export function createCdcApplier({
         }
         if (stopped) return;
         const lsnText = typeof lsn === 'string' ? lsn : String(lsn ?? '');
+        if (process.env.SPOOL_TRACE_DRAIN === '1' && metrics.receivedMessages < 20) console.error(`[trace-pump ${Date.now()}] data tag=${message?.tag} lsn=${lsnText} queue=${queue.length}`);
         queue.push({ lsn: lsnText, message });
         wake();
       });
@@ -818,8 +820,13 @@ export function createCdcApplier({
           await stopService();
           fail('CDC_SUBSCRIBE_FAILED', 'Replication subscription ended before replication started', { slotName });
         }
+        let traceLast = Date.now();
         for (;;) {
           if (queue.length === 0) {
+            if (process.env.SPOOL_TRACE_DRAIN === '1' && Date.now() - traceLast > 15000) {
+              traceLast = Date.now();
+              console.error(`[trace-pump ${Date.now()}] waiting: queue=0 openTxn=${assembler.hasOpenTransaction()} maxSeenLsn=${maxSeenLsn} untilLsn=${untilLsn} received=${metrics.receivedMessages} applied=${metrics.appliedTransactions} reconnects=${metrics.reconnects}`);
+            }
             if (streamError) break;
             // A heartbeat may have carried the waterline while the pump was
             // waiting: observe it here instead of sleeping past the drain.

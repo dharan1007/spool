@@ -1464,9 +1464,11 @@ export class SpoolCommandService {
           // point until the cutover decision and post-verification finish.
           const waterline = sourceLockBarrier?.finalLsn
             ?? await getPostgresFlushLsn({ ref: prepared.source.sourceRef, credentialBroker: this.credentialBroker });
+          if (process.env.SPOOL_TRACE_DRAIN === '1') console.error(`[trace-drain ${Date.now()}] enter waterline=${waterline}`);
           await this.#applyCdcToWaterline({
             request, prepared, targetExecution, untilLsn: waterline, ownerEpoch: randomUUID()
           });
+          if (process.env.SPOOL_TRACE_DRAIN === '1') console.error(`[trace-drain ${Date.now()}] drain returned`);
           // The drain may be long. Do not let a stale owner cross into final
           // proof/state transitions merely because it once held this lease.
           await renewCutoverLease();
@@ -1476,12 +1478,14 @@ export class SpoolCommandService {
           // Close the target-side proof/decision race. From this point through
           // COMPLETED, external target DML is blocked by a table SHARE lock.
           await ensureTargetLockBarrier();
+          if (process.env.SPOOL_TRACE_DRAIN === '1') console.error(`[trace-cutover ${Date.now()}] target barrier ensured`);
           // Fresh FINAL_PRE_CUTOVER proof: executed now, never reused.
           const finalVerification = await verifier.verify({
             ...verifyInput,
             mode: VERIFICATION_MODE.FINAL_PRE_CUTOVER,
             expectedCdcPosition: hasCdcSlot ? (snapshotCdcBinding?.appliedLsn ?? snapshotCdcBinding?.cdcStartLsn ?? null) : null
           });
+          if (process.env.SPOOL_TRACE_DRAIN === '1') console.error(`[trace-cutover ${Date.now()}] final verify: ${finalVerification?.status}`);
           if (!finalVerification || finalVerification.status !== 'VERIFIED') {
             fail('VERIFICATION_REQUIRED', 'CUTOVER_COMMITTED requires a successful fresh final verification');
           }
@@ -2001,3 +2005,4 @@ export class SpoolCommandService {
     this.runs.close();
   }
 }
+
