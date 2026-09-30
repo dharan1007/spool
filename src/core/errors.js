@@ -17,7 +17,8 @@ const CATALOG = Object.freeze({
   WRITE_BARRIER_NOT_PROVEN: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Do not commit cutover', 'Inspect PostgreSQL lock behavior and privileges before retrying']) }),
   WRITE_BARRIER_LOST: Object.freeze({ severity: 'concurrency', retryable: true, nextActions: Object.freeze(['Do not commit or complete cutover', 'Re-establish the source freeze and restart the cutover recovery path']) }),
   WRITE_BARRIER_RELEASED: Object.freeze({ severity: 'concurrency', retryable: false, nextActions: Object.freeze(['Do not reuse a released barrier handle', 'Acquire a new barrier for the current attempt']) }),
-  WRITE_BARRIER_UNSAFE: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Use POSTGRES_TABLE_SHARE_LOCK instead of database read-only defaults', 'Keep the external source-routing freeze active through cutover']) })
+  WRITE_BARRIER_UNSAFE: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Use POSTGRES_TABLE_SHARE_LOCK instead of database read-only defaults', 'Keep the external source-routing freeze active through cutover']) }),
+  DRAIN_BLOCKED: Object.freeze({ severity: 'environment', retryable: true, nextActions: Object.freeze(['Inspect the PostgreSQL replication stream, slot, and network path named in the details', 'Confirm source progress resumed, then continue recovery from the recorded FAILED_RECOVERABLE state', 'Never treat a timed-out drain as a completed drain']) })
 });
 
 export const ERROR_CATALOG = CATALOG;

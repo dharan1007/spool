@@ -1762,7 +1762,7 @@ export class SpoolCommandService {
   // caller's leased execution. Serialized assembly, fenced ledger-evidenced
   // commits, CAS+fenced checkpoint persistence, and source acknowledgement
   // strictly after durability. The caller owns the execution lifecycle.
-  async #applyCdcToWaterline({ request, prepared, targetExecution, untilLsn = null, maxTransactions = null, ownerEpoch }) {
+  async #applyCdcToWaterline({ request, prepared, targetExecution, untilLsn = null, maxTransactions = null, ownerEpoch, drainStallTimeoutMs = null }) {
     const binding = this.runs.getSnapshotCdcBinding(request.migrationId);
     if (!binding?.cdcSlot) fail('CDC_BINDING_REQUIRED', 'CDC apply requires a snapshot/CDC binding with a slot');
     if (!binding?.cdcPublication) fail('CDC_BINDING_REQUIRED', 'CDC apply requires a bound publication');
@@ -1816,9 +1816,21 @@ export class SpoolCommandService {
       startLsn: binding.appliedLsn ?? binding.cdcStartLsn,
       untilLsn,
       maxTransactions,
+      ...(drainStallTimeoutMs != null ? { drainStallTimeoutMs } : {}),
       stagingDir: join(this.#migrationSnapshotDir(request.migrationId), 'cdc-staging')
     });
-    const summary = await applier.run();
+    let summary;
+    try {
+      summary = await applier.run();
+    } catch (error) {
+      // DRAIN_BLOCKED: the bounded drain can no longer make progress. The
+      // canonical failure state must durably explain why progress stopped
+      // (never a success, never a silent hang), then the diagnosis is
+      // rethrown to the caller unchanged.
+      if (error?.code !== 'DRAIN_BLOCKED') throw error;
+      this.#recordDrainBlocked({ request, prepared, binding, untilLsn, error });
+      throw error;
+    }
     this.#recordCdcProgress(request.migrationId, {
       receivedLsn: summary?.receivedLsn ?? null,
       appliedLsn: summary?.appliedLsn ?? binding.appliedLsn ?? binding.cdcStartLsn,
@@ -1827,17 +1839,62 @@ export class SpoolCommandService {
     return summary;
   }
 
+  // DRAIN_BLOCKED bookkeeping: durably transition the migration to
+  // FAILED_RECOVERABLE with reason DRAIN_BLOCKED and the pump's section-13
+  // capture set as evidence, so the state record itself explains why drain
+  // progress stopped. ILLEGAL_STATE_TRANSITION is tolerated (a concurrent
+  // transition already moved the state); the original DRAIN_BLOCKED error is
+  // rethrown by the caller either way.
+  #recordDrainBlocked({ request, prepared, binding, untilLsn, error }) {
+    const durable = this.#durableState(request.migrationId);
+    const cutover = this.runs.cutover(request.migrationId);
+    const phase = [MIGRATION_STATES.CUTOVER_ARMED, MIGRATION_STATES.FINAL_DRAIN, MIGRATION_STATES.FINAL_VERIFY].includes(durable?.currentState)
+      ? 'final-drain'
+      : 'catch-up';
+    try {
+      this.#durableTransition(request.migrationId, MIGRATION_STATES.FAILED_RECOVERABLE, {
+        principal: request.principal,
+        reason: 'DRAIN_BLOCKED',
+        planId: prepared.plan.planId,
+        sourceStateId: binding.sourceStateId,
+        targetContractId: prepared.targetPreflight.targetContractId,
+        evidence: {
+          drainBlocked: {
+            ...(error.details ?? {}),
+            waterline: untilLsn ?? error.details?.waterline ?? null,
+            durableStateBefore: durable?.currentState ?? null,
+            phase,
+            cutoverStatus: cutover?.status ?? null,
+            cutoverAttemptId: cutover?.cutoverAttemptId ?? null
+          }
+        },
+        context: { drainBlocked: true }
+      });
+    } catch (transitionError) {
+      if (transitionError?.code !== 'ILLEGAL_STATE_TRANSITION') throw transitionError;
+    }
+  }
+
   // Catch up CDC through a waterline using the canonical production path:
   // contract-validated slot, serialized fenced apply, CAS checkpoints, ack
   // after durability. Allowed only after the full load is verified
   // (READY_FOR_CUTOVER), in CATCHING_UP, or during FINAL_DRAIN: streaming
   // while the full load is in flight is refused because unordered load-vs-
   // CDC commits could regress newer rows with older snapshot versions, and
-  // the snapshot-pinned VERIFYING proof requires target == snapshot. No
-  // state changes here: convergence is evidenced by checkpoints and binding
-  // progress, and proven by the FINAL_DRAIN plus fresh live-source proof.
-  async catchUpCdc(request, { untilLsn = null, maxTransactions = null } = {}) {
+  // the snapshot-pinned VERIFYING proof requires target == snapshot. No state
+  // changes for successful convergence: that is evidenced by checkpoints and
+  // binding progress, and proven by the FINAL_DRAIN plus fresh live-source
+  // proof. The one exception is an explicit DRAIN_BLOCKED failure, which
+  // durably records why progress stopped (#recordDrainBlocked).
+  async catchUpCdc(request, { untilLsn = null, maxTransactions = null, drainStallTimeoutMs = null } = {}) {
     this.#open(); requireRequest(request);
+    // Operator-tunable stall bound for this drain. The floor keeps a passed
+    // option from turning healthy drains into instant DRAIN_BLOCKED failures;
+    // a stall below the floor is still fail-closed, just not misconfigured
+    // into existence.
+    if (drainStallTimeoutMs != null && (!Number.isSafeInteger(drainStallTimeoutMs) || drainStallTimeoutMs < 1000)) {
+      fail('INVALID_CDC_DRAIN_OPTION', 'drainStallTimeoutMs must be a safe integer >= 1000');
+    }
     const binding = this.runs.getSnapshotCdcBinding(request.migrationId);
     if (!binding?.cdcSlot) fail('CDC_BINDING_REQUIRED', 'CDC catch-up requires a snapshot/CDC binding with a slot');
     // A fresh planning prepare suffices: streaming needs live refs and the
@@ -1857,7 +1914,8 @@ export class SpoolCommandService {
       await targetExecution.renewLease();
       await targetExecution.openTarget();
       return await this.#applyCdcToWaterline({
-        request, prepared, targetExecution, untilLsn, maxTransactions, ownerEpoch: randomUUID()
+        request, prepared, targetExecution, untilLsn, maxTransactions, ownerEpoch: randomUUID(),
+        drainStallTimeoutMs
       });
     } finally {
       await targetExecution.close();

@@ -26,6 +26,18 @@ const LSN = /^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/;
 // while the stream is healthy, so a stream that never starts must fail
 // loudly rather than hang the pump (or the drain, or cutover).
 const SUBSCRIBE_START_TIMEOUT_MS = 30_000;
+// No-progress watchdog for BOUNDED drains (untilLsn/maxTransactions set):
+// if no source data is received and no transaction is applied for this long
+// while the waterline is still unreached, the stream has silently stalled (or
+// an assembled transaction will never complete). Waiting forever would hang
+// drain and cutover with no explanation; a timeout must never resolve the
+// drain as success, so expiry fails DRAIN_BLOCKED with the full capture set.
+// Healthy drains terminate via watermark/heartbeat (one keepalive interval)
+// or via flowing data well inside this window. Continuous capture
+// (untilLsn == null && maxTransactions == null) is excluded: waiting
+// indefinitely for new changes is its correct behavior.
+const DRAIN_STALL_TIMEOUT_MS = 60_000;
+const DRAIN_STALL_TIMEOUT_MIN_MS = 100;
 const CDC_BATCH_DOMAIN = 'spool-cdc-batch-v1';
 
 function requireLsn(value, label) {
@@ -443,6 +455,7 @@ export function createCdcApplier({
   startLsn = null, untilLsn = null, maxTransactions = null,
   assemblerOptions = {}, stagingDir = null, debugHistoryLimit = 1000,
   maxQueueMessages = 50000, maxReconnects = 5, maxCdcTransactionMutations = 5000000,
+  drainStallTimeoutMs = DRAIN_STALL_TIMEOUT_MS,
   onTransaction = null
 } = {}) {
   if (!ref || typeof ref !== 'object') fail('INVALID_CDC_APPLY_CONFIG', 'source ref is required');
@@ -473,6 +486,10 @@ export function createCdcApplier({
   if (!Number.isSafeInteger(maxQueueMessages) || maxQueueMessages < 1) {
     fail('INVALID_CDC_APPLY_CONFIG', 'maxQueueMessages must be a positive safe integer');
   }
+  if (!Number.isSafeInteger(drainStallTimeoutMs) || drainStallTimeoutMs < DRAIN_STALL_TIMEOUT_MIN_MS) {
+    fail('INVALID_CDC_APPLY_CONFIG', `drainStallTimeoutMs must be a safe integer >= ${DRAIN_STALL_TIMEOUT_MIN_MS}`);
+  }
+  const boundedDrain = untilLsn != null || maxTransactions != null;
 
   const assembler = createCdcTransactionAssembler({ ...assemblerOptions, stagingDir });
   // Shared server-ack state (applier scope, visible to both the per-
@@ -696,6 +713,13 @@ export function createCdcApplier({
       const queue = [];
       let streamError = null;
       let stopped = false;
+      // No-progress watchdog state for bounded drains: progress means source
+      // data received or a transaction applied. Heartbeats deliberately do
+      // NOT reset it — they only feed the watermark check, which terminates
+      // healthy drains; a stream that heartbeats but never carries data or a
+      // completing transaction is exactly the livelock this must catch.
+      let lastProgressAt = Date.now();
+      let lastQueuedMessage = null;
       let roomWaiters = [];
       let notify;
       let notified = new Promise(resolve => { notify = resolve; });
@@ -757,6 +781,8 @@ export function createCdcApplier({
         if (stopped) return;
         const lsnText = typeof lsn === 'string' ? lsn : String(lsn ?? '');
         if (process.env.SPOOL_TRACE_DRAIN === '1' && metrics.receivedMessages < 20) console.error(`[trace-pump ${Date.now()}] data tag=${message?.tag} lsn=${lsnText} queue=${queue.length}`);
+        lastQueuedMessage = Object.freeze({ lsn: lsnText, tag: message?.tag ?? null });
+        lastProgressAt = Date.now();
         queue.push({ lsn: lsnText, message });
         wake();
       });
@@ -821,13 +847,28 @@ export function createCdcApplier({
           fail('CDC_SUBSCRIBE_FAILED', 'Replication subscription ended before replication started', { slotName });
         }
         let traceLast = Date.now();
+        // The watchdog starts at stream start: SUBSCRIBE_START_TIMEOUT_MS
+        // already bounds the pre-start phase.
+        lastProgressAt = Date.now();
         for (;;) {
           if (queue.length === 0) {
             if (process.env.SPOOL_TRACE_DRAIN === '1' && Date.now() - traceLast > 15000) {
               traceLast = Date.now();
-              console.error(`[trace-pump ${Date.now()}] waiting: queue=0 openTxn=${assembler.hasOpenTransaction()} maxSeenLsn=${maxSeenLsn} untilLsn=${untilLsn} received=${metrics.receivedMessages} applied=${metrics.appliedTransactions} reconnects=${metrics.reconnects}`);
+              console.error(`[trace-pump ${Date.now()}] waiting: queue=0 openTxn=${assembler.hasOpenTransaction()} maxSeenLsn=${maxSeenLsn} untilLsn=${untilLsn} received=${metrics.receivedMessages} applied=${metrics.appliedTransactions} reconnects=${metrics.reconnects} lastProgressAgoMs=${Date.now() - lastProgressAt}`);
             }
             if (streamError) break;
+            // The subscribe promise settles only when replication ENDS. A
+            // clean end (server closed without an error event) must not leave
+            // the pump waiting for messages that can no longer arrive — an
+            // unbounded wait here would be exactly the hang the drain rules
+            // forbid. Treat it as stream failure so the reconnect/terminal
+            // logic above decides the outcome.
+            if (subscribeSettled && !stopped) {
+              if (!streamError) {
+                streamError = Object.assign(new Error('Replication stream ended'), { code: 'CDC_STREAM_ENDED' });
+              }
+              break;
+            }
             // A heartbeat may have carried the waterline while the pump was
             // waiting: observe it here instead of sleeping past the drain.
             // Queue empty + no open transaction means everything dequeued is
@@ -837,7 +878,59 @@ export function createCdcApplier({
               await stopService();
               return { finished: true, resumeLsn: metrics.lastCommitLsn ?? fromLsn };
             }
-            await notified;
+            // Bounded drain with no progress for the whole stall window: the
+            // stream is silent or an assembled transaction will never
+            // complete. Fail DRAIN_BLOCKED with the full capture set — a
+            // timeout must never resolve an unresolved drain as success.
+            if (boundedDrain && Date.now() - lastProgressAt >= drainStallTimeoutMs) {
+              const stalledMs = Date.now() - lastProgressAt;
+              // load() may be synchronous (run-store adapter) or asynchronous
+              // (in-memory adapters); the capture set must never fail to
+              // assemble because of the reader.
+              let storedCheckpoint = null;
+              try { storedCheckpoint = await checkpoint.load(); } catch { /* capture what is available */ }
+              if (process.env.SPOOL_TRACE_DRAIN === '1') {
+                console.error(`[trace-pump ${Date.now()}] DRAIN_BLOCKED stalledMs=${stalledMs} waterline=${untilLsn} maxSeenLsn=${maxSeenLsn} openTxn=${assembler.hasOpenTransaction()}`);
+              }
+              fail('DRAIN_BLOCKED',
+                `CDC drain made no progress for ${stalledMs}ms (waterline ${untilLsn ?? 'n/a'}); refusing to wait indefinitely`,
+                {
+                  slotName,
+                  waterline: untilLsn,
+                  maxTransactionsRequested: maxTransactions,
+                  resumeLsn: fromLsn ?? null,
+                  lastCapturedPosition: maxSeenLsn,
+                  lastQueuedTransaction: lastQueuedMessage ? { lsn: lastQueuedMessage.lsn, tag: lastQueuedMessage.tag } : null,
+                  lastAppliedPosition: metrics.lastCommitLsn,
+                  appliedTransactions: metrics.appliedTransactions,
+                  receivedMessages: metrics.receivedMessages,
+                  lastAcknowledgedPosition: serverAck.last,
+                  durableCheckpoint: storedCheckpoint
+                    ? {
+                        receivedLsn: storedCheckpoint.receivedLsn ?? null,
+                        appliedLsn: storedCheckpoint.appliedLsn ?? null,
+                        acknowledgedLsn: storedCheckpoint.acknowledgedLsn ?? null
+                      }
+                    : null,
+                  queueDepth: queue.length,
+                  openTransaction: assembler.hasOpenTransaction(),
+                  reconnects: metrics.reconnects,
+                  streamState: 'streaming',
+                  stalledMs,
+                  drainStallTimeoutMs
+                });
+            }
+            // Wake on event OR on the stall deadline: a fully silent stream
+            // never resolves `notified`, so a plain await would still hang.
+            if (boundedDrain) {
+              const remainingMs = Math.max(1, drainStallTimeoutMs - (Date.now() - lastProgressAt));
+              await new Promise(resolve => {
+                const timer = setTimeout(resolve, remainingMs);
+                notified.then(() => { clearTimeout(timer); resolve(); }, () => { clearTimeout(timer); resolve(); });
+              });
+            } else {
+              await notified;
+            }
             continue;
           }
           const { lsn, message } = queue.shift();
@@ -898,6 +991,7 @@ export function createCdcApplier({
           // never duplication. The checkpoint's acknowledgedLsn always names
           // the last SERVER-acked LSN, honestly behind appliedLsn mid-batch.
           const { ackLsn } = await applyOneTransaction(tx);
+          lastProgressAt = Date.now();
           serverAck.pending = ackLsn;
           const ackDue = metrics.appliedTransactions - serverAck.atCount >= ACK_BATCH_TXNS
             || Date.now() - serverAck.atMs >= ACK_BATCH_MS;
