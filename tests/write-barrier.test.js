@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   WRITE_BARRIER_KINDS,
+  TARGET_WRITE_BARRIER_KINDS,
   describeBarrierKind,
   barrierIdentity,
   attestOperatorBarrier,
@@ -93,4 +94,37 @@ test('barrier identity binds migration, kind, time, LSN and attestation', () => 
   assert.notEqual(barrierIdentity({ ...base, migrationId: 'mig-2' }), first);
   assert.notEqual(barrierIdentity({ ...base, attestation: { ...base.attestation, table: 'customers' } }), first);
   assert.throws(() => barrierIdentity({ ...base, finalLsn: 'nope' }), /INVALID_BARRIER_REQUEST/);
+});
+
+// Regression: the target cutover barrier computes its identity with kind
+// POSTGRES_TARGET_TABLE_SHARE_LOCK after the inner SHARE lock is already
+// held. Rejecting that kind failed the live conformance test AND leaked the
+// held lock/session (computed identity runs after acquisition).
+test('target barrier kind is valid for identity but never as a source barrier', () => {
+  assert.deepEqual([...TARGET_WRITE_BARRIER_KINDS], ['POSTGRES_TARGET_TABLE_SHARE_LOCK']);
+  const identityInput = {
+    migrationId: 'mig-1',
+    kind: 'POSTGRES_TARGET_TABLE_SHARE_LOCK',
+    acquiredAt: '2026-09-30T00:00:00.000Z',
+    finalLsn: '0/4A1B2C0',
+    attestation: { schema: 'public', table: 'orders', role: 'target' }
+  };
+  const identity = barrierIdentity(identityInput);
+  assert.match(identity, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(identity, barrierIdentity(structuredClone(identityInput)));
+  assert.notEqual(identity, barrierIdentity({ ...identityInput, kind: 'POSTGRES_TABLE_SHARE_LOCK' }));
+
+  // Source-side description keeps its source-only contract.
+  assert.throws(
+    () => describeBarrierKind('POSTGRES_TARGET_TABLE_SHARE_LOCK'),
+    error => error?.code === 'WRITE_BARRIER_UNKNOWN'
+  );
+  assert.throws(
+    () => barrierIdentity({ ...identityInput, kind: 'MAGIC' }),
+    error => error?.code === 'WRITE_BARRIER_UNKNOWN'
+  );
+  assert.throws(
+    () => barrierIdentity({ ...identityInput, kind: 'DATABASE_READ_ONLY' }),
+    error => error?.code === 'WRITE_BARRIER_UNSAFE'
+  );
 });

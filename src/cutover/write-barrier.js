@@ -21,6 +21,14 @@ export const WRITE_BARRIER_KINDS = Object.freeze([
   'EXTERNAL_OPERATOR_BARRIER'
 ]);
 
+// Target-side barriers share the barrier identity scheme but are never valid
+// SOURCE barriers; describeBarrierKind's default allow-list stays source-only.
+export const TARGET_WRITE_BARRIER_KINDS = Object.freeze([
+  'POSTGRES_TARGET_TABLE_SHARE_LOCK'
+]);
+
+const ALL_BARRIER_KINDS = Object.freeze([...WRITE_BARRIER_KINDS, ...TARGET_WRITE_BARRIER_KINDS]);
+
 // Industrial cutover invariant:
 //
 // A source write barrier is evidence only when an independent session proves
@@ -37,7 +45,7 @@ export const WRITE_BARRIER_KINDS = Object.freeze([
 // ALTER DATABASE ... SET default_transaction_read_only is deliberately NOT a
 // barrier: it changes defaults for new sessions and does not fence existing
 // application sessions. Treating it as a fence can lose writes at cutover.
-export function describeBarrierKind(kind) {
+export function describeBarrierKind(kind, allowedKinds = WRITE_BARRIER_KINDS) {
   if (kind === 'DATABASE_READ_ONLY') {
     fail(
       'WRITE_BARRIER_UNSAFE',
@@ -48,7 +56,7 @@ export function describeBarrierKind(kind) {
   if (kind === 'APPLICATION_GATE' || kind === 'PROXY_ROUTER') {
     fail('WRITE_BARRIER_UNSUPPORTED', `Source write barrier kind ${kind} is not implemented; use POSTGRES_TABLE_SHARE_LOCK or EXTERNAL_OPERATOR_BARRIER`, { kind });
   }
-  if (!WRITE_BARRIER_KINDS.includes(kind)) fail('WRITE_BARRIER_UNKNOWN', `Unknown source write barrier kind ${kind}`, { kind });
+  if (!allowedKinds.includes(kind)) fail('WRITE_BARRIER_UNKNOWN', `Unknown write barrier kind ${kind}`, { kind });
   return kind;
 }
 
@@ -132,7 +140,15 @@ async function openBarrierSession({ sourceRef, credentialBroker }) {
     });
     await client.connect();
     const handle = randomUUID().replaceAll('-', '');
-    barrierSessions.set(handle, { client, inTransaction: false, released: false });
+    const entry = { client, inTransaction: false, released: false, connectionError: null };
+    // A barrier connection that is terminated (backend kill, idle drop) emits
+    // an asynchronous 'error' event; without a listener that crashes the
+    // process as an unhandled error instead of letting verifyHeld() fail
+    // closed with WRITE_BARRIER_LOST.
+    client.on('error', error => {
+      entry.connectionError = error;
+    });
+    barrierSessions.set(handle, entry);
     if (process.env.SPOOL_TRACE_DRAIN === '1') console.error(`[trace-barrier ${Date.now()}] opened session ${handle.slice(0, 8)} map=${barrierSessions.size}`);
     return handle;
   });
@@ -159,7 +175,7 @@ async function closeBarrierSession(handle) {
 
 export function barrierIdentity({ migrationId, kind, acquiredAt, finalLsn, attestation = null } = {}) {
   requireMigrationId(migrationId);
-  describeBarrierKind(kind);
+  describeBarrierKind(kind, ALL_BARRIER_KINDS);
   if (!Number.isFinite(Date.parse(acquiredAt ?? ''))) fail('INVALID_BARRIER_REQUEST', 'acquiredAt must be an ISO timestamp');
   if (typeof finalLsn !== 'string' || !LSN.test(finalLsn)) fail('INVALID_BARRIER_REQUEST', 'finalLsn must be a valid PostgreSQL LSN');
   return sha256Canonical(BARRIER_DOMAIN, {
@@ -484,13 +500,21 @@ export async function acquirePostgresTargetTableShareLockBarrier({
     role: 'target',
     purpose: 'freeze-target-dml-between-verification-and-cutover-decision'
   });
-  const barrierId = barrierIdentity({
-    migrationId,
-    kind: 'POSTGRES_TARGET_TABLE_SHARE_LOCK',
-    acquiredAt: inner.acquiredAt,
-    finalLsn: inner.finalLsn,
-    attestation: proof
-  });
+  let barrierId;
+  try {
+    barrierId = barrierIdentity({
+      migrationId,
+      kind: 'POSTGRES_TARGET_TABLE_SHARE_LOCK',
+      acquiredAt: inner.acquiredAt,
+      finalLsn: inner.finalLsn,
+      attestation: proof
+    });
+  } catch (error) {
+    // Never leak a held SHARE lock: if identity computation fails after the
+    // inner barrier was acquired, release it before propagating.
+    await inner.release().catch(() => {});
+    throw error;
+  }
 
   return Object.freeze({
     barrierId,
