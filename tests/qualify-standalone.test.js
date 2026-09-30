@@ -39,7 +39,7 @@ const FIXTURE_PROFILES = {
   fixture: {
     name: 'fixture',
     stages: FIXTURE_STAGES,
-    workload: null,
+    workload: { rows: 100_000, cdcDurationSeconds: 30, source: 'fixture envelope' },
     classLabel: 'CI_CORRECTNESS'
   }
 };
@@ -115,7 +115,7 @@ async function buildRun({ logs = defaultLogs(), adjustManifest = null, skipCheck
     environmentVersions: { node: 'v22.0.0', npm: '11.0.0', platform: 'win32', arch: 'x64', release: 'test' },
     environmentDigest: 'sha256:fixture',
     databaseVersions: { postgres: 'PostgreSQL 17.5' },
-    workload: null,
+    workload: FIXTURE_PROFILES.fixture.workload,
     testCounts: aggregate,
     failures: [],
     violations: [],
@@ -382,4 +382,18 @@ test('19. sound evidence verifies as PASS end to end', async () => {
     treeCleanEnd: manifest.treeCleanEnd
   }, SPECS);
   assert.equal(derived.result, 'PASS');
+});
+
+test('20. CI_CORRECTNESS class cannot be claimed without a bound workload envelope', async () => {
+  const noWorkloadProfile = {
+    name: 'fixture',
+    stages: FIXTURE_STAGES,
+    workload: null,
+    classLabel: 'CI_CORRECTNESS'
+  };
+  const { dir } = await buildRun();
+  await assert.rejects(
+    verifyQualification(dir, { profiles: { fixture: noWorkloadProfile } }),
+    /class-claim|workload-claim/
+  );
 });

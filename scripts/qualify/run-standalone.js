@@ -453,8 +453,14 @@ export function evaluateOverall(stages, binding = {}, specsById = {}) {
   return { result: 'PASS', violations };
 }
 
+// Classes whose definition includes a workload envelope (section 23:
+// CI_CORRECTNESS needs >=100k rows with >=30s real CDC; PILOT needs its own
+// envelope). A PASS without a bound workload can never claim them.
+const WORKLOAD_REQUIRED_CLASSES = new Set(['CI_CORRECTNESS', 'PILOT']);
+
 function classFor(profile, result) {
   if (result !== 'PASS') return 'NOT_ESTABLISHED';
+  if (WORKLOAD_REQUIRED_CLASSES.has(profile.classLabel) && !profile.workload) return 'NOT_ESTABLISHED';
   return profile.classLabel;
 }
 
@@ -862,6 +868,9 @@ export async function verifyQualification(dir, { profiles: profilesMap = PROFILE
   const expectedClass = classFor(profile, manifest.result);
   if (manifest.qualificationClass !== expectedClass) {
     push('class-claim', `qualificationClass '${manifest.qualificationClass}' is not justified by result ${manifest.result}`);
+  }
+  if (JSON.stringify(manifest.workload ?? null) !== JSON.stringify(profile.workload ?? null)) {
+    push('workload-claim', 'manifest workload does not match the profile contract');
   }
   const started = Date.parse(manifest.startedAt ?? '');
   const ended = Date.parse(manifest.endedAt ?? '');
