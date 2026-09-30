@@ -90,9 +90,16 @@ export function postgresDeleteManifestEvidence(deletions) {
   if (!Array.isArray(deletions)) fail('INVALID_DELETE_MANIFEST', 'Delete manifest must be an array');
   const manifest = deletions.map(entry => {
     if (!entry || typeof entry !== 'object') fail('INVALID_DELETE_MANIFEST', 'Delete manifest entries must be objects');
-    requiredHash('expectedRowHash', entry.expectedRowHash);
+    // Precondition kinds: 'full-row' carries an expected content hash proven
+    // against the live row; 'key-only' (CDC without REPLICA IDENTITY FULL)
+    // deletes by key and is explicitly marked in evidence — never silently
+    // treated as a proven delete.
+    const precondition = entry.precondition ?? 'full-row';
+    if (precondition !== 'full-row' && precondition !== 'key-only') fail('INVALID_DELETE_MANIFEST', 'Delete precondition must be full-row or key-only');
+    if (precondition === 'full-row') requiredHash('expectedRowHash', entry.expectedRowHash);
+    else if (entry.expectedRowHash != null) fail('INVALID_DELETE_MANIFEST', 'Key-only delete must not carry an expected row hash');
     if (typeof entry.keyId !== 'string' || !HASH.test(entry.keyId)) fail('INVALID_DELETE_MANIFEST', 'Delete manifest keyId must be a canonical sha256 identity');
-    return { keyId: entry.keyId, expectedRowHash: entry.expectedRowHash };
+    return { keyId: entry.keyId, expectedRowHash: entry.expectedRowHash ?? null, precondition };
   }).sort((left, right) => (left.keyId < right.keyId ? -1 : left.keyId > right.keyId ? 1 : 0));
   return Object.freeze({ rowCount: manifest.length, payloadHash: sha256Canonical(DELETE_MANIFEST_DOMAIN, manifest) });
 }
@@ -202,8 +209,35 @@ export async function ensurePostgresMetadata({ targetRef, credentialBroker } = {
           target_database text NOT NULL,
           target_schema text NOT NULL,
           target_table text NOT NULL,
-          committed_at timestamptz NOT NULL DEFAULT clock_timestamp()
+          committed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+          inserted integer CHECK (inserted IS NULL OR inserted >= 0),
+          updated integer CHECK (updated IS NULL OR updated >= 0),
+          deleted integer CHECK (deleted IS NULL OR deleted >= 0),
+          skipped_missing integer CHECK (skipped_missing IS NULL OR skipped_missing >= 0),
+          batch_kind text NOT NULL DEFAULT 'load' CHECK (batch_kind IN ('load', 'cdc')),
+          source_xid bigint,
+          source_commit_lsn pg_lsn
         )
+      `);
+      // Outcome + provenance columns for databases bootstrapped before they
+      // existed. Ledger identity never depends on them.
+      for (const column of ['inserted', 'updated', 'deleted', 'skipped_missing']) {
+        await client.query(`
+          ALTER TABLE ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
+          ADD COLUMN IF NOT EXISTS ${quoteIdentifier(column)} integer CHECK (${quoteIdentifier(column)} IS NULL OR ${quoteIdentifier(column)} >= 0)
+        `);
+      }
+      await client.query(`
+        ALTER TABLE ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
+        ADD COLUMN IF NOT EXISTS batch_kind text NOT NULL DEFAULT 'load'
+      `);
+      await client.query(`
+        ALTER TABLE ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
+        ADD COLUMN IF NOT EXISTS source_xid bigint
+      `);
+      await client.query(`
+        ALTER TABLE ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
+        ADD COLUMN IF NOT EXISTS source_commit_lsn pg_lsn
       `);
       await client.query(`
         CREATE TABLE IF NOT EXISTS ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEASE_TABLE)} (
@@ -225,12 +259,36 @@ export async function ensurePostgresMetadata({ targetRef, credentialBroker } = {
   validateMetadataDescription(rows);
 }
 
+// Metadata bootstrap is idempotent DDL, but it costs ~10 statements plus a
+// catalog scan per call — unusable on hot paths (fence renewal per CDC
+// transaction). Cache per target; a missing-table error invalidates the
+// entry and retries once, so DROPped metadata (tests, restore) recovers
+// instead of failing closed on a stale assumption.
+const ensuredMetadataTargets = new Set();
+
+function metadataCacheKey(targetRef) {
+  return `${targetRef.database ?? ''}.${targetRef.schema ?? ''}.${targetRef.table ?? ''}`;
+}
+
+export function invalidatePostgresMetadataCache(targetRef = null) {
+  if (targetRef) ensuredMetadataTargets.delete(metadataCacheKey(targetRef));
+  else ensuredMetadataTargets.clear();
+}
+
+async function ensurePostgresMetadataCached({ targetRef, credentialBroker }) {
+  const key = metadataCacheKey(targetRef);
+  if (!ensuredMetadataTargets.has(key)) {
+    await ensurePostgresMetadata({ targetRef, credentialBroker });
+    ensuredMetadataTargets.add(key);
+  }
+}
+
 export async function acquirePostgresLease({ targetRef, credentialBroker, resource, owner, ttlMs } = {}) {
   requiredString('resource', resource); requiredString('owner', owner);
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) fail('INVALID_POSTGRES_RUNTIME_CONFIG', 'ttlMs must be a positive safe integer');
-  await ensurePostgresMetadata({ targetRef, credentialBroker });
+  await ensurePostgresMetadataCached({ targetRef, credentialBroker });
 
-  const result = await withPostgresClient({ targetRef, credentialBroker }, async client => {
+  const acquire = () => withPostgresClient({ targetRef, credentialBroker }, async client => {
     await client.query('BEGIN');
     try {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [resource]);
@@ -271,6 +329,22 @@ export async function acquirePostgresLease({ targetRef, credentialBroker, resour
       throw error;
     }
   });
+
+  let result;
+  try {
+    result = await acquire();
+  } catch (error) {
+    // The metadata cache may be stale (schema dropped out of band): retry
+    // once after re-bootstrapping instead of failing on the assumption. The
+    // credential broker wraps raw pg errors (losing the 42P01 code), so
+    // match the undefined-table message as well as the code.
+    const message = String(error?.message ?? '');
+    const missingTable = error?.code === '42P01' || /relation .* does not exist|undefined table/i.test(message);
+    if (!missingTable) throw error;
+    invalidatePostgresMetadataCache(targetRef);
+    await ensurePostgresMetadataCached({ targetRef, credentialBroker });
+    result = await acquire();
+  }
 
   if (result.status === 'HELD') fail('LEASE_HELD', 'PostgreSQL execution lease is held by another owner', { resource, owner: result.owner });
   if (result.status === 'TOKEN_OVERFLOW') fail('FENCING_TOKEN_EXHAUSTED', 'PostgreSQL fencing token exceeded the supported safe integer range', { resource });
@@ -358,20 +432,39 @@ async function checkRepairFence(client, target, fencingToken, operation = 'repai
   }
 }
 
+// Live contract re-validation is a catalog scan (~50ms): unusable per CDC
+// transaction at volume. Cache the last proven contract per table for
+// CONTRACT_CACHE_TTL_MS; every commit still validates, against a contract
+// proven fresh within the TTL. A mid-window DDL change is caught at the next
+// refresh, and the cutover proofs re-resolve the contract from scratch — so
+// no commit ever relies on an unboundedly stale contract.
+const CONTRACT_CACHE_TTL_MS = 10_000;
+const provenContracts = new Map();
+
+function contractCacheKey(targetRef) {
+  return `${targetRef.database ?? ''}.${targetRef.schema ?? ''}.${targetRef.table ?? ''}`;
+}
+
 async function checkRepairContract(client, target, targetContractId, operation = 'repair') {
   if (targetContractId == null) return;
   requiredHash('targetContractId', targetContractId);
+  const key = contractCacheKey(target.targetRef);
+  const cached = provenContracts.get(key);
+  if (cached && cached.contractId === targetContractId && Date.now() - cached.at < CONTRACT_CACHE_TTL_MS) return;
   const actualTargetContractId = await postgresTargetContractId(client, target.targetRef);
   if (actualTargetContractId !== targetContractId) {
+    provenContracts.delete(key);
     await client.query('ROLLBACK');
     fail('TARGET_CONTRACT_CHANGED', `Live PostgreSQL target contract changed before ${operation}`, { expectedTargetContractId: targetContractId, actualTargetContractId });
   }
+  provenContracts.set(key, { contractId: actualTargetContractId, at: Date.now() });
 }
 
 async function findLedgerEntry(client, targetRef, batchIdentity) {
   const result = await client.query(`
     SELECT batch_identity, migration_id, plan_id, source_snapshot_id, mapping_revision,
-           row_count, payload_hash, target_database, target_schema, target_table, committed_at
+           row_count, payload_hash, target_database, target_schema, target_table, committed_at,
+           inserted, updated, deleted, skipped_missing, batch_kind, source_xid, source_commit_lsn
     FROM ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
     WHERE batch_identity = $1
     FOR UPDATE
@@ -379,16 +472,29 @@ async function findLedgerEntry(client, targetRef, batchIdentity) {
   return result.rows[0] ?? null;
 }
 
-async function insertLedgerEntry(client, targetRef, evidence) {
+// Outcome counts and CDC provenance ride in the ledger row inside the SAME
+// target transaction as the mutation, so replay after a crash returns the
+// ORIGINAL exact counts instead of reconstructed approximations, and CDC
+// batches remain enumerable by commit position for boundary-bounded
+// verification. Callers that do not track per-effect counts pass no outcome
+// and store NULLs; non-CDC callers store the default 'load' kind.
+async function insertLedgerEntry(client, targetRef, evidence, outcome = {}, provenance = {}) {
+  const outcomeValue = value => (Number.isSafeInteger(value) && value >= 0 ? value : null);
+  const kind = provenance.kind ?? 'load';
+  if (kind !== 'load' && kind !== 'cdc') fail('INVALID_BATCH_PROVENANCE', 'Ledger batch kind must be load or cdc');
   await client.query(`
     INSERT INTO ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
       (batch_identity, migration_id, plan_id, source_snapshot_id, mapping_revision,
-       row_count, payload_hash, target_database, target_schema, target_table)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       row_count, payload_hash, target_database, target_schema, target_table,
+       inserted, updated, deleted, skipped_missing, batch_kind, source_xid, source_commit_lsn)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
   `, [
     evidence.batchIdentity, evidence.migrationId, evidence.planId, evidence.sourceSnapshotId,
     evidence.mappingRevision, evidence.rowCount, evidence.payloadHash,
-    targetRef.database, targetRef.schema, targetRef.table
+    targetRef.database, targetRef.schema, targetRef.table,
+    outcomeValue(outcome.inserted), outcomeValue(outcome.updated),
+    outcomeValue(outcome.deleted), outcomeValue(outcome.skippedMissing),
+    kind, provenance.xid ?? null, provenance.commitLsn ?? null
   ]);
 }
 function encodeCopyField(value) {
@@ -449,14 +555,24 @@ async function insertRows(client, targetRef, columns, rows) {
 }
 
 export class PostgresTarget {
-  constructor({ targetRef, credentialBroker, requireFencing = false, fenceResource = null, fenceOwner = null } = {}) {
+  constructor({ targetRef, credentialBroker, requireFencing = false, fenceResource = null, fenceOwner = null, faultInjector = null } = {}) {
     if (!targetRef || typeof targetRef !== 'object') fail('INVALID_POSTGRES_CONFIG', 'targetRef is required');
     this.targetRef = Object.freeze(structuredClone(targetRef));
     this.credentialBroker = credentialBroker;
     this.requireFencing = requireFencing;
     this.fenceResource = fenceResource;
     this.fenceOwner = fenceOwner;
+    this.faultInjector = faultInjector;
     this.closed = false;
+  }
+
+  async _hitFault(point, context) {
+    if (!this.faultInjector || typeof this.faultInjector.hit !== 'function') return false;
+    try {
+      return await this.faultInjector.hit(point, context);
+    } catch {
+      return false;
+    }
   }
 
   #assertOpen() {
@@ -503,11 +619,18 @@ export class PostgresTarget {
     const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
     if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
 
+    if (await this._hitFault('TARGET_BEFORE_TRANSACTION', { batchIdentity: evidence.batchIdentity })) {
+      fail('FAULT_TARGET_BEFORE_TRANSACTION', 'Injected fault before transaction', { batchIdentity: evidence.batchIdentity });
+    }
     const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
       await client.query('BEGIN');
       try {
         if (this.requireFencing) {
           await checkRepairFence(client, this, input.fencingToken, 'mutation');
+        }
+        if (await this._hitFault('TARGET_AFTER_FENCE_CHECK', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_FENCE_CHECK', 'Injected fault after fence check', { batchIdentity: evidence.batchIdentity });
         }
 
         await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
@@ -523,8 +646,19 @@ export class PostgresTarget {
         }
 
         await insertRows(client, this.targetRef, columns, rows);
+        if (await this._hitFault('TARGET_AFTER_ROWS_BEFORE_LEDGER', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_ROWS_BEFORE_LEDGER', 'Injected fault after rows before ledger', { batchIdentity: evidence.batchIdentity });
+        }
         await insertLedgerEntry(client, this.targetRef, evidence);
+        if (await this._hitFault('TARGET_AFTER_LEDGER_BEFORE_COMMIT', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_LEDGER_BEFORE_COMMIT', 'Injected fault after ledger before commit', { batchIdentity: evidence.batchIdentity });
+        }
         await client.query('COMMIT');
+        if (await this._hitFault('TARGET_AFTER_COMMIT_BEFORE_CHECKPOINT', { batchIdentity: evidence.batchIdentity })) {
+          fail('FAULT_TARGET_AFTER_COMMIT_BEFORE_CHECKPOINT', 'Injected fault after commit before checkpoint', { batchIdentity: evidence.batchIdentity });
+        }
         return { kind: 'COMMITTED_EXACT', alreadyCommitted: false };
       } catch (error) {
         try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
@@ -547,11 +681,18 @@ export class PostgresTarget {
     const described = postgresPayloadEvidence(rows);
     const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
 
+    if (await this._hitFault('TARGET_BEFORE_TRANSACTION', { batchIdentity: evidence.batchIdentity })) {
+      fail('FAULT_TARGET_BEFORE_TRANSACTION', 'Injected fault before transaction', { batchIdentity: evidence.batchIdentity });
+    }
     const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
       await client.query('BEGIN');
       try {
         if (this.requireFencing) {
           await checkRepairFence(client, this, input.fencingToken, 'bulk copy');
+        }
+        if (await this._hitFault('TARGET_AFTER_FENCE_CHECK', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_FENCE_CHECK', 'Injected fault after fence check', { batchIdentity: evidence.batchIdentity });
         }
 
         await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
@@ -567,8 +708,19 @@ export class PostgresTarget {
         }
 
         await copyRows(client, this.targetRef, columns, rows);
+        if (await this._hitFault('TARGET_AFTER_ROWS_BEFORE_LEDGER', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_ROWS_BEFORE_LEDGER', 'Injected fault after rows before ledger', { batchIdentity: evidence.batchIdentity });
+        }
         await insertLedgerEntry(client, this.targetRef, evidence);
+        if (await this._hitFault('TARGET_AFTER_LEDGER_BEFORE_COMMIT', { batchIdentity: evidence.batchIdentity })) {
+          await client.query('ROLLBACK');
+          fail('FAULT_TARGET_AFTER_LEDGER_BEFORE_COMMIT', 'Injected fault after ledger before commit', { batchIdentity: evidence.batchIdentity });
+        }
         await client.query('COMMIT');
+        if (await this._hitFault('TARGET_AFTER_COMMIT_BEFORE_CHECKPOINT', { batchIdentity: evidence.batchIdentity })) {
+          fail('FAULT_TARGET_AFTER_COMMIT_BEFORE_CHECKPOINT', 'Injected fault after commit before checkpoint', { batchIdentity: evidence.batchIdentity });
+        }
         return { kind: 'COMMITTED_EXACT', alreadyCommitted: false };
       } catch (error) {
         try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
@@ -584,6 +736,19 @@ export class PostgresTarget {
     });
   }
 
+  // Optional CDC provenance for CDC-applied batches: binds the ledger entry to
+  // the exact source transaction for boundary-bounded verification.
+  #cdcProvenance(input) {
+    const provenance = input.cdcProvenance ?? null;
+    if (provenance == null) return { kind: 'load' };
+    if (typeof provenance !== 'object' || Array.isArray(provenance)) fail('INVALID_BATCH_PROVENANCE', 'CDC provenance must be an object');
+    if (!Number.isSafeInteger(provenance.xid) || provenance.xid < 0) fail('INVALID_BATCH_PROVENANCE', 'CDC provenance xid must be a non-negative safe integer');
+    if (typeof provenance.commitLsn !== 'string' || !/^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/.test(provenance.commitLsn)) {
+      fail('INVALID_BATCH_PROVENANCE', 'CDC provenance commitLsn must be a valid PostgreSQL LSN');
+    }
+    return { kind: 'cdc', xid: provenance.xid, commitLsn: provenance.commitLsn.toUpperCase() };
+  }
+
   async commitUpsertBatch(input = {}) {
     this.#assertOpen();
     const rows = input.rows;
@@ -597,6 +762,7 @@ export class PostgresTarget {
     const keyed = requireUniqueMutationKeys(primaryKey, rows);
     const described = postgresPayloadEvidence(rows);
     const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
+    const provenance = this.#cdcProvenance(input);
     if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
 
     const updatable = columns.filter(column => !primaryKey.includes(column));
@@ -616,7 +782,14 @@ export class PostgresTarget {
             return { kind: 'BATCH_IDENTITY_CONFLICT' };
           }
           await client.query('COMMIT');
-          return { kind: 'COMMITTED_EXACT', alreadyCommitted: true, inserted: existing.inserted ?? null, updated: null };
+          // Exact original outcome from the ledger row: replay returns what
+          // the first commit observed, never a reconstruction. Pre-outcome
+          // rows carry NULLs (documented bound, not a silent zero).
+          return {
+            kind: 'COMMITTED_EXACT', alreadyCommitted: true,
+            inserted: existing.inserted == null ? null : Number(existing.inserted),
+            updated: existing.updated == null ? null : Number(existing.updated)
+          };
         }
 
         const quotedTable = `${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`;
@@ -652,7 +825,7 @@ export class PostgresTarget {
           fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL upsert did not return exact per-row evidence', { inserted, updated, expected: keyed.length });
         }
 
-        await insertLedgerEntry(client, this.targetRef, evidence);
+        await insertLedgerEntry(client, this.targetRef, evidence, { inserted, updated }, provenance);
         await client.query('COMMIT');
         return { kind: 'COMMITTED_EXACT', alreadyCommitted: false, inserted, updated };
       } catch (error) {
@@ -666,7 +839,7 @@ export class PostgresTarget {
     return Object.freeze({
       status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
       batchIdentity: evidence.batchIdentity, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash,
-      inserted: result.inserted, updated: result.updated
+      inserted: result.inserted ?? null, updated: result.updated ?? null
     });
   }
 
@@ -682,11 +855,15 @@ export class PostgresTarget {
       const identified = postgresMutationKeyId({ primaryKey, row: entry.key });
       if (seen.has(identified.keyId)) fail('DUPLICATE_BATCH_KEY', 'Delete batch contains a duplicate primary key', { keyId: identified.keyId });
       seen.add(identified.keyId);
-      requiredHash('expectedRowHash', entry.expectedRowHash);
-      return Object.freeze({ key: identified.key, keyId: identified.keyId, expectedRowHash: entry.expectedRowHash });
+      const precondition = entry.precondition ?? 'full-row';
+      if (precondition !== 'full-row' && precondition !== 'key-only') fail('INVALID_DELETE_MANIFEST', 'Delete precondition must be full-row or key-only');
+      if (precondition === 'full-row') requiredHash('expectedRowHash', entry.expectedRowHash);
+      else if (entry.expectedRowHash != null) fail('INVALID_DELETE_MANIFEST', 'Key-only delete must not carry an expected row hash');
+      return Object.freeze({ key: identified.key, keyId: identified.keyId, expectedRowHash: entry.expectedRowHash ?? null, precondition });
     });
     const described = postgresDeleteManifestEvidence(prepared);
     const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
+    const provenance = this.#cdcProvenance(input);
     if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
 
     const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
@@ -705,13 +882,18 @@ export class PostgresTarget {
             return { kind: 'BATCH_IDENTITY_CONFLICT' };
           }
           await client.query('COMMIT');
-          return { kind: 'COMMITTED_EXACT', alreadyCommitted: true };
+          return {
+            kind: 'COMMITTED_EXACT', alreadyCommitted: true,
+            deleted: existing.deleted == null ? null : Number(existing.deleted),
+            skippedMissing: existing.skipped_missing == null ? null : Number(existing.skipped_missing)
+          };
         }
 
         const quotedTable = `${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`;
         const missing = [];
         const mismatched = [];
         const doomed = [];
+        const skippedMissing = [];
         for (const entry of prepared) {
           const whereValues = [];
           const whereClauses = primaryKey.map(field => {
@@ -720,7 +902,18 @@ export class PostgresTarget {
           });
           const found = await client.query(`SELECT * FROM ${quotedTable} WHERE ${whereClauses.join(' AND ')} FOR UPDATE`, whereValues);
           if (found.rows.length === 0) {
+            // Key-only deletes (CDC without REPLICA IDENTITY FULL) treat an
+            // already-absent row as converged and skip it with evidence;
+            // full-row deletes fail closed on missing rows.
+            if (entry.precondition === 'key-only') {
+              skippedMissing.push(entry.keyId);
+              continue;
+            }
             missing.push(entry.keyId);
+            continue;
+          }
+          if (entry.precondition === 'key-only') {
+            doomed.push(entry);
             continue;
           }
           const actual = found.rows[0];
@@ -749,9 +942,10 @@ export class PostgresTarget {
           }
         }
 
-        await insertLedgerEntry(client, this.targetRef, evidence);
+        const deletedCount = evidence.rowCount - skippedMissing.length;
+        await insertLedgerEntry(client, this.targetRef, evidence, { deleted: deletedCount, skippedMissing: skippedMissing.length }, provenance);
         await client.query('COMMIT');
-        return { kind: 'COMMITTED_EXACT', alreadyCommitted: false };
+        return { kind: 'COMMITTED_EXACT', alreadyCommitted: false, deleted: deletedCount, skippedMissing };
       } catch (error) {
         try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
         throw error;
@@ -760,10 +954,281 @@ export class PostgresTarget {
 
     if (result.kind === 'BATCH_IDENTITY_CONFLICT') fail('BATCH_IDENTITY_CONFLICT', 'Batch identity is already committed with different evidence', { batchIdentity: evidence.batchIdentity });
     if (result.kind !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL target did not return exact delete evidence');
+    // Fresh commits return the skipped key ids; replay returns only the
+    // ledger count (key ids are not recoverable). The array stays
+    // array-typed on both paths; the count preserves replay precision.
+    const skippedIds = Array.isArray(result.skippedMissing) ? result.skippedMissing : [];
+    const skippedTotal = skippedIds.length > 0
+      ? skippedIds.length
+      : (typeof result.skippedMissing === 'number' && Number.isSafeInteger(result.skippedMissing) && result.skippedMissing >= 0
+        ? result.skippedMissing
+        : 0);
     return Object.freeze({
       status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
       batchIdentity: evidence.batchIdentity, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash,
-      deleted: evidence.rowCount
+      deleted: result.deleted ?? (evidence.rowCount - skippedTotal),
+      skippedMissing: Object.freeze([...skippedIds]),
+      skippedMissingCount: skippedTotal
+    });
+  }
+
+  // Atomic source-transaction commit: one PostgreSQL source transaction
+  // becomes exactly ONE target commit. Mutations arrive in source order
+  // (array or async iterable for memory-bounded streaming); consecutive
+  // upserts are set-batched, deletes stay ordered, one ledger record binds
+  // the complete transaction. Pre-commit faults leave zero visible effects;
+  // post-commit retry returns the original exact counts from the ledger row.
+  async commitCdcTransaction(input = {}) {
+    this.#assertOpen();
+    const migrationId = requiredString('migrationId', input.migrationId);
+    const planId = requiredHash('planId', input.planId);
+    const sourceSnapshotId = requiredHash('sourceSnapshotId', input.sourceSnapshotId);
+    const mappingRevision = input.mappingRevision;
+    if (!Number.isInteger(mappingRevision) || mappingRevision < 1) fail('INVALID_BATCH_EVIDENCE', 'mappingRevision must be >= 1');
+    const transactionIdentity = requiredHash('transactionIdentity', input.transactionIdentity);
+    const xid = input.xid;
+    if (!Number.isSafeInteger(xid) || xid < 0) fail('INVALID_CDC_TRANSACTION', 'xid must be a non-negative safe integer');
+    const commitLsn = input.commitLsn;
+    if (typeof commitLsn !== 'string' || !/^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/.test(commitLsn)) {
+      fail('INVALID_CDC_POSITION', 'commitLsn must be a valid PostgreSQL LSN');
+    }
+    const primaryKey = input.primaryKey;
+    if (!Array.isArray(primaryKey) || primaryKey.length === 0) fail('INVALID_MUTATION_KEY', 'CDC transaction primaryKey must be a non-empty array');
+    for (const field of primaryKey) {
+      if (typeof field !== 'string' || !SAFE_COLUMN.test(field)) fail('INVALID_MUTATION_KEY', `CDC transaction primaryKey field ${field} is invalid`);
+    }
+    const mutationCount = input.mutationCount;
+    if (!Number.isSafeInteger(mutationCount) || mutationCount < 0) fail('INVALID_CDC_TRANSACTION', 'mutationCount must be a non-negative safe integer');
+    const payloadHash = requiredHash('payloadHash', input.payloadHash);
+    const maxMutations = input.maxMutations ?? null;
+    if (maxMutations != null) {
+      if (!Number.isSafeInteger(maxMutations) || maxMutations < 1) fail('INVALID_CDC_TRANSACTION', 'maxMutations must be a positive safe integer');
+      if (mutationCount > maxMutations) fail('CDC_TRANSACTION_BUDGET_EXCEEDED', 'Source transaction exceeds the configured mutation effect budget', { mutationCount, maxMutations });
+    }
+    const mutations = input.mutations;
+    const isIterable = mutations != null && typeof mutations[Symbol.asyncIterator] === 'function';
+    if (!Array.isArray(mutations) && !isIterable) fail('INVALID_CDC_TRANSACTION', 'mutations must be an array or async iterable in source order');
+    if (Array.isArray(mutations) && mutations.length !== mutationCount) {
+      fail('INVALID_CDC_TRANSACTION', 'Array mutation length must equal the declared mutationCount', { declared: mutationCount, actual: mutations.length });
+    }
+    if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production PostgreSQL mutation requires a fencing token');
+
+    const evidence = {
+      batchIdentity: transactionIdentity,
+      migrationId, planId, sourceSnapshotId, mappingRevision,
+      rowCount: mutationCount, payloadHash
+    };
+    const provenance = { kind: 'cdc', xid, commitLsn: commitLsn.toUpperCase() };
+    const context = { transactionIdentity, xid, commitLsn };
+
+    const result = await withPostgresClient({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async client => {
+      await client.query('BEGIN');
+      try {
+        if (this.requireFencing) {
+          await checkRepairFence(client, this, input.fencingToken, 'cdc-transaction');
+        }
+        if (await this._hitFault('CDC_TX_AFTER_FENCE_CHECK', context)) {
+          await client.query('ROLLBACK');
+          fail('FAULT_CDC_TX_AFTER_FENCE_CHECK', 'Injected fault after fence check', context);
+        }
+
+        await checkRepairContract(client, this, input.targetContractId ?? null, 'planning/approval');
+
+        const existing = await findLedgerEntry(client, this.targetRef, transactionIdentity);
+        if (existing) {
+          if (!ledgerMatches(existing, evidence, this.targetRef)) {
+            await client.query('ROLLBACK');
+            return { kind: 'BATCH_IDENTITY_CONFLICT' };
+          }
+          await client.query('COMMIT');
+          return {
+            kind: 'COMMITTED_EXACT', alreadyCommitted: true,
+            inserted: existing.inserted == null ? null : Number(existing.inserted),
+            updated: existing.updated == null ? null : Number(existing.updated),
+            deleted: existing.deleted == null ? null : Number(existing.deleted),
+            skippedMissing: existing.skipped_missing == null ? null : Number(existing.skipped_missing)
+          };
+        }
+
+        const quotedTable = `${quoteIdentifier(this.targetRef.schema)}.${quoteIdentifier(this.targetRef.table)}`;
+        let columns = null;
+        let updatable = null;
+        let upsertBuffer = [];
+        let inserted = 0;
+        let updated = 0;
+        let deleted = 0;
+        let skippedMissing = 0;
+        let appliedMutations = 0;
+        let middleFaultFired = false;
+
+        const flushUpserts = async () => {
+          if (upsertBuffer.length === 0) return;
+          const chunk = upsertBuffer;
+          upsertBuffer = [];
+          const quotedColumns = columns.map(quoteIdentifier).join(', ');
+          const conflictTarget = `(${primaryKey.map(quoteIdentifier).join(', ')})`;
+          const action = updatable.length === 0
+            ? 'DO NOTHING'
+            : `DO UPDATE SET ${updatable.map(column => `${quoteIdentifier(column)} = EXCLUDED.${quoteIdentifier(column)}`).join(', ')}`;
+          const maxRowsPerStatement = Math.max(1, Math.min(1000, Math.floor(60_000 / columns.length)));
+          for (let offset = 0; offset < chunk.length; offset += maxRowsPerStatement) {
+            const piece = chunk.slice(offset, offset + maxRowsPerStatement);
+            const values = [];
+            const groups = piece.map(row => {
+              const placeholders = columns.map(column => {
+                values.push(row[column]);
+                return `$${values.length}`;
+              });
+              return `(${placeholders.join(', ')})`;
+            });
+            const written = await client.query(
+              `INSERT INTO ${quotedTable} (${quotedColumns}) VALUES ${groups.join(', ')} ON CONFLICT ${conflictTarget} ${action} RETURNING (xmax = 0) AS inserted`,
+              values
+            );
+            for (const row of written.rows) {
+              if (row.inserted === true) inserted += 1;
+              else updated += 1;
+            }
+          }
+          if (updatable.length > 0 && inserted + updated < 1) {
+            await client.query('ROLLBACK');
+            fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL CDC upsert chunk returned no per-row evidence', context);
+          }
+        };
+
+        const applyDelete = async entry => {
+          const identified = postgresMutationKeyId({ primaryKey, row: entry.key });
+          const whereValues = [];
+          const whereClauses = primaryKey.map(field => {
+            whereValues.push(entry.key[field]);
+            return `${quoteIdentifier(field)} = $${whereValues.length}`;
+          });
+          const found = await client.query(`SELECT * FROM ${quotedTable} WHERE ${whereClauses.join(' AND ')} FOR UPDATE`, whereValues);
+          if (found.rows.length === 0) {
+            if (entry.precondition === 'key-only') {
+              skippedMissing += 1;
+              return;
+            }
+            await client.query('ROLLBACK');
+            fail('DELETE_PRECONDITION_FAILED', 'CDC delete precondition failed: target row is missing', { keyId: identified.keyId });
+          }
+          if (entry.precondition !== 'key-only') {
+            requiredHash('expectedRowHash', entry.expectedRowHash);
+            const actual = found.rows[0];
+            const observedColumns = Object.keys(actual).filter(name => name !== 'tableoid' && name !== 'ctid' && name !== 'xmin' && name !== 'xmax').sort();
+            const observedRowHash = postgresContentRowHash({ primaryKey, columns: observedColumns, key: entry.key, row: actual });
+            if (observedRowHash !== entry.expectedRowHash) {
+              await client.query('ROLLBACK');
+              fail('DELETE_PRECONDITION_FAILED', 'CDC delete precondition failed: target row changed since the source image', { keyId: identified.keyId });
+            }
+          }
+          const removed = await client.query(`DELETE FROM ${quotedTable} WHERE ${whereClauses.join(' AND ')}`, whereValues);
+          if (removed.rowCount !== 1) {
+            await client.query('ROLLBACK');
+            fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL CDC delete did not remove exactly one row', { keyId: identified.keyId });
+          }
+          deleted += 1;
+        };
+
+        const applyMutation = async mutation => {
+          if (!mutation || typeof mutation !== 'object' || Array.isArray(mutation)) {
+            await client.query('ROLLBACK');
+            fail('INVALID_CDC_TRANSACTION', 'CDC transaction mutations must be objects', context);
+          }
+          if (mutation.op === 'upsert' || mutation.op === 'insert' || mutation.op === 'update') {
+            const row = mutation.row;
+            if (!row || typeof row !== 'object' || Array.isArray(row)) {
+              await client.query('ROLLBACK');
+              fail('INVALID_CDC_TRANSACTION', 'CDC upsert mutation must carry a row object', context);
+            }
+            const rowColumns = Object.keys(row).sort();
+            if (columns == null) {
+              if (rowColumns.length === 0) {
+                await client.query('ROLLBACK');
+                fail('INVALID_BATCH_ROW', 'CDC upsert rows must contain at least one column', context);
+              }
+              columns = rowColumns;
+              for (const field of primaryKey) {
+                if (!columns.includes(field)) {
+                  await client.query('ROLLBACK');
+                  fail('INVALID_MUTATION_KEY', `CDC transaction primaryKey field ${field} is not part of the mutation columns`, context);
+                }
+              }
+              updatable = columns.filter(column => !primaryKey.includes(column));
+            } else if (rowColumns.join('\u0000') !== columns.join('\u0000')) {
+              await client.query('ROLLBACK');
+              fail('ROW_SHAPE_MISMATCH', 'All mutations in a CDC transaction must have the same columns', context);
+            }
+            for (const field of primaryKey) {
+              if (row[field] === null || row[field] === undefined) {
+                await client.query('ROLLBACK');
+                fail('INVALID_MUTATION_KEY', `CDC mutation row is missing primary-key field ${field}`, context);
+              }
+            }
+            upsertBuffer.push(row);
+            if (upsertBuffer.length >= 1000) await flushUpserts();
+          } else if (mutation.op === 'delete') {
+            await flushUpserts();
+            await applyDelete(mutation);
+          } else {
+            await client.query('ROLLBACK');
+            fail('INVALID_CDC_TRANSACTION', `Unsupported CDC mutation op ${mutation.op}`, context);
+          }
+          appliedMutations += 1;
+          if (appliedMutations === 1 && await this._hitFault('CDC_TX_AFTER_FIRST_MUTATION', context)) {
+            await client.query('ROLLBACK');
+            fail('FAULT_CDC_TX_AFTER_FIRST_MUTATION', 'Injected fault after first mutation', context);
+          }
+          if (!middleFaultFired && mutationCount > 1 && appliedMutations >= Math.ceil(mutationCount / 2)
+            && await this._hitFault('CDC_TX_AFTER_MIDDLE_MUTATION', context)) {
+            middleFaultFired = true;
+            await client.query('ROLLBACK');
+            fail('FAULT_CDC_TX_AFTER_MIDDLE_MUTATION', 'Injected fault after middle mutation', context);
+          }
+        };
+
+        if (Array.isArray(mutations)) {
+          for (const mutation of mutations) await applyMutation(mutation);
+        } else {
+          for await (const mutation of mutations) await applyMutation(mutation);
+        }
+        if (appliedMutations !== mutationCount) {
+          await client.query('ROLLBACK');
+          fail('TARGET_COMMIT_UNPROVEN', 'CDC transaction stream ended before the declared mutation count', { applied: appliedMutations, declared: mutationCount });
+        }
+        await flushUpserts();
+
+        if (await this._hitFault('CDC_TX_BEFORE_LEDGER', context)) {
+          await client.query('ROLLBACK');
+          fail('FAULT_CDC_TX_BEFORE_LEDGER', 'Injected fault before ledger write', context);
+        }
+        await insertLedgerEntry(client, this.targetRef, evidence, { inserted, updated, deleted, skippedMissing }, provenance);
+        if (await this._hitFault('CDC_TX_AFTER_LEDGER', context)) {
+          await client.query('ROLLBACK');
+          fail('FAULT_CDC_TX_AFTER_LEDGER', 'Injected fault after ledger write', context);
+        }
+        if (await this._hitFault('CDC_TX_BEFORE_COMMIT', context)) {
+          await client.query('ROLLBACK');
+          fail('FAULT_CDC_TX_BEFORE_COMMIT', 'Injected fault before commit', context);
+        }
+        await client.query('COMMIT');
+        if (await this._hitFault('CDC_TX_AFTER_COMMIT_BEFORE_RETURN', context)) {
+          fail('FAULT_CDC_TX_AFTER_COMMIT_BEFORE_RETURN', 'Injected fault after commit before return', context);
+        }
+        return { kind: 'COMMITTED_EXACT', alreadyCommitted: false, inserted, updated, deleted, skippedMissing };
+      } catch (error) {
+        try { await client.query('ROLLBACK'); } catch { /* primary error wins */ }
+        throw error;
+      }
+    });
+
+    if (result.kind === 'BATCH_IDENTITY_CONFLICT') fail('BATCH_IDENTITY_CONFLICT', 'CDC transaction identity is already committed with different evidence', { transactionIdentity });
+    if (result.kind !== 'COMMITTED_EXACT') fail('TARGET_COMMIT_UNPROVEN', 'PostgreSQL target did not return exact CDC transaction evidence');
+    return Object.freeze({
+      status: 'COMMITTED_EXACT', alreadyCommitted: result.alreadyCommitted,
+      transactionIdentity, rowCount: mutationCount, payloadHash,
+      inserted: result.inserted ?? null, updated: result.updated ?? null,
+      deleted: result.deleted ?? null, skippedMissing: result.skippedMissing ?? null
     });
   }
 
@@ -837,14 +1302,21 @@ export class PostgresTarget {
         SELECT batch_identity AS "batchIdentity", migration_id AS "migrationId", plan_id AS "planId",
                source_snapshot_id AS "sourceSnapshotId", mapping_revision AS "mappingRevision",
                row_count AS "rowCount", payload_hash AS "payloadHash", target_table AS "targetTable",
-               committed_at AS "committedAt"
+               committed_at AS "committedAt", batch_kind AS "batchKind",
+               source_xid AS "sourceXid", source_commit_lsn AS "sourceCommitLsn"
         FROM ${quoteIdentifier(POSTGRES_METADATA_SCHEMA)}.${quoteIdentifier(LEDGER_TABLE)}
         WHERE target_database = $1 AND target_schema = $2 AND target_table = $3${migrationClause}
         ORDER BY committed_at, batch_identity
       `, values);
       return result.rows;
     });
-    return rows.map(row => Object.freeze({ ...row, mappingRevision: Number(row.mappingRevision), rowCount: Number(row.rowCount), committedAt: new Date(row.committedAt).toISOString() }));
+    return rows.map(row => Object.freeze({
+      ...row,
+      mappingRevision: Number(row.mappingRevision),
+      rowCount: Number(row.rowCount),
+      committedAt: new Date(row.committedAt).toISOString(),
+      sourceXid: row.sourceXid == null ? null : Number(row.sourceXid)
+    }));
   }
 
   async applyRepairOperation(input = {}) {

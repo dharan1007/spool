@@ -6,7 +6,18 @@ const CATALOG = Object.freeze({
   SOURCE_CHANGED: Object.freeze({ severity: 'user_action', retryable: true, nextActions: Object.freeze(['Re-inspect the changed source', 'Create a new plan/approval against the new snapshot']) }),
   PATH_OUTSIDE_ALLOWED_ROOT: Object.freeze({ severity: 'security', retryable: false, nextActions: Object.freeze(['Move the resource under the configured allow-root', 'Review the configured source/target root']) }),
   STALE_FENCE: Object.freeze({ severity: 'concurrency', retryable: true, nextActions: Object.freeze(['Stop the stale runner', 'Resume through the current lease holder']) }),
-  TARGET_RECONCILIATION_CONFLICT: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Do not replay the batch', 'Inspect target ledger evidence and resolve the conflict explicitly']) })
+  TARGET_RECONCILIATION_CONFLICT: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Do not replay the batch', 'Inspect target ledger evidence and resolve the conflict explicitly']) }),
+  CUTOVER_SOURCE_BARRIER_REQUIRED: Object.freeze({ severity: 'user_action', retryable: true, nextActions: Object.freeze(['Freeze source writes/routing for the armed cutover attempt', 'Mint a fresh signed cutover barrier attestation before commit']) }),
+  CUTOVER_SOURCE_BARRIER_MISMATCH: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Do not reuse barrier evidence from another migration', 'Mint evidence for the currently armed migration']) }),
+  CUTOVER_SOURCE_BARRIER_ATTEMPT_MISMATCH: Object.freeze({ severity: 'integrity', retryable: true, nextActions: Object.freeze(['Discard stale barrier evidence from the previous cutover attempt', 'Mint a fresh attestation after re-arm']) }),
+  CUTOVER_SOURCE_BARRIER_PRINCIPAL_MISMATCH: Object.freeze({ severity: 'security', retryable: false, nextActions: Object.freeze(['Do not reuse another principal\'s freeze evidence', 'Re-authenticate and mint evidence as the current cutover principal']) }),
+  CUTOVER_SOURCE_BARRIER_SIGNATURE_INVALID: Object.freeze({ severity: 'security', retryable: false, nextActions: Object.freeze(['Reject the barrier evidence', 'Mint a fresh server-authenticated attestation and investigate possible tampering']) }),
+  CUTOVER_SOURCE_BARRIER_INVALID: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Reject malformed or modified barrier evidence', 'Mint fresh barrier evidence from the command service']) }),
+  WRITE_BARRIER_ACQUIRE_TIMEOUT: Object.freeze({ severity: 'concurrency', retryable: true, nextActions: Object.freeze(['Identify and drain active source writers', 'Keep application routing frozen, then retry the cutover']) }),
+  WRITE_BARRIER_NOT_PROVEN: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Do not commit cutover', 'Inspect PostgreSQL lock behavior and privileges before retrying']) }),
+  WRITE_BARRIER_LOST: Object.freeze({ severity: 'concurrency', retryable: true, nextActions: Object.freeze(['Do not commit or complete cutover', 'Re-establish the source freeze and restart the cutover recovery path']) }),
+  WRITE_BARRIER_RELEASED: Object.freeze({ severity: 'concurrency', retryable: false, nextActions: Object.freeze(['Do not reuse a released barrier handle', 'Acquire a new barrier for the current attempt']) }),
+  WRITE_BARRIER_UNSAFE: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Use POSTGRES_TABLE_SHARE_LOCK instead of database read-only defaults', 'Keep the external source-routing freeze active through cutover']) })
 });
 
 export const ERROR_CATALOG = CATALOG;

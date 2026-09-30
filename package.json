@@ -30,7 +30,11 @@
     "release:reproduce": "node scripts/reproducible-build-evidence.js",
     "pack:verify": "node scripts/verify-package.js",
     "serve": "python3 scripts/spa-server.py --port 8765 --directory dist",
-    "build": "node scripts/build-dist.js"
+    "build": "node scripts/build-dist.js",
+    "qualify:postgres:ci": "node scripts/qualify/industrial-postgres.js --profile CI",
+    "qualify:postgres:small": "node scripts/qualify/industrial-postgres.js --profile SMALL",
+    "qualify:postgres": "node scripts/qualify/industrial-postgres.js",
+    "qualify:evidence:verify": "node scripts/qualify/verify-evidence.js"
   },
   "dependencies": {
     "better-sqlite3": "12.10.1",

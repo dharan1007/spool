@@ -1,0 +1,25 @@
+{
+  "profile": {
+    "name": "CI",
+    "rows": 100000,
+    "payloadBytes": 256,
+    "batchSize": 5000,
+    "writers": 2,
+    "workers": 2,
+    "cdcDurationSeconds": 30,
+    "largeTransactionRows": 10000,
+    "maxRssBytes": 805306368,
+    "description": "CI: minimal sustained load for PR gate (30s CDC)"
+  },
+  "seed": "qualify-spool-qualify-2026-09-20T07-26-45-892Z-3b4d1862-CI",
+  "datasetId": "sha256:adddd6aecc767d9903c0ade59ab987f78d7ae2cedc435bfc28f411e5216d1ed9",
+  "runId": "spool-qualify-2026-09-20T07-26-45-892Z-3b4d1862",
+  "pgConfig": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "database": "spooltest",
+    "user": "spooltest"
+  },
+  "outputDir": "qualification\\spool-qualify-2026-09-20T07-26-45-892Z-3b4d1862",
+  "overrides": {}
+}

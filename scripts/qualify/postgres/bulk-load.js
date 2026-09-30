@@ -1,0 +1,115 @@
+import { createHash } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Client } from 'pg';
+import { CredentialBroker } from '../../../src/daemon/credential-broker.js';
+import { SpoolCommandService } from '../../../src/daemon/command-service.js';
+import { writeDatasetCsv, datasetId } from '../dataset.js';
+import { LatencyHistogram, rowsPerSecond, mibPerSecond } from '../metrics.js';
+
+
+// PostgreSQL truncates identifiers past 63 characters: all scenario table
+// names derive from a short deterministic hash so expected names always
+// equal live names and parallel runs cannot collide on truncation.
+function shortKey(seed, runId) {
+  return createHash('sha256').update(`qualify-${seed}-${runId}`).digest('hex').slice(0, 12);
+}
+
+export async function runBulkLoad({ profile, seed, evidenceWriter, pgConfig, runId }) {
+  const scenario = 'postgres.bulk.load';
+  const histogram = new LatencyHistogram();
+  const failures = [];
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'spool-qualify-source-'));
+  const targetRoot = await mkdtemp(join(tmpdir(), 'spool-qualify-target-'));
+  const statePath = join(targetRoot, `state-${runId}.db`);
+  const snapshotDir = join(tmpdir(), `spool-qualify-snap-${runId}-bulk`);
+  const csvPath = join(sourceRoot, 'dataset.csv');
+  let client, service;
+  const table = `qualify_bulk_${shortKey(seed, runId)}`;
+  const rowCount = profile.rows;
+  const effectiveConfig = { rows: rowCount, batchSize: profile.batchSize };
+  const payloadBytes = profile.payloadBytes;
+  const batchSize = profile.batchSize;
+
+  try {
+    const did = datasetId({ seed: seed + '-bulk', rowCount, payloadBytes });
+    await writeDatasetCsv({ seed: seed + '-bulk', rowCount, payloadBytes, filePath: csvPath });
+    evidenceWriter.appendRaw({ scenario, event: 'dataset_generated', datasetId: did, rowCount });
+
+    client = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
+    await client.connect();
+    await client.query(`DROP TABLE IF EXISTS public."${table}" CASCADE`);
+    await client.query(`CREATE TABLE public."${table}" (id integer PRIMARY KEY, tenant_id integer NOT NULL, external_id text NOT NULL, name text NOT NULL, email text NOT NULL, status text NOT NULL, integer_value text NOT NULL, decimal_value text NOT NULL, boolean_value text NOT NULL, timestamp_value text NOT NULL, nullable_value text, unicode_value text NOT NULL, json_value text NOT NULL, payload text NOT NULL, updated_at text NOT NULL)`);
+    await client.end(); client = null;
+
+    const broker = new CredentialBroker();
+    broker.withSecret = async (ref, fn) => fn(pgConfig.password);
+    service = await SpoolCommandService.create({
+      sourceRoot, targetRoot, statePath, snapshotDir,
+      approvalSigningKey: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      release: { version: '1.1.1', commitSha: process.env.SPOOL_COMMIT_SHA ?? '0000000000000000000000000000000000000000' },
+      credentialBroker: broker,
+      maxSourceBytes: 1024 * 1024 * 1024
+    });
+
+    const request = {
+      migrationId: `qualify-bulk-${runId}`,
+      principal: 'qualify:bulk',
+      planInput: {
+        planRevision: 1,
+        sourceRef: { connector: 'filesystem', connectionId: 'src', resource: 'dataset.csv', path: csvPath },
+        targetRef: { connector: 'postgres', connectionId: 'pg', resource: `public.${table}`, endpoint: `postgresql://${pgConfig.host}:${pgConfig.port}?sslmode=disable`, database: pgConfig.database, schema: 'public', table, identity: { user: pgConfig.user }, secretRef: { provider: 'env', key: 'PGPASSWORD' } },
+        targetSchema: [
+          { name: 'id', type: 'integer', nullable: false }, { name: 'tenant_id', type: 'integer', nullable: false }, { name: 'external_id', type: 'string', nullable: false }, { name: 'name', type: 'string', nullable: false }, { name: 'email', type: 'string', nullable: false }, { name: 'status', type: 'string', nullable: false }, { name: 'integer_value', type: 'string', nullable: false }, { name: 'decimal_value', type: 'string', nullable: false }, { name: 'boolean_value', type: 'string', nullable: false }, { name: 'timestamp_value', type: 'string', nullable: false }, { name: 'nullable_value', type: 'string', nullable: true }, { name: 'unicode_value', type: 'string', nullable: false }, { name: 'json_value', type: 'string', nullable: false }, { name: 'payload', type: 'string', nullable: false }, { name: 'updated_at', type: 'string', nullable: false }
+        ],
+        mapping: [
+          { target: 'id', expr: { op: 'cast_number', value: { op: 'field', name: 'id' } } }, { target: 'tenant_id', expr: { op: 'cast_number', value: { op: 'field', name: 'tenant_id' } } }, { target: 'external_id', expr: { op: 'field', name: 'external_id' } }, { target: 'name', expr: { op: 'field', name: 'name' } }, { target: 'email', expr: { op: 'field', name: 'email' } }, { target: 'status', expr: { op: 'field', name: 'status' } }, { target: 'integer_value', expr: { op: 'field', name: 'integer_value' } }, { target: 'decimal_value', expr: { op: 'field', name: 'decimal_value' } }, { target: 'boolean_value', expr: { op: 'field', name: 'boolean_value' } }, { target: 'timestamp_value', expr: { op: 'field', name: 'timestamp_value' } }, { target: 'nullable_value', expr: { op: 'field', name: 'nullable_value' } }, { target: 'unicode_value', expr: { op: 'field', name: 'unicode_value' } }, { target: 'json_value', expr: { op: 'field', name: 'json_value' } }, { target: 'payload', expr: { op: 'field', name: 'payload' } }, { target: 'updated_at', expr: { op: 'field', name: 'updated_at' } }
+        ],
+        mappingRevision: 1,
+        writeStrategy: { mode: 'insert', batchSize, bulk: true },
+        verification: { checks: ['row_accounting', 'ledger_complete'] },
+        risk: { level: 'medium', approvals: ['target_write'] },
+        capabilityAssumptions: { source: { snapshotBinding: true }, target: { transactions: true, atomicBatchLedger: true, reconcileAfterCrash: true, fencing: true, bulkWrite: true } }
+      }
+    };
+    const plan = await service.plan(request);
+    const approval = await service.approve(request, { expiresAt: new Date(Date.now() + 3600_000).toISOString(), nonce: `qualify-bulk-${runId}` });
+    const start = process.hrtime.bigint();
+    const result = await service.run(request, { approval });
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    histogram.add(ms / Math.ceil(rowCount / batchSize));
+
+    client = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
+    await client.connect();
+    const cnt = await client.query(`SELECT count(*)::int as c FROM public."${table}"`);
+    await client.end(); client = null;
+    if (cnt.rows[0].c !== rowCount) throw new Error(`bulk count mismatch ${cnt.rows[0].c} != ${rowCount}`);
+
+    const lat = histogram.percentiles();
+    const metrics = { scenario, requestedConfig: { rows: profile.rows, batchSize: profile.batchSize }, effectiveConfig, rowCount, batchSize, durationMs: ms, rowsPerSec: rowsPerSecond(rowCount, ms), mibPerSec: mibPerSecond(rowCount * payloadBytes, ms), latency: lat, verification: result.verification.status };
+    evidenceWriter.appendRaw({ scenario, event: 'bulk_completed', ...metrics });
+    return { metrics, failures, verification: 'VERIFIED' };
+  } catch (e) {
+    failures.push({ scenario, code: e.code ?? 'UNKNOWN', message: e.message, expected: false, classification: 'CORRECTNESS', timestamp: new Date().toISOString() });
+    throw e;
+  } finally {
+    try { if (client) await client.end(); } catch {}
+    try { if (service) service.close(); } catch {}
+    try { await rm(sourceRoot, { recursive: true, force: true }); } catch {}
+    try { await rm(targetRoot, { recursive: true, force: true }); } catch {}
+    try { await rm(snapshotDir, { recursive: true, force: true }); } catch {}
+    try {
+      const c = new Client({ host: pgConfig.host, port: pgConfig.port, database: pgConfig.database, user: pgConfig.user, password: pgConfig.password, ssl: false });
+      await c.connect(); await c.query(`DROP TABLE IF EXISTS public."${table}" CASCADE`); await c.end();
+    } catch {}
+  }
+}
+
+
+
+
+
+
+
+

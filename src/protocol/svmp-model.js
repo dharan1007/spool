@@ -9,7 +9,8 @@ export const UNSAFE_MODEL_MUTATIONS = Object.freeze({
   ALLOW_CDC_ACK_BEYOND_APPLIED: 'ALLOW_CDC_ACK_BEYOND_APPLIED',
   ALLOW_PLAN_DRIFT: 'ALLOW_PLAN_DRIFT',
   ALLOW_BACKWARDS_AFTER_CUTOVER: 'ALLOW_BACKWARDS_AFTER_CUTOVER',
-  ALLOW_COMPLETED_AFTER_FAILED: 'ALLOW_COMPLETED_AFTER_FAILED'
+  ALLOW_COMPLETED_AFTER_FAILED: 'ALLOW_COMPLETED_AFTER_FAILED',
+  ALLOW_CUTOVER_WITHOUT_FINAL_VERIFY: 'ALLOW_CUTOVER_WITHOUT_FINAL_VERIFY'
 });
 
 const INVARIANTS = Object.freeze({
@@ -78,11 +79,18 @@ const INVARIANTS = Object.freeze({
   },
   no_backwards_after_cutover(state) {
     if (state.backwardsAfterCutover) return false;
-    return !state.cutoverCommitted || ![SVMP_STATES.DISCOVERED, SVMP_STATES.SNAPSHOTTED, SVMP_STATES.PLANNED, SVMP_STATES.VALIDATED, SVMP_STATES.AUTHORIZED, SVMP_STATES.EXECUTING, SVMP_STATES.RECONCILING, SVMP_STATES.VERIFYING, SVMP_STATES.VERIFICATION_FAILED, SVMP_STATES.COMPENSATION_REQUIRED].includes(state.phase);
+    return !state.cutoverCommitted || ![SVMP_STATES.DISCOVERED, SVMP_STATES.SNAPSHOTTED, SVMP_STATES.PLANNED, SVMP_STATES.VALIDATED, SVMP_STATES.AUTHORIZED, SVMP_STATES.EXECUTING, SVMP_STATES.RECONCILING, SVMP_STATES.VERIFYING, SVMP_STATES.VERIFICATION_FAILED, SVMP_STATES.COMPENSATION_REQUIRED, SVMP_STATES.CUTOVER_ARMED, SVMP_STATES.FINAL_DRAIN, SVMP_STATES.FINAL_VERIFY].includes(state.phase);
   },
   no_completed_after_failed(state) {
     if (state.completedAfterFailed) return false;
-    return !state.verificationFailed || ![SVMP_STATES.VERIFIED, SVMP_STATES.CUTOVER_ARMED, SVMP_STATES.CUTOVER_COMMITTED].includes(state.phase);
+    return !state.verificationFailed || ![SVMP_STATES.VERIFIED, SVMP_STATES.CUTOVER_ARMED, SVMP_STATES.FINAL_DRAIN, SVMP_STATES.FINAL_VERIFY, SVMP_STATES.CUTOVER_COMMITTED].includes(state.phase);
+  },
+  cutover_committed_requires_final_verify(state) {
+    // CUTOVER_COMMITTED is reachable only through a FINAL_VERIFY in the same
+    // cutover attempt. finalVerifyReached is cleared whenever the attempt ends
+    // (abort) or a new attempt begins (arm), so a stale verify can never
+    // authorize a later commit.
+    return !state.cutoverCommitted || state.finalVerifyReached === true;
   }
 });
 
@@ -118,6 +126,7 @@ function initialState() {
     verified: false,
     cutoverArmed: false,
     cutoverCommitted: false,
+    finalVerifyReached: false,
     crashed: false,
     migrationApprovalUsedForRepair: false,
     secondOwnerCommitted: false,
@@ -314,11 +323,32 @@ function actionsFor(state, mutation) {
       && (mutation === UNSAFE_MODEL_MUTATIONS.ALLOW_CUTOVER_WITHOUT_VERIFICATION || state.verified),
     () => next(state, {
       phase: SVMP_STATES.CUTOVER_ARMED,
-      cutoverArmed: true
+      cutoverArmed: true,
+      // A new arming starts a new cutover attempt: any prior FINAL_VERIFY
+      // evidence belongs to a superseded attempt and must not authorize commit.
+      finalVerifyReached: false
+    }));
+
+  add('final_drain',
+    state.phase === SVMP_STATES.CUTOVER_ARMED
+      && state.cutoverArmed
+      && !state.cutoverCommitted,
+    () => next(state, { phase: SVMP_STATES.FINAL_DRAIN }));
+
+  add('final_verify',
+    [SVMP_STATES.CUTOVER_ARMED, SVMP_STATES.FINAL_DRAIN].includes(state.phase)
+      && state.cutoverArmed
+      && !state.cutoverCommitted
+      && state.verified,
+    () => next(state, {
+      phase: SVMP_STATES.FINAL_VERIFY,
+      finalVerifyReached: true
     }));
 
   add('commit_cutover',
-    state.phase === SVMP_STATES.CUTOVER_ARMED
+    (state.phase === SVMP_STATES.FINAL_VERIFY
+      || (mutation === UNSAFE_MODEL_MUTATIONS.ALLOW_CUTOVER_WITHOUT_FINAL_VERIFY
+        && state.phase === SVMP_STATES.CUTOVER_ARMED))
       && state.cutoverArmed
       && state.targetStable
       && !state.driftObserved,
@@ -329,10 +359,12 @@ function actionsFor(state, mutation) {
     }));
 
   add('abort_cutover',
-    state.phase === SVMP_STATES.CUTOVER_ARMED,
+    [SVMP_STATES.CUTOVER_ARMED, SVMP_STATES.FINAL_DRAIN, SVMP_STATES.FINAL_VERIFY].includes(state.phase),
     () => next(state, {
       phase: SVMP_STATES.CUTOVER_ABORTED,
-      cutoverArmed: false
+      cutoverArmed: false,
+      // The attempt ends here: its FINAL_VERIFY evidence dies with it.
+      finalVerifyReached: false
     }));
 
   const sourceDriftPhase = [
