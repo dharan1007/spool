@@ -89,6 +89,35 @@ const REPLICA_IDENTITY_MODE = Object.freeze({
 // DEFAULT means primary key; INDEX means the explicitly selected replica
 // identity index; FULL carries the complete old row; NOTHING cannot safely
 // drive UPDATE/DELETE CDC.
+
+// Select the replica-identity key columns from one-row-per-index-key catalog
+// rows. Kept as a pure function so the exact PostgreSQL wire representation
+// that broke the previous array_agg implementation stays under regression
+// test without requiring a live server. node-postgres leaves the `_name`
+// array type unparsed (pg-types registers OID 1003 with noParse), so an
+// aggregated column arrives as a literal Postgres array string such as
+// "{id}" instead of a JS array — the previous Array.isArray() guard then
+// reported zero usable key columns and refused every DEFAULT-identity table.
+export function replicaIdentityKeyColumnsFromIndexRows({ mode, rows } = {}) {
+  if (mode !== 'DEFAULT' && mode !== 'INDEX') fail('CDC_REPLICA_IDENTITY_UNKNOWN', 'Replica identity key selection supports only DEFAULT or INDEX mode', { mode: mode ?? null });
+  if (!Array.isArray(rows)) fail('CDC_REPLICA_IDENTITY_UNKNOWN', 'Replica identity index rows are required');
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = String(row.index);
+    let entry = grouped.get(key);
+    if (!entry) {
+      entry = { primary: row.primary === true, replicaIdentity: row.replicaIdentity === true, columns: [] };
+      grouped.set(key, entry);
+    }
+    entry.columns.push(String(row.column));
+  }
+  const candidates = [...grouped.values()];
+  const selected = mode === 'INDEX'
+    ? candidates.find(entry => entry.replicaIdentity === true)
+    : candidates.find(entry => entry.primary === true);
+  return Object.freeze(selected ? Object.freeze([...selected.columns]) : Object.freeze([]));
+}
+
 export async function describePostgresReplicaIdentity({ ref, credentialBroker, schema, table } = {}) {
   const databaseRef = requireDatabaseRef(ref);
   const sourceSchema = requireText(schema, 'schema');
@@ -126,23 +155,23 @@ export async function describePostgresReplicaIdentity({ ref, credentialBroker, s
       return Object.freeze({ mode, columns: Object.freeze([]), schema: sourceSchema, table: sourceTable });
     }
 
-    const indexes = await client.query(
-      `SELECT i.indisprimary AS "primary", i.indisreplident AS "replicaIdentity",
-              array_agg(a.attname ORDER BY ord.ordinality) AS "columns"
+    // One row per index key column (never array_agg): see
+    // replicaIdentityKeyColumnsFromIndexRows for the wire-representation
+    // reason. Grouping in JS keeps key order via ordinality.
+    const indexColumns = await client.query(
+      `SELECT i.indexrelid AS "index", i.indisprimary AS "primary", i.indisreplident AS "replicaIdentity",
+              a.attname AS "column"
        FROM pg_catalog.pg_index i
        JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS ord(attnum, ordinality) ON TRUE
        JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ord.attnum
        WHERE i.indrelid = $1::oid
-       GROUP BY i.indexrelid, i.indisprimary, i.indisreplident`,
+       ORDER BY i.indexrelid, ord.ordinality`,
       [relation.rows[0].oid]
     );
-    const selected = mode === 'INDEX'
-      ? indexes.rows.find(row => row.replicaIdentity === true)
-      : indexes.rows.find(row => row.primary === true);
-    const columns = Array.isArray(selected?.columns) ? selected.columns.map(String) : [];
+    const columns = replicaIdentityKeyColumnsFromIndexRows({ mode, rows: indexColumns.rows });
     return Object.freeze({
       mode,
-      columns: Object.freeze(columns),
+      columns,
       schema: sourceSchema,
       table: sourceTable
     });
