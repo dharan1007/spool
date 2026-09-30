@@ -319,9 +319,11 @@ export function classifyStage(spec, run = {}) {
   const outcome = (status, extra = {}) => ({
     status,
     naReason: status === 'NOT_APPLICABLE' ? (extra.naReason ?? spec.naReason ?? null) : null,
-    counts: null,
-    skipNames: [],
-    markersSeen: [],
+    counts: extra.counts
+      ? { tests: extra.counts.tests, pass: extra.counts.pass, fail: extra.counts.fail, skipped: extra.counts.skipped }
+      : null,
+    skipNames: extra.skipNames ?? [],
+    markersSeen: extra.markersSeen ?? [],
     notes: extra.notes ?? [],
     classification: {
       envMissing: run.envMissing === true,
