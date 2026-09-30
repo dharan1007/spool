@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
-import { statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -12,6 +11,7 @@ import { ResourceSampler } from './sampler.js';
 import { datasetId } from './dataset.js';
 import { writeSha256Sums } from './checksums.js';
 import { REQUIRED_SCENARIOS, requiredScenarioNames, foldScenarioFailures } from './scenarios.js';
+import { measureDisk } from './disk-preflight.js';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -152,20 +152,21 @@ async function main() {
   } catch (e) {
     preflightFailures.push({ scenario: 'preflight', code: 'PREFLIGHT_ERROR', message: e.message, expected: false, classification: 'ENVIRONMENT', timestamp: new Date().toISOString() });
   }
-  // Real disk measurement (statfs on the evidence directory): source
-  // materialization plus target-side staging plus WAL headroom. Memory free
-  // is not disk free; the old freemem approximation is gone.
+  // Real disk measurement (shared disk-preflight on the evidence directory):
+  // source materialization plus target-side staging plus WAL headroom. Memory
+  // free is not disk free; the old freemem approximation is gone.
   try {
-    const stats = statfsSync(runDir);
-    const availableBytes = Number(stats.bavail) * Number(stats.bsize);
+    const measurement = measureDisk(runDir);
+    if (!measurement.measurable) throw new Error(measurement.error);
+    const availableBytes = measurement.freeBytes;
     const neededBytes = Math.ceil(profile.rows * (profile.payloadBytes + 512) * 3);
     if (!Number.isSafeInteger(availableBytes) || !Number.isSafeInteger(neededBytes)) {
-      throw new Error('statfs returned non-numeric capacity');
+      throw new Error('disk measurement returned non-numeric capacity');
     }
     if (availableBytes < neededBytes) {
       preflightFailures.push({ scenario: 'preflight', code: 'INSUFFICIENT_DISK', message: `available ${availableBytes} bytes < required ${neededBytes} bytes for profile ${profile.name}`, expected: false, classification: 'ENVIRONMENT', timestamp: new Date().toISOString() });
     } else {
-      metrics.preflight = { status: 'PASS', availableBytes, neededBytes };
+      metrics.preflight = { status: 'PASS', availableBytes, neededBytes, measuredAt: measurement.measuredAt };
     }
   } catch (e) {
     preflightFailures.push({ scenario: 'preflight', code: 'DISK_UNMEASURABLE', message: `Disk headroom cannot be measured: ${e.message}`, expected: false, classification: 'ENVIRONMENT', timestamp: new Date().toISOString() });
