@@ -5,7 +5,14 @@ import os from 'node:os';
 import { readFile } from 'node:fs/promises';
 
 function tryExec(cmd, args) {
-  try { return execFileSync(cmd, args, { encoding: 'utf8' }).trim(); } catch { return null; }
+  try {
+    return execFileSync(cmd, args, {
+      encoding: 'utf8',
+      shell: process.platform === 'win32' && /\.cmd$/.test(cmd)
+    }).trim();
+  } catch {
+    return null;
+  }
 }
 
 function fileSha256(path) {
@@ -36,7 +43,7 @@ export async function captureEnvironment({ pgConfig = null } = {}) {
       version: process.version,
       arch: process.arch,
       platform: process.platform,
-      npmVersion: tryExec('npm', ['--version']),
+      npmVersion: tryExec(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['--version']),
       packageLockDigest: fileSha256('package-lock.json')
     },
     git: {
