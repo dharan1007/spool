@@ -1593,8 +1593,12 @@ export class SpoolCommandService {
           }
         }
       }
-      if (state.currentState !== MIGRATION_STATES.CUTOVER_COMMITTED) {
-        fail('CUTOVER_NOT_ARMED', `Cutover commit requires durable state CUTOVER_ARMED/FINAL_DRAIN/FINAL_VERIFY, not ${state.currentState}`);
+      // Phase-1 outcomes are CUTOVER_COMMITTED; a restart can also legitimately
+      // re-enter here from POST_CUTOVER_VERIFY (phase 2 reuses the immutable
+      // proof saved by the atomic CUTOVER_COMMITTED -> POST_CUTOVER_VERIFY
+      // transition). Anything else never reached a committed cutover.
+      if (![MIGRATION_STATES.CUTOVER_COMMITTED, MIGRATION_STATES.POST_CUTOVER_VERIFY].includes(state.currentState)) {
+        fail('CUTOVER_NOT_ARMED', `Cutover commit requires durable state CUTOVER_ARMED/FINAL_DRAIN/FINAL_VERIFY to reach CUTOVER_COMMITTED, or a resumed CUTOVER_COMMITTED/POST_CUTOVER_VERIFY, not ${state.currentState}`);
       }
 
       // Phase 2: fresh POST_CUTOVER proof, then COMPLETED. The atomic
