@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from 'pg';
+import { CredentialBroker } from '../../src/daemon/credential-broker.js';
 import {
   acquirePostgresTableShareLockBarrier,
   acquirePostgresTargetTableShareLockBarrier
@@ -283,5 +284,60 @@ test('PostgreSQL target cutover barrier independently blocks target DML until re
     await writer.query('ROLLBACK').catch(() => {});
     await writer.end().catch(() => {});
     await reader.end().catch(() => {});
+  }
+});
+
+// Regression for the barrier session-lifecycle defect: the pre-fix
+// implementation returned a live pg.Client out of credentialBroker.withSecret().
+// The hardened broker deep-scans callback results and fails closed with
+// SECRET_LEAK_DETECTED whenever resolved secret material crosses that boundary,
+// so every barrier acquisition through the REAL broker failed. The other tests
+// in this file use a stub broker (withSecret: fn => fn(password)) that never
+// runs leak detection, which is exactly why the defect went unnoticed.
+test('source write barrier acquires through the hardened credential broker without leaking secret material', { skip: !enabled, timeout: 120_000 }, async () => {
+  const table = 'spool_barrier_broker_scope';
+  await reset(table);
+  assert.ok(password.length > 0, 'this regression requires the real qualification password in SPOOL_TEST_PG_PASSWORD');
+  const realBroker = new CredentialBroker();
+  let barrier = null;
+  try {
+    barrier = await acquirePostgresTableShareLockBarrier({
+      migrationId: 'barrier-broker-scope',
+      sourceRef: sourceRef(table),
+      credentialBroker: realBroker,
+      lockTimeoutMs: 5_000,
+      probeTimeoutMs: 100
+    });
+
+    // Only an opaque handle may cross the broker boundary: no evidence field
+    // may contain the resolved secret, in any nesting depth.
+    const serialized = JSON.stringify({
+      barrierId: barrier.barrierId,
+      kind: barrier.kind,
+      migrationId: barrier.migrationId,
+      acquiredAt: barrier.acquiredAt,
+      finalLsn: barrier.finalLsn,
+      proof: barrier.proof,
+      zeroDowntime: barrier.zeroDowntime
+    });
+    assert.equal(serialized.includes(password), false, 'barrier evidence must never contain the credential secret');
+
+    assert.equal((await barrier.verifyHeld()).held, true);
+
+    await barrier.release();
+    const released = barrier;
+    barrier = null;
+
+    // A released session handle is stale: it must refuse to re-authorize.
+    await assert.rejects(
+      () => released.verifyHeld(),
+      error => /WRITE_BARRIER_RELEASED/.test(String(error?.code ?? error?.message))
+    );
+
+    // Repeated release stays idempotent.
+    const again = await released.release();
+    assert.equal(again.repeated, true);
+  } finally {
+    if (barrier) await barrier.release().catch(() => {});
   }
 });

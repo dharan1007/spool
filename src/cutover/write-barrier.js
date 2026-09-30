@@ -1,5 +1,5 @@
 import { Client } from 'pg';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { fail } from '../core/errors.js';
 import { canonicalJson, sha256Canonical } from '../platform/canonical-json.js';
 import { postgresConnectionConfig } from '../connectors/postgres/connection.js';
@@ -7,6 +7,11 @@ import { postgresConnectionConfig } from '../connectors/postgres/connection.js';
 const BARRIER_DOMAIN = 'spool-source-write-barrier-v2';
 const LSN = /^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/;
 const PG_LOCK_TIMEOUT = '55P03';
+// Forgotten-barrier safety: a session that is never released would hold its
+// SHARE lock indefinitely and wedge source writes. The idle timeout rolls a
+// leaked barrier back server-side; verifyHeld() immediately before the
+// cutover decision still fails closed if the lock is gone for any reason.
+const BARRIER_IDLE_TIMEOUT = '10min';
 const OPERATOR_SIGNATURE_DOMAIN = 'spool-source-write-barrier-operator-signature-v1';
 const HASH = /^sha256:[a-f0-9]{64}$/;
 const SIGNATURE = /^hmac-sha256:[a-f0-9]{64}$/;
@@ -108,7 +113,15 @@ function requireTimeout(value, label, { min = 50, max = 300_000 } = {}) {
   return value;
 }
 
-async function openDedicatedClient({ sourceRef, credentialBroker }) {
+// Barrier sessions live in a module-level registry (mirroring the pool
+// registry in connection.js): a live pg.Client embeds the password in its
+// connection parameters, so it must never cross the broker callback scope
+// outward — the hardened broker fails such results closed as
+// SECRET_LEAK_DETECTED. Only an opaque random handle id crosses outward;
+// every session operation resolves it here, inside this trust domain.
+const barrierSessions = new Map();
+
+async function openBarrierSession({ sourceRef, credentialBroker }) {
   if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') {
     fail('INVALID_BARRIER_REQUEST', 'credentialBroker.withSecret() is required');
   }
@@ -118,8 +131,28 @@ async function openDedicatedClient({ sourceRef, credentialBroker }) {
       application_name: 'spool-write-barrier'
     });
     await client.connect();
-    return client;
+    const handle = randomUUID().replaceAll('-', '');
+    barrierSessions.set(handle, { client, inTransaction: false, released: false });
+    return handle;
   });
+}
+
+function barrierSession(handle) {
+  const entry = barrierSessions.get(handle);
+  if (!entry || entry.released) fail('WRITE_BARRIER_RELEASED', 'Source write barrier session is no longer held');
+  return entry;
+}
+
+async function closeBarrierSession(handle) {
+  const entry = barrierSessions.get(handle);
+  if (!entry) return;
+  barrierSessions.delete(handle);
+  entry.released = true;
+  if (entry.inTransaction) {
+    try { await entry.client.query('ROLLBACK'); } catch {}
+    entry.inTransaction = false;
+  }
+  try { await entry.client.end(); } catch {}
 }
 
 export function barrierIdentity({ migrationId, kind, acquiredAt, finalLsn, attestation = null } = {}) {
@@ -274,22 +307,19 @@ export async function acquirePostgresTableShareLockBarrier({
   requireTimeout(probeTimeoutMs, 'probeTimeoutMs', { min: 50, max: 10_000 });
 
   const qualified = `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
-  const locker = await openDedicatedClient({ sourceRef, credentialBroker });
-  let inTransaction = false;
-  let released = false;
+  const session = await openBarrierSession({ sourceRef, credentialBroker });
+  const entry = barrierSession(session);
+  const locker = entry.client;
 
   const rollbackAndClose = async () => {
-    if (inTransaction) {
-      try { await locker.query('ROLLBACK'); } catch {}
-      inTransaction = false;
-    }
-    try { await locker.end(); } catch {}
+    await closeBarrierSession(session);
   };
 
   try {
     await locker.query('BEGIN');
-    inTransaction = true;
+    entry.inTransaction = true;
     await locker.query(`SET LOCAL lock_timeout = '${lockTimeoutMs}ms'`);
+    await locker.query(`SET LOCAL idle_in_transaction_session_timeout = '${BARRIER_IDLE_TIMEOUT}'`);
     try {
       await locker.query(`LOCK TABLE ${qualified} IN SHARE MODE`);
     } catch (error) {
@@ -307,7 +337,8 @@ export async function acquirePostgresTableShareLockBarrier({
 
     // Independent-session proof: ROW EXCLUSIVE is the table lock mode acquired
     // by ordinary INSERT/UPDATE/DELETE. It must fail while SHARE is held.
-    const probe = await openDedicatedClient({ sourceRef, credentialBroker });
+    const probeSession = await openBarrierSession({ sourceRef, credentialBroker });
+    const probe = barrierSession(probeSession).client;
     let probeError = null;
     try {
       await probe.query('BEGIN');
@@ -316,8 +347,7 @@ export async function acquirePostgresTableShareLockBarrier({
     } catch (error) {
       probeError = error;
     } finally {
-      try { await probe.query('ROLLBACK'); } catch {}
-      try { await probe.end(); } catch {}
+      await closeBarrierSession(probeSession);
     }
 
     if (!probeError || String(probeError.code) !== PG_LOCK_TIMEOUT) {
@@ -366,7 +396,8 @@ export async function acquirePostgresTableShareLockBarrier({
       proof,
       zeroDowntime: false,
       async verifyHeld() {
-        if (released || !inTransaction) {
+        const live = barrierSessions.get(session);
+        if (!live || live.released || !live.inTransaction) {
           fail('WRITE_BARRIER_RELEASED', 'Source write barrier is no longer held', { barrierId });
         }
         let result;
@@ -398,14 +429,14 @@ export async function acquirePostgresTableShareLockBarrier({
         return Object.freeze({ barrierId, held: true, backendPid, verifiedAt: new Date().toISOString() });
       },
       async release() {
-        if (released) return Object.freeze({ barrierId, released: true, repeated: true });
-        released = true;
+        const live = barrierSessions.get(session);
+        if (!live || live.released) return Object.freeze({ barrierId, released: true, repeated: true });
         await rollbackAndClose();
         return Object.freeze({ barrierId, released: true, releasedAt: new Date().toISOString() });
       }
     });
   } catch (error) {
-    if (!released) await rollbackAndClose();
+    await rollbackAndClose();
     throw error;
   }
 }
