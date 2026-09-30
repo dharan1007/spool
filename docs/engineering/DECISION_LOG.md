@@ -144,3 +144,41 @@ NOT_EXECUTED, which prevents overall PASS. Skip counts are cross-checked
 against named skip lines so unattributable skips fail closed.
 **Why:** section 10 ("a skipped mandatory test is NOT_EXECUTED, not PASS");
 counting skip numbers alone cannot prove *which* tests skipped.
+
+## D13 — DRAIN_BLOCKED lands in FAILED_RECOVERABLE, not FAILED_OPERATOR_REQUIRED
+
+**Date:** 2026-09-30
+**Decision:** when a bounded CDC drain exhausts its stall window without
+data-driven progress, the applier fails with `DRAIN_BLOCKED` and the daemon
+durably transitions the migration to `FAILED_RECOVERABLE` with
+`reason: 'DRAIN_BLOCKED'` and the full section-13 capture set as evidence.
+`FAILED_OPERATOR_REQUIRED` stays reserved for states where no automatic
+retry can be correct (destructive ambiguity, lost authority).
+**Why:** the drain block is a diagnosable environment/stream condition, not
+an operator decision: the durable applied watermark is intact, so a retry
+resumes exactly where progress stopped. Putting it in a terminal operator
+state would discard the recovery path the checkpoint already provides. The
+failure is still loud, durable, and self-explaining — a timeout never
+resolves an unresolved drain as success (section 13).
+**Consequences:** `#recordDrainBlocked` tolerates only
+`ILLEGAL_STATE_TRANSITION` (a concurrent transition already moved the
+state); the original `DRAIN_BLOCKED` diagnosis is always rethrown to the
+caller unchanged.
+
+## D14 — Drain progress means data or applied work, never heartbeats
+
+**Date:** 2026-09-30
+**Decision:** the bounded-drain stall watchdog resets only when a source
+message is queued or a transaction is applied. Server keepalive heartbeats
+feed only the watermark/idle-stop check; they never count as progress. The
+watchdog applies only to bounded drains (`untilLsn` or `maxTransactions`);
+unbounded continuous-capture runs are excluded and end only on stream
+failure (including a clean subscription end, which the pump treats as
+stream failure instead of waiting forever).
+**Why:** a stream that heartbeats but never carries data is exactly the
+livelock the section-13 rules target; counting heartbeats would paper over
+it. The wake is a timer racing the notification promise because a fully
+silent stream never resolves `notified`.
+**Consequences:** `cdc-apply.js` carries an explicit `sleep-sync`
+allowlist entry: the deadline converts an unresolved drain into a
+`DRAIN_BLOCKED` failure and never into success.

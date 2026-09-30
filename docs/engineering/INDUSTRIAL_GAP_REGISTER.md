@@ -40,32 +40,33 @@ nothing is estimated. States:
 | Q-03 | Adversarial qualification tests (18 invariants) | P0 | fail-closed proofs | COMPLETE | PASSING | QUALIFIED | — | `tests/qualify-standalone.test.js` (20/20) | `81ffe72`, `4d605fc` | STEP 22; verifier fails closed on every contradiction |
 | Q-04 | CI_CORRECTNESS profile execution | P0 | ≥100k rows, ≥30s real CDC + mandatory tests | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned: workload envelope stage bound into correctness profile) | — | Step 28; class claims gated until then (`4d605fc`) |
 | Q-05 | Evidence writer/verifier/checksums | P1 | tamper-detection tests | COMPLETE | PASSING | QUALIFIED | — | `tests/qualify-harness.test.js` + adversarial tests 4/5/14/15 | `821aa6b` | reused by runner (no duplicate implementation) |
-| D-01 | CDC drain/cutover hang: root cause established | P0 | captured position/worker/barrier state | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | scratch probes on `wip/` branch | — | Step 23; no timeouts-as-success |
-| D-02 | Documented drain state-machine invariant | P0 | authoritative lifecycle doc | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned docs entry) | — | Step 24 |
-| D-03 | Drain hang root-cause fix | P0 | repro passes + no regression | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned) | — | Step 25; DRAIN_BLOCKED/OPERATOR_ACTION_REQUIRED if unresolved |
-| D-04 | Permanent CDC tests (drain/cutover/restart/slot) | P0 | 4 separate conformance files | PARTIAL | PARTIAL | NOT_EXECUTED | **P0** | replica-identity file exists; 3 files absent | — | Step 26 |
+| D-01 | CDC drain/cutover hang: root cause established | P0 | captured position/worker/barrier state | COMPLETE | PASSING | QUALIFIED | — | §23 repro log + `CDC_DRAIN_LIFECYCLE.md` root-cause sections | `6c79479` | Steps 23-24: original hang closed by `c023d52`/`1ce26fa`; remaining class = unbounded silent wait + clean stream end never surfaced to the pump |
+| D-02 | Documented drain state-machine invariant | P0 | authoritative lifecycle doc | COMPLETE | PASSING | QUALIFIED | — | `docs/engineering/CDC_DRAIN_LIFECYCLE.md` | `6c79479` | Step 24; conceptual→SPOOL mapping, pump micro-lifecycle, §13 capture set, bounded/unbounded rules |
+| D-03 | Drain hang root-cause fix | P0 | repro passes + no regression | COMPLETE | PASSING | QUALIFIED | — | DRAIN_BLOCKED watchdog + FAILED_RECOVERABLE wiring; suite 592/572/0/20 | `6c79479` | Step 25; timer-race watchdog (bounded drains only), heartbeats never count as progress, timeout never resolves as success |
+| D-04 | Permanent CDC tests (drain/cutover/restart/slot) | P0 | 4 separate conformance files | COMPLETE | PASSING | QUALIFIED | — | `postgres-cdc-{replica-identity,drain-lifecycle,cutover-drain,restart-drain}.test.js` | `6c79479` | Step 26; 6 new tests (3 lifecycle + 1 cutover + 2 restart), scratch repro deleted |
 | H-01 | Four-position CDC watermark model durable | P1 | captured/applied/acked/verified persisted separately | PARTIAL | PARTIAL | NOT_EXECUTED | P1 | `appliedLsn`+`acknowledgedLsn` in checkpoints | prior | captured/verified not first-class; §15 |
 | H-02 | Source-ack ordering documented + fault-injected | P1 | ordering doc + failure between each pair | PARTIAL | PARTIAL | NOT_EXECUTED | P1 | commit-before-checkpoint tests (subset) | prior | §17 pairs not exhaustively injected |
 | H-03 | Continuous verification watermark/states | P1 | §19 VERIFIED/DIFF/INCOMPLETE/BLOCKED/STALE | NOT_STARTED | NONE | NOT_EXECUTED | P1 | — | — | must bind consistency point |
 | H-04 | Freshness-aware persistent monitoring | P2 | §20/§21 states + restart tests | NOT_STARTED | NONE | NOT_EXECUTED | P2 | — | — | not required for CI_CORRECTNESS |
+| H-05 | Watchdog covers apply-blocked bounded drains | P2 | bounded drain fails closed when target apply blocks | NOT_STARTED | NONE | NOT_EXECUTED | P2 | documented in `CDC_DRAIN_LIFECYCLE.md` known-gap section | — | pre-existing class, distinct from the fixed silent-stream hang (D-01/D-03); queue stays non-empty so the wait-branch watchdog never runs |
 | E-01 | Destructive-harness target identity check | P1 | host/port/db/role/marker verified fail-closed | PARTIAL | NONE | NOT_EXECUTED | P1 | marker exists in setup tool only | `810f1e4` | §22 requires harness-level check |
 | E-02 | Secrets absent from evidence | P1 | scan evidence for secret values | COMPLETE | PASSING | QUALIFIED | — | QUALIFICATION_EVIDENCE integrity notes | `810f1e4` | verified by scan |
 
-## Derived reports (counted from the 36 rows above)
+## Derived reports (counted from the 37 rows above)
 
 ### IMPLEMENTATION COMPLETION
 
-- `COMPLETE`: **22**
-- `PARTIAL`: **8** (C-08, C-09, C-12, C-13, D-04, H-01, H-02, E-01)
-- `NOT_STARTED`: **6** (Q-04, D-01, D-02, D-03, H-03, H-04)
-- Report: **22/36 complete (8 partial, 6 not started)**
+- `COMPLETE`: **26**
+- `PARTIAL`: **7** (C-08, C-09, C-12, C-13, H-01, H-02, E-01)
+- `NOT_STARTED`: **4** (Q-04, H-03, H-04, H-05)
+- Report: **26/37 complete (7 partial, 4 not started)**
 
 ### QUALIFICATION READINESS
 
-- `QUALIFIED` (live evidence executed and passed): **22**
+- `QUALIFIED` (live evidence executed and passed): **26**
 - `TESTED` (unit/integration only): **2** (C-08, C-09)
-- `NOT_EXECUTED`: **12**
-- Report: **22/36 qualified; 12 not executed**
+- `NOT_EXECUTED`: **9**
+- Report: **26/37 qualified; 9 not executed**
 
 ### QUALIFICATION CLASS
 
@@ -79,13 +80,10 @@ nothing is estimated. States:
 
 1. Q-04 CI_CORRECTNESS run not executed (workload envelope not yet bound
    into the correctness profile)
-2. D-01 drain-hang root cause not established
-3. D-02 drain invariant not documented
-4. D-03 drain fix not implemented
-5. D-04 permanent CDC drain/cutover/restart tests incomplete
 
-**P0 BLOCKERS: 5** — each prevents release regardless of the percentages
-above. (Was 8; Q-01/Q-02/Q-03 resolved by `821aa6b`/`81ffe72`/`4d605fc`.)
+**P0 BLOCKERS: 1** — prevents release regardless of the percentages
+above. (Was 8; Q-01/Q-02/Q-03 resolved by `821aa6b`/`81ffe72`/`4d605fc`;
+D-01/D-02/D-03/D-04 resolved by the Steps 23-26 drain lifecycle unit.)
 
 ### EXTERNAL BLOCKERS
 

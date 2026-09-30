@@ -39,11 +39,11 @@ progress" below for the exact step cursor.
 | 20 | Engineering state documents (this file set) | DONE (commit `ee4885f`) |
 | 21 | Standalone qualification runner profiles | DONE (`821aa6b`, fix `4d605fc`) — quick + postgres profiles executed end-to-end |
 | 22 | Adversarial qualification-runner tests (18 invariants) | DONE (`81ffe72`) — 20/20 pass (18 invariants + happy path + class-gate) |
-| 23 | Reproduce CDC drain/cutover hang live | NOT STARTED (next) |
-| 24 | Document intended CDC drain state-machine invariant | NOT STARTED |
-| 25 | Fix root cause (no timeout-as-success) | NOT STARTED |
-| 26 | Promote scratch repros to permanent tests | NOT STARTED (see GAP_REGISTER D-04) |
-| 27 | PostgreSQL correctness/red-team suite | NOT STARTED |
+| 23 | Reproduce CDC drain/cutover hang live | DONE — scratch repro passes on HEAD (4.6s, trace log); root-cause class established (unbounded silent wait + clean stream end never surfaced); original hang traced to `c023d52`/`1ce26fa` fixes |
+| 24 | Document intended CDC drain state-machine invariant | DONE — `docs/engineering/CDC_DRAIN_LIFECYCLE.md` |
+| 25 | Fix root cause (no timeout-as-success) | DONE — bounded-drain `DRAIN_BLOCKED` watchdog (timer-race wake, data-driven progress only) + durable `FAILED_RECOVERABLE` transition with §13 capture set (`#recordDrainBlocked`) |
+| 26 | Promote scratch repros to permanent tests | DONE — 6 tests in `postgres-cdc-{drain-lifecycle,cutover-drain,restart-drain}.test.js` (+ existing replica-identity file); scratch deleted; suite 592/572/0/20 |
+| 27 | PostgreSQL correctness/red-team suite | NOT STARTED (next) |
 | 28 | CI_CORRECTNESS profile (only when prerequisites ready) | NOT STARTED — needs workload envelope stage bound into correctness profile (100k rows/30s CDC) |
 | 29 | Record evidence | PARTIAL (R1-R7 in QUALIFICATION_EVIDENCE.md; CI_CORRECTNESS run pending) |
 | 30 | Push integration branch (never main) | NOT STARTED |
@@ -128,13 +128,17 @@ node --test tests/qualify-standalone.test.js                # adversarial suite 
 
 ## Remaining defects (open)
 
-- CDC drain/cutover lifecycle hang (scratch probes on
-  `wip/cdc-drain-debugging-20260930`) — root cause NOT yet established;
-  Steps 23-25 own this. Do not paper over with timeouts.
 - CI_CORRECTNESS class evidence has not been executed (Step 28): the
   correctness profile still lacks the bound workload envelope stage
   (100k rows / 30s real CDC from `PROFILE_DEFINITIONS.CI`), so any PASS
-  correctly reports `NOT_ESTABLISHED` for that class.
+  correctly reports `NOT_ESTABLISHED` for that class. This is the last
+  P0 blocker in `INDUSTRIAL_GAP_REGISTER.md`.
+- Known bounded-drain gap (documented in `CDC_DRAIN_LIFECYCLE.md`,
+  non-blocking for Steps 23-26): the stall watchdog runs in the pump's
+  empty-queue wait branch; a target-side apply that blocks indefinitely
+  (e.g. locked target table) keeps the queue non-empty and is not
+  covered. Pre-existing class, distinct from the fixed silent-stream
+  hang; registered as follow-up, not papered over.
 - Qualification runner exists and is proven on quick + postgres profiles
   (resolved Steps 21-22; adversarial suite 20/20).
 

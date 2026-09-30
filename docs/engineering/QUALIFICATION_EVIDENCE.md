@@ -86,6 +86,37 @@ that — never `PASS`.
 - Covers all 18 section-11 invariants plus sound-PASS happy path plus the
   workload-gated class claim.
 
+### R9 — CDC drain lifecycle root-cause unit (STEPS 23-26 proof)
+
+- §23 repro attempt: the scratch drain repro
+  (`SPOOL_TRACE_DRAIN=1`, full trace in `%TEMP%\drain-repro-1.log`)
+  **passed in 4.6s on HEAD** — the original hang no longer reproduces.
+  Forensics attribute it to the barrier-session leak fixed in `c023d52`
+  and the queue-drop fix in `1ce26fa`; the remaining root-cause class is
+  an unbounded `await notified` wait when the stream goes silent, plus a
+  clean subscription end that never surfaced to the pump (documented in
+  `CDC_DRAIN_LIFECYCLE.md`). Scratch repro promoted and deleted (§14).
+- Permanent tests added (6): `postgres-cdc-drain-lifecycle` (3: bounded
+  DRAIN_BLOCKED with full capture set, unbounded watchdog exclusion +
+  stream-failure termination, FAILED_RECOVERABLE durable transition),
+  `postgres-cdc-cutover-drain` (1: armed cutover freezes catch-up, final
+  drain converges a quiesced source in bounded time under the canonical
+  `cutover:<attempt>:final-drain` command identity),
+  `postgres-cdc-restart-drain` (2: watermark restart returns without
+  re-applying, bounded partial drain resumes exactly the remainder).
+- Two defects were found by these tests and fixed before any claim: the
+  DRAIN_BLOCKED capture set assumed an async checkpoint reader
+  (`load().catch` on the run-store's synchronous adapter) and the pump
+  could wait forever after a clean subscription end.
+- Command: `npm test` with `spooltest.env` loaded, working tree containing
+  the final Steps 23-26 code.
+- Result: **592 discovered / 572 passed / 0 failed / 20 skipped**, exit 0,
+  365.5s. Skips are exactly the 20-item `FULL_SUITE_SKIP_ALLOW` contract
+  (8 SQL Server, 7 MySQL, 3 SIGKILL-Windows, 2 POSIX).
+- `node scripts/static-check.js` → PASS (explicit `sleep-sync` allowlist
+  entry for the drain stall deadline with justification; the timer only
+  converts an unresolved drain into `DRAIN_BLOCKED`, never into success).
+
 ### PostgreSQL live status summary
 
 | Area | Tests | Live result |
@@ -98,6 +129,7 @@ that — never `PASS`.
 | **Total formerly-gated PG tests executed** | **72** | **0 failures** |
 | Standalone runner profiles (R6 quick, R7 postgres) | 5 stages each | PASS, self-verified, exit 0 |
 | Adversarial qualification suite (R8) | 20 | PASS |
+| CDC drain lifecycle unit (R9: drain-lifecycle, cutover-drain, restart-drain) | 6 | PASS (live PostgreSQL) |
 
 ## Environment
 
