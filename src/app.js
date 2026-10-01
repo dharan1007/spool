@@ -19,6 +19,11 @@ const STUDIO_FLOW_PATHS = new Set([
   '/studio/transform', '/studio/test', '/studio/process', '/studio/validate'
 ]);
 
+const REDESIGNED_SITE_PATHS = new Set([
+  '/', '/how-it-works', '/webmcp', '/benchmarks', '/docs',
+  '/local-runner', '/examples', '/security', '/services'
+]);
+
 const PUBLIC_NAV = [
   ['/', 'Overview'],
   ['/autopilot', 'Autopilot'],
@@ -462,6 +467,25 @@ function notFoundPage(path, state) {
 function render() {
   if (!latestState || !appRoot) return;
   const path = currentPath();
+
+  // Autopilot is a legacy shortcut only. The user-facing product always enters
+  // the explicit seven-stage Studio workflow instead of a one-button mission UI.
+  if (path === '/autopilot') {
+    window.history.replaceState({}, '', '/studio/original');
+    window.dispatchEvent(new CustomEvent('spool:studio-route', { detail: { path: '/studio/original' } }));
+    return;
+  }
+
+  // site-redesign.js owns the complete public website. Keep the kernel/bootstrap
+  // in this module, but do not let legacy public pages repaint over the redesign.
+  if (REDESIGNED_SITE_PATHS.has(path)) {
+    if (!appRoot.querySelector('[data-spool-site-root]')) {
+      appRoot.innerHTML = '<main class="site-redesign-handoff" role="status" aria-live="polite"><strong>Opening SPOOL…</strong></main>';
+    }
+    appRoot.removeAttribute('aria-busy');
+    window.dispatchEvent(new CustomEvent('spool:site-route', { detail: { path } }));
+    return;
+  }
 
   // The seven-stage Studio is authoritative. Do not let this legacy renderer
   // repaint Autopilot setup/mission screens over studio-flow.js after source
