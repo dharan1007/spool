@@ -8,3 +8,5 @@ benchmarks/results/
 release/reproducibility-evidence.json
 qualification/spool-qualify-*/
 qualification/standalone-*/
+browser-smoke.png
+__pycache__/

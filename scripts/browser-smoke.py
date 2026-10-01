@@ -26,6 +26,23 @@ def resolve_browser():
         resolved = shutil.which(candidate)
         if resolved:
             return resolved
+    # Windows installs do not place Chrome on PATH under the unix names:
+    # probe the well-known install locations (Program Files, per-user, and
+    # the Playwright-managed Chromium used by this repository's tooling).
+    if os.name == 'nt':
+        program_files = [os.environ.get('ProgramFiles'), os.environ.get('ProgramFiles(x86)')]
+        local_app_data = os.environ.get('LocalAppData')
+        windows_candidates = [
+            os.path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe') for pf in program_files if pf
+        ]
+        if local_app_data:
+            windows_candidates.append(os.path.join(local_app_data, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+            import glob
+            for playwright_chrome in sorted(glob.glob(os.path.join(local_app_data, 'ms-playwright', 'chromium-*', 'chrome-win', 'chrome.exe'))):
+                windows_candidates.append(playwright_chrome)
+        for candidate in windows_candidates:
+            if os.path.exists(candidate):
+                return candidate
     raise RuntimeError('No supported Chromium/Chrome executable found')
 
 
@@ -184,8 +201,12 @@ def main():
             ('/services', 'DEPLOYMENT + SUPPORT', 'Production target writes stay local')
         ]
         for route, needle_a, needle_b in product_checks:
-            cdp.call('Page.navigate', {'url': base_url + route})
-            wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=15, label=f'{route} load')
+            # Client-side navigation: the product pages are SPA routes and the
+            # smoke server (plain http.server) has no fallback rewrite, so a
+            # full Page.navigate to /local-runner would 404 instead of
+            # rendering. Drive the app router exactly like the Studio flow
+            # below does.
+            cdp.eval(f'window.__spoolTest.navigate("{route}")')
             wait_for(lambda r=route: cdp.eval(f'document.querySelector("[data-product-route=\\"{r}\\"]") !== null'), timeout=15, label=f'{route} product surface')
             text = cdp.eval('document.body.innerText')
             assert needle_a in text, f'{route} missing {needle_a!r}'
@@ -193,8 +214,11 @@ def main():
             assert 'Migration Preflight' not in text, f'{route} still exposes paid Hobby-hosted migration copy'
             assert 'Local-first migration demo' not in cdp.eval('document.title')
 
-        cdp.call('Page.navigate', {'url': base_url + '/studio/new'})
-        wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=15, label='Studio deep-link load')
+        # Same SPA-routing constraint as the product checks: the smoke server
+        # has no fallback rewrite, so drive the app router instead of a full
+        # navigation that would 404.
+        cdp.eval('window.__spoolTest.navigate("/studio/new")')
+        wait_for(lambda: cdp.eval('window.location.pathname === "/studio/new"'), timeout=15, label='Studio deep-link load')
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='Studio bootstrap after product routes')
         assert cdp.eval('window.__spoolTest.state().job.phase') in ('EMPTY', 'COMPLETE')
 
@@ -230,7 +254,7 @@ def main():
         assert cdp.eval('document.body.innerText.includes("Source record")')
         assert cdp.eval('document.querySelectorAll(".recovery-option").length') == 3
         cdp.eval('document.querySelector("[data-outcome=preserve_contract]").click()')
-        assert cdp.eval('document.querySelector("[data-outcome=\\\"preserve_contract\\\"]').getAttribute("aria-pressed")') == 'true'
+        assert cdp.eval('document.querySelector("[data-outcome=preserve_contract]").getAttribute("aria-pressed")') == 'true'
         cdp.eval('document.querySelector("[data-action=retry-autopilot]").click()')
         wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'), timeout=20, label='blocked workflow recovery completion')
         recovered = cdp.eval('window.__spoolTest.state()')
@@ -263,7 +287,11 @@ def main():
         wait_for(lambda: cdp.eval('document.querySelectorAll(".result-metrics article").length === 4'), label='results UI')
         assert cdp.eval('document.querySelectorAll(".quality-grid article").length > 0')
 
-        cdp.call('Page.reload', {'ignoreCache': True})
+        # Full document reload to prove IndexedDB restoration. Reload '/':
+        # the app is an SPA and the smoke server has no fallback rewrite, so
+        # reloading a deep link would 404 instead of bootstrapping.
+        cdp.call('Page.navigate', {'url': base_url + '/'})
+        wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=15, label='reload document load')
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='reload bootstrap')
         wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'), timeout=10, label='IndexedDB restoration')
         assert cdp.eval('window.__spoolTest.state().output.length > 24900')

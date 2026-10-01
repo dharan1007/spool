@@ -8,7 +8,12 @@ import { initializeOptionalWebMcp } from './webmcp/optional.js';
 
 const ROUTES = Object.freeze([
   '/', '/autopilot', '/how-it-works', '/webmcp', '/benchmarks', '/docs',
-  '/studio', '/studio/new', '/studio/mission', '/studio/results'
+  '/studio', '/studio/new', '/studio/mission', '/studio/results',
+  // Product surface routes render through the product-surface overlay
+  // (`syncProductSurface` replaces the app shell once the path survives
+  // navigation). They must survive `navigate()` instead of collapsing to
+  // '/', or in-app product links and the smoke driver can never reach them.
+  '/local-runner', '/examples', '/security', '/services'
 ]);
 
 const PUBLIC_NAV = [
