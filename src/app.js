@@ -11,6 +11,14 @@ const ROUTES = Object.freeze([
   '/studio', '/studio/new', '/studio/mission', '/studio/results'
 ]);
 
+// Studio's seven-stage renderer lives in studio-flow.js. These routes must never
+// fall back to the legacy Autopilot Studio pages in this module.
+const STUDIO_FLOW_PATHS = new Set([
+  '/studio', '/studio/new', '/studio/mission', '/studio/results',
+  '/studio/original', '/studio/inspect', '/studio/understand',
+  '/studio/transform', '/studio/test', '/studio/process', '/studio/validate'
+]);
+
 const PUBLIC_NAV = [
   ['/', 'Overview'],
   ['/autopilot', 'Autopilot'],
@@ -59,6 +67,7 @@ const kernel = new CommandKernel({
   onStateChange(state) {
     latestState = state;
     scheduleRender();
+    window.dispatchEvent(new CustomEvent('spool:statechange'));
     registryChain = registryChain
       .then(() => nativeRegistry?.sync(state.job.phase))
       .catch(() => { webMcpStatus = 'WebMCP registration unavailable'; scheduleRender(); });
@@ -453,6 +462,20 @@ function notFoundPage(path, state) {
 function render() {
   if (!latestState || !appRoot) return;
   const path = currentPath();
+
+  // The seven-stage Studio is authoritative. Do not let this legacy renderer
+  // repaint Autopilot setup/mission screens over studio-flow.js after source
+  // loading, kernel state changes, or direct-route refreshes.
+  if (STUDIO_FLOW_PATHS.has(path)) {
+    if (!appRoot.querySelector('[data-spool-flow-root]')) {
+      appRoot.innerHTML = '<main class="flow-boot-handoff" data-studio-handoff role="status" aria-live="polite"><div><strong>Opening Studio workflow…</strong><span>Restoring the current local migration state.</span></div></main>';
+    }
+    appRoot.removeAttribute('aria-busy');
+    document.title = 'Studio — SPOOL';
+    window.dispatchEvent(new CustomEvent('spool:studio-route', { detail: { path } }));
+    return;
+  }
+
   const pages = {
     '/': overviewPage,
     '/autopilot': autopilotPage,
