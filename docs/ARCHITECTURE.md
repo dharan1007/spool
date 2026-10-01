@@ -2,7 +2,7 @@
 
 ## Product boundary
 
-SPOOL is split into explanatory product routes and a focused Studio. The normal Studio journey is intentionally small: source CSV → desired outcome → Autopilot mission → result. Target schema, transform IR, worker state, checkpoint identity and manual controls are diagnostics, not prerequisites for the common path.
+SPOOL is split into explanatory product routes and a focused Studio. The normal Studio journey is intentionally small: source CSV/XLSX → inspect → understand → prepare transformation → dry test → process → validate. Target schema, transform IR, worker state, checkpoint identity and manual controls are diagnostics, not prerequisites for the common path.
 
 ## Command kernel
 
@@ -32,7 +32,7 @@ A manual run interrupted by a terminated tab restores as `PAUSED_RECOVERED`. An 
 
 `IndexedDbWorkspaceStore` separates compact workflow/mission metadata from source/output chunks. Source chunks are rewritten only when the source fingerprint changes. Output chunks append as progress advances and are cleared when output identity/revision rewinds. Browser Studio emits a bounded UI snapshot that omits the full source/output arrays. IndexedDB checkpoint metadata is cloned after the source/output arrays have been detached from the compact representation; rendering or a checkpoint no longer needlessly clones the full source.
 
-The current UI accepts files up to 50 MB and the parser still materializes the source in browser memory. Whole-file streaming/OPFS is a future scale extension, not a current capability claim.
+The current UI accepts CSV and XLSX files up to 50 MiB and materializes the normalized source in browser memory. XLSX is parsed locally from the first visible worksheet, formula expressions are never executed, ZIP paths/integrity are validated, and expanded archive content is capped at 256 MiB. Whole-file streaming/OPFS is a future scale extension, not a current capability claim.
 
 ## Worker protocol
 
