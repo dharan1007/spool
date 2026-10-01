@@ -10,7 +10,7 @@ test('public Local Runner contract states bounded-memory execution while preserv
     text('docs/LOCAL_RUNNER.md'),
     text('SECURITY.md'),
     text('ROADMAP.md'),
-    text('src/product-surface.js')
+    text('src/site-content.js')
   ]);
   const combined = `${readme}\n${localRunner}\n${security}\n${roadmap}\n${surface}`;
 
