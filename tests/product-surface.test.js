@@ -6,9 +6,9 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-test('Local Runner surface exposes the current package release and full installed-CLI lifecycle', async () => {
+test('Unified site exposes the current Local Runner release and full installed-CLI lifecycle', async () => {
   const [source, pkgText] = await Promise.all([
-    readFile('src/product-surface.js', 'utf8'),
+    readFile('src/site-content.js', 'utf8'),
     readFile('package.json', 'utf8')
   ]);
   const version = JSON.parse(pkgText).version;
