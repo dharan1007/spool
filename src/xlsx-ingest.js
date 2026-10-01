@@ -149,7 +149,7 @@ function columnIndex(reference) {
 function excelSerialToIso(raw, date1904, includeTime) {
   const serial = Number(raw);
   if (!Number.isFinite(serial)) return String(raw ?? '');
-  const epoch = Date.UTC(date1904 ? 1904 : 1899, date1904 ? 0 : 11, date1904 ? 1 : 30);
+  const epoch = Date.UTC(date1904 ? 1904 : 1899, date1904 ? 0 : 11, date1904 ? 1 : 31);
   const adjusted = !date1904 && serial >= 60 ? serial - 1 : serial;
   const millis = epoch + adjusted * 86_400_000;
   const date = new Date(millis);
