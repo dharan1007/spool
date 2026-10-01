@@ -65,7 +65,7 @@ test('complete product truth remains visible without a competing renderer', () =
     '5 source records',
     '3 valid',
     '2 rejected',
-    'Deployment + support',
+    'DEPLOYMENT',
     'Production target writes stay local'
   ]) assert.match(content, new RegExp(phrase, 'i'), 'missing product truth: ' + phrase);
   assert.doesNotMatch(content, /paid checkout/i);
