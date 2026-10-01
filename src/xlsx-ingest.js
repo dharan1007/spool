@@ -280,10 +280,10 @@ export async function xlsxFileToCsv(file) {
     throw new Error('Browser Studio accepts CSV/XLSX files up to 50 MiB.');
   }
 
-  const { unzipSync } = await import('/vendor/fflate.js');
+  const { unzipZip } = await import('./zip-reader.js');
   let entries;
   try {
-    entries = unzipSync(new Uint8Array(await file.arrayBuffer()));
+    entries = await unzipZip(new Uint8Array(await file.arrayBuffer()));
   } catch (error) {
     throw new Error(\`Unable to open XLSX workbook: \${error?.message || String(error)}\`);
   }
