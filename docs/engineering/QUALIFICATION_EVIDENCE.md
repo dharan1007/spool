@@ -214,6 +214,17 @@ that — never `PASS`.
   on demand) → 12.43 GiB at run start; the run holds the correctness
   tier throughout.
 
+### R13 — Full suite on the pushed tree (close-out proof)
+
+- Command: `npm test` with `spooltest.env` loaded; SHA `27c0cc9`,
+  tree clean.
+- Result: **593 discovered / 573 passed / 0 failed / 20 skipped**,
+  exit 0, 398.8s. (592 R9/R10 tests + adversarial pin test 21, which
+  runs inside the suite glob.) Skips are exactly the 20-item
+  `FULL_SUITE_SKIP_ALLOW` contract.
+- No code changed since R12 (docs only); this run proves the pushed
+  artifact regressed nothing.
+
 ### PostgreSQL live status summary
 
 | Area | Tests | Live result |
@@ -231,6 +242,7 @@ that — never `PASS`.
 | Adversarial suites (R8: 20, R11 pin test 21) | 21 | PASS |
 | Correctness profile (R11): 11/14 stages executed | 11 × PASS, envelope blocked by disk gate | FAIL-closed (refusal, not product failure) |
 | Correctness profile (R12): 14/14 stages | 621 / 616 pass / 0 fail / 5 skipped | PASS, self-verified + independently verified, class CI_CORRECTNESS |
+| Full suite on pushed tree (R13) | 593 / 573 pass / 0 fail / 20 skipped | PASS |
 
 ## Environment
 
