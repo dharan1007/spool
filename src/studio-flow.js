@@ -448,8 +448,8 @@ function processPage(state) {
     'This is the first stage that commits transformed records into SPOOL’s durable browser result state. A mapping revision is fixed for the run.') +
     blocked + '<section class="flow-process-panel"><div class="flow-process-status"><span class="flow-kicker">RUN STATUS</span><h2>' + title +
     '</h2><p>' + copy + '</p></div><div class="flow-progress-number"><strong>' + progress.toFixed(1) + '%</strong><span>' + num(state.job.processedRows) +
-    ' / ' + num(state.job.totalRows) + ' rows</span></div><div class="flow-progress-track"><i style="width:' + progress.toFixed(2) +
-    '%"></i></div><div class="flow-process-stats"><div><span>Valid</span><strong>' + num(state.job.validRows) + '</strong></div><div><span>Rejected</span><strong>' +
+    ' / ' + num(state.job.totalRows) + ' rows</span></div><progress class="flow-native-progress" max="100" value="' + progress.toFixed(2) +
+    '">' + progress.toFixed(1) + '%</progress><div class="flow-process-stats"><div><span>Valid</span><strong>' + num(state.job.validRows) + '</strong></div><div><span>Rejected</span><strong>' +
     num(state.job.invalidRows) + '</strong></div><div><span>Checkpoint</span><strong>' + num(state.job.checkpoint) + '</strong></div><div><span>Mapping revision</span><strong>' +
     num(state.mappingRevision) + '</strong></div></div><div class="flow-process-actions">' + buttons + '</div></section>' +
     '<section class="flow-section"><div class="flow-section-head"><div><span class="flow-kicker">EXECUTION GUARANTEES</span><h2>What SPOOL enforces while records move</h2></div></div>' +
