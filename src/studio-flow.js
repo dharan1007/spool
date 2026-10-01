@@ -28,6 +28,7 @@ let queued = false;
 let rendering = false;
 let poll = null;
 let notice = null;
+let busyAction = false;
 
 function esc(value) {
   return String(value == null ? '' : value).replace(/[&<>'"]/g, char => ({
@@ -162,12 +163,14 @@ function shell(path, state, body) {
     '<div class="flow-layout"><aside class="flow-sidebar"><div class="flow-sidebar-head"><span>STUDIO WORKFLOW</span><strong>7-stage controlled migration</strong>' +
     '<p>Each stage has one job. Nothing is applied until the transformation is approved and processing starts.</p></div><nav aria-label="Studio workflow">' + nav +
     '</nav><div class="flow-local"><i></i><div><strong>Local data plane</strong><span>Rows stay in this browser. Production CSP blocks network connections.</span></div></div></aside>' +
-    '<main class="flow-main"><div class="flow-mobile-steps">' + mobile + '</div>' + noticeHtml + body + '</main></div></div>';
+    '<main class="flow-main"><div class="flow-mobile-steps">' + mobile + '</div>' + noticeHtml + body + '</main></div>' +
+    (busyAction ? '<div class="flow-action-lock" role="status" aria-live="polite"><div>Applying this action locally…</div></div>' : '') + '</div>';
 }
 
 function originalPage(state) {
   const source = state && state.source;
   const meta = sourceMeta(state);
+  const sourceLocked = Boolean(source && [PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(state.job.phase));
   let details = '<div class="flow-empty tall"><strong>Source not loaded</strong><p>The workflow starts only after a valid CSV or XLSX is parsed locally.</p></div>';
   let preview = '';
   if (source) {
@@ -188,9 +191,9 @@ function originalPage(state) {
     'Load the original source without transforming records. CSV and XLSX are parsed locally; XLSX uses the first visible worksheet and formulas are never executed.') +
     '<section class="flow-two-col"><article class="flow-card upload-card"><div class="flow-card-title"><div><span class="flow-kicker">SOURCE FILE</span><h2>' +
     (source ? 'Replace original file' : 'Add original file') + '</h2></div>' + (source ? '<span class="flow-badge good">Loaded</span>' : '') + '</div>' +
-    '<label class="flow-dropzone" id="flow-dropzone" tabindex="0"><input type="file" id="flow-file" accept="' + ACCEPT + '" hidden><span class="flow-upload-icon">＋</span>' +
-    '<strong>Drop CSV or XLSX here</strong><p>Browser Studio supports <b>.csv</b> and <b>.xlsx</b> up to 50 MiB. XLSX is normalized locally into SPOOL’s deterministic source contract.</p>' +
-    '<span class="flow-button secondary">Choose file</span></label><div class="flow-divider"><span>or</span></div><button class="flow-demo" data-flow-action="load-demo">' +
+    '<label class="flow-dropzone' + (sourceLocked ? ' locked' : '') + '" id="flow-dropzone" tabindex="' + (sourceLocked ? '-1' : '0') + '"><input type="file" id="flow-file" accept="' + ACCEPT + '" hidden' + (sourceLocked ? ' disabled' : '') + '><span class="flow-upload-icon">＋</span>' +
+    '<strong>' + (sourceLocked ? 'Source replacement is locked while processing' : 'Drop CSV or XLSX here') + '</strong><p>' + (sourceLocked ? 'Finish or abort the active processing run before replacing the source.' : 'Browser Studio supports <b>.csv</b> and <b>.xlsx</b> up to 50 MiB. XLSX is normalized locally into SPOOL’s deterministic source contract.') + '</p>' +
+    (sourceLocked ? '<a class="flow-button secondary" href="/studio/process" data-flow-route="/studio/process">Open current processing →</a>' : '<span class="flow-button secondary">Choose file</span>') + '</label><div class="flow-divider"><span>or</span></div><button class="flow-demo" data-flow-action="load-demo"' + (sourceLocked ? ' disabled' : '') + '>' +
     '<span><strong>Load 25k-row dirty-data example</strong><small>Useful for testing validation and rejection behavior.</small></span><b>→</b></button></article>' +
     '<article class="flow-card"><div class="flow-card-title"><div><span class="flow-kicker">SOURCE IDENTITY</span><h2>' + (source ? esc(meta.originalName) : 'Nothing loaded yet') +
     '</h2></div>' + (source ? '<span class="format-tile">' + (meta.format === 'XLSX' ? 'X' : 'C') + '</span>' : '') + '</div>' + details + '</article></section>' + preview;
@@ -328,7 +331,8 @@ function transformPage(state) {
   });
   const blocked = !locked && (plan.needsAttention || plan.ambiguities.length);
   const blockedHtml = blocked ? '<section class="flow-blocked"><span>BLOCKED</span><div><h2>Transformation requires a source decision.</h2>' +
-    plan.ambiguities.map(item => '<p><strong>' + esc(item.code) + '</strong> — ' + esc(item.message) + '</p>').join('') + '</div></section>' : '';
+    plan.ambiguities.map(item => '<p><strong>' + esc(item.code) + '</strong> — ' + esc(item.message) + '</p>').join('') +
+    '<div class="flow-terminal-actions"><a class="flow-button secondary" href="/studio/original" data-flow-route="/studio/original">Replace source file</a><a class="flow-button ghost" href="/studio/understand" data-flow-route="/studio/understand">Review problem columns</a></div></div></section>' : '';
   return intro(3, 'TRANSFORMATION CONTRACT', 'Determine how every input field becomes a valid output field.',
     'This page prepares the target schema and constrained transformation IR only. It does not process the full dataset.') +
     '<section class="flow-section"><div class="flow-section-head"><div><span class="flow-kicker">OUTPUT INTENT</span><h2>Choose the transformation policy</h2><p>' +
@@ -385,8 +389,17 @@ function testPage(state) {
 }
 function processPage(state) {
   if (!state || !state.source) return prerequisite(5, 'A source is required.', '/studio/original', 'Load original file');
-  if (!READY_OR_LATER.has(state.job.phase)) return prerequisite(5, 'Approve and validate the transformation first.', '/studio/transform', 'Prepare transformation');
   const phase = state.job.phase;
+  if (phase === PHASES.FAILED || phase === PHASES.ABORTED) {
+    const reason = state.lastError && state.lastError.message ? state.lastError.message : (phase === PHASES.ABORTED ? 'The processing run was aborted.' : 'The processing run stopped safely.');
+    return intro(5, 'EXECUTION STOPPED', phase === PHASES.ABORTED ? 'Processing was aborted.' : 'Processing failed safely.',
+      'SPOOL did not leave this run in a fake running state. Review the reason below, then start a clean migration when ready.') +
+      '<section class="flow-blocked"><span>' + esc(phase) + '</span><div><h2>No processing action is running.</h2><p>' + esc(reason) + '</p>' +
+      '<div class="flow-terminal-actions"><button class="flow-button primary" data-flow-action="reset-terminal">Start a new migration</button>' +
+      '<a class="flow-button secondary" href="/studio/understand" data-flow-route="/studio/understand">Review source problems</a></div></div></section>' +
+      actions('<a class="flow-button ghost" href="/studio/original" data-flow-route="/studio/original">← Original file</a>', '<span>Resolve the failure before starting another run.</span>');
+  }
+  if (!READY_OR_LATER.has(phase)) return prerequisite(5, 'Approve and validate the transformation first.', '/studio/transform', 'Prepare transformation');
   const running = phase === PHASES.RUNNING || phase === PHASES.REPLAYING;
   const paused = phase === PHASES.PAUSED || phase === PHASES.PAUSED_RECOVERED;
   const complete = phase === PHASES.COMPLETE;
@@ -498,7 +511,11 @@ function setNotice(tone, title, message) {
   setNotice.timer = window.setTimeout(() => { notice = null; schedule(); }, 5000);
 }
 async function upload(file) {
-  if (!file) return;
+  if (!file || busyAction) return;
+  const current = api() && api().state ? api().state() : null;
+  if (current && [PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(current.job.phase)) {
+    return setNotice('danger', 'Source replacement locked', 'Finish or abort the active processing run before loading a different source.');
+  }
   if (Number(file.size || 0) > MAX_BROWSER_BYTES) return setNotice('danger', 'File too large', 'Browser Studio accepts CSV/XLSX files up to 50 MiB.');
   const lower = String(file.name || '').toLowerCase();
   const csv = lower.endsWith('.csv') || file.type === 'text/csv';
@@ -518,7 +535,8 @@ async function upload(file) {
       text = await file.text();
       meta = { format: 'CSV', originalName: file.name, originalBytes: file.size, worksheet: null, worksheetCount: null, warnings: [], loadedAt: new Date().toISOString() };
     }
-    await api().loadCsv(text, file.name);
+    const loaded = await api().loadCsv(text, file.name);
+    if (loaded && loaded.ok === false) throw new Error(loaded.message || 'SPOOL refused to replace the active source.');
     const state = api().state();
     if (!state || !state.source) throw new Error('SPOOL did not create a source workspace.');
     jsonWrite(localStorage, metaKey(state.source.fingerprint), meta);
@@ -570,8 +588,13 @@ function download(result) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 async function action(name) {
+  if (busyAction) return;
+  busyAction = true;
+  schedule();
+  try {
   if (name === 'load-demo') {
-    await api().loadDemo();
+    const loaded = await api().loadDemo();
+    if (loaded && loaded.ok === false) return setNotice('danger', loaded.code || 'LOAD_BLOCKED', loaded.message || 'Could not load demo source.');
     const state = api().state();
     if (state && state.source) jsonWrite(localStorage, metaKey(state.source.fingerprint), {
       format: 'CSV', originalName: state.source.fileName, originalBytes: state.source.bytes, worksheet: null, worksheetCount: null, warnings: []
@@ -598,13 +621,23 @@ async function action(name) {
     if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
     return download(response.result);
   }
+  if (name === 'reset-terminal') {
+    const response = await api().invoke('start_new_migration', {});
+    if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
+    setNotice('success', 'New migration ready', 'The previous terminal run was cleared. Load or review the source from step 1.');
+    return navigate('/studio/original');
+  }
   if (name === 'new-source') {
     const state = api().state();
-    if (state && state.job.phase === PHASES.COMPLETE) {
+    if (state && [PHASES.COMPLETE, PHASES.FAILED, PHASES.ABORTED].includes(state.job.phase)) {
       const response = await api().invoke('start_new_migration', {});
       if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
     }
     return navigate('/studio/original');
+  }
+  } finally {
+    busyAction = false;
+    schedule();
   }
 }
 
