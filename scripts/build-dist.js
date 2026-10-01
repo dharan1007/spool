@@ -66,14 +66,15 @@ function artifactRootSha256(artifacts) {
 
 // Vercel can deploy without GitHub Actions quota. Enforce the browser
 // recovery regression and syntax gate inside the build itself.
-for (const path of ['src/app.js', 'src/studio-flow.js', 'src/xlsx-ingest.js', 'src/zip-reader.js', 'src/core/command-kernel.js', 'src/core/migration.js', 'src/storage/indexeddb.js']) {
+for (const path of ['src/app.js', 'src/studio-flow.js', 'src/site-content.js', 'src/site-redesign.js', 'src/product-surface.js', 'src/xlsx-ingest.js', 'src/zip-reader.js', 'src/core/command-kernel.js', 'src/core/migration.js', 'src/storage/indexeddb.js']) {
   execFileSync(process.execPath, ['--check', path], { stdio: 'inherit' });
 }
 execFileSync(process.execPath, ['--test',
   'tests/autopilot-recovery.test.js',
   'tests/autopilot-kernel.test.js',
   'tests/ui-contract.test.js',
-  'tests/studio-workflow.test.js'
+  'tests/studio-workflow.test.js',
+  'tests/site-redesign.test.js'
 ], { stdio: 'inherit' });
 
 const distDir = process.env.SPOOL_DIST_DIR?.trim() || 'dist';
@@ -86,10 +87,11 @@ const html = await readFile(`${distDir}/index.html`, 'utf8');
 const config = JSON.parse(await readFile(`${distDir}/vercel.json`, 'utf8'));
 if (!html.includes('src="/boot-watchdog.js"')) throw new Error('dist/index.html must load the independent startup watchdog');
 if (!html.includes('src="/src/app.js"')) throw new Error('dist/index.html must load /src/app.js as a same-origin module');
-if (!html.includes('src="/src/product-surface.js"')) throw new Error('dist/index.html must load the complete product surface as a same-origin module');
 if (!html.includes('src="/src/studio-flow.js"')) throw new Error('dist/index.html must load the seven-stage Studio workflow as a same-origin module');
+if (!html.includes('src="/src/site-redesign.js"')) throw new Error('dist/index.html must load the unified redesigned website as a same-origin module');
 if (!html.includes('href="/styles.css"')) throw new Error('dist/index.html must load /styles.css as a same-origin stylesheet');
-if (!html.includes('href="/product.css"')) throw new Error('dist/index.html must load /product.css as a same-origin stylesheet');
+if (!html.includes('href="/src/site-redesign.css"')) throw new Error('dist/index.html must load the redesigned visual system as a same-origin stylesheet');
+if (html.includes('src="/src/product-surface.js"')) throw new Error('legacy competing product-surface renderer must not be loaded');
 if (!html.includes("connect-src 'none'")) throw new Error('dist/index.html must keep connect-src none');
 if (/commercial-surface\.js|commercial\.css/.test(html)) throw new Error('legacy commercial overlay must not be present in the complete product build');
 if (Object.hasOwn(config, 'cleanUrls')) throw new Error('cleanUrls must not be combined with SPA deep-link rewrites');
@@ -127,7 +129,7 @@ const manifest = {
   generatedAt: builtAt,
   transport: release.transport,
   appEntry: '/src/app.js',
-  productEntry: '/src/product-surface.js',
+  siteEntry: '/src/site-redesign.js',
   workerEntry: '/src/worker/migration.worker.js',
   compressedBootstrap: false,
   dynamicBlobAppImport: false,
