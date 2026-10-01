@@ -23,6 +23,7 @@ const READY_OR_LATER = new Set([
   PHASES.PAUSED, PHASES.PAUSED_RECOVERED, PHASES.COMPLETE
 ]);
 const MAX_BROWSER_BYTES = 50 * 1024 * 1024;
+const DRY_RUN_MIN_ACCEPTANCE = 0.95;
 const ACCEPT = '.csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 let queued = false;
 let rendering = false;
@@ -381,6 +382,18 @@ function previewState(state) {
   const saved = jsonRead(sessionStorage, previewKey(state), null);
   return saved && state && state.source && saved.fingerprint === state.source.fingerprint && saved.mappingRevision === state.mappingRevision ? saved : null;
 }
+function previewAssessment(state) {
+  const saved = previewState(state);
+  const result = saved && saved.result;
+  if (!result) return { status: 'MISSING', acceptance: 0 };
+  const processed = Number(result.processedRows || 0);
+  const valid = Number(result.validRows || 0);
+  const acceptance = processed ? valid / processed : 1;
+  return {
+    status: valid === 0 || acceptance < DRY_RUN_MIN_ACCEPTANCE ? 'BLOCK' : result.invalidRows > 0 ? 'WARNING' : 'PASS',
+    acceptance
+  };
+}
 function violationCards(groups) {
   if (!groups || !groups.length) return '<div class="flow-clean"><span>✓</span><div><strong>No violations in this result</strong><p>The evaluated rows satisfied the target contract.</p></div></div>';
   return '<div class="flow-violation-grid">' + groups.map(group => '<article><span>' + esc(group.code) + '</span><strong>' +
@@ -394,10 +407,19 @@ function testPage(state) {
   let resultHtml = '<section class="flow-test-empty"><span class="test-ring">05</span><h2>No dry test exists for revision ' + num(state.mappingRevision) +
     '.</h2><p>Run up to 100 records through the exact transformation and typed validation engine without starting the Worker.</p><button class="flow-button primary large" data-flow-action="run-preview">Run dry test now</button></section>';
   if (result) {
+    const assessment = previewAssessment(state);
     const output = (result.output || []).slice(0, 12);
     const headers = output.length ? Object.keys(output[0]) : state.targetSchema.map(field => field.name);
     const rows = output.map((row, i) => ['<strong>' + num(i + 1) + '</strong>'].concat(headers.map(header => cell(row[header]))));
-    resultHtml = metrics([
+    resultHtml = (assessment.status === 'BLOCK'
+      ? '<section class="flow-blocked"><span>TEST BLOCKED</span><div><h2>Do not process this transformation yet.</h2><p>Only ' +
+        pct(result.validRows, result.processedRows) + ' of the dry-test sample passed. SPOOL requires at least ' +
+        Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '% before full processing.</p><div class="flow-terminal-actions"><a class="flow-button primary" href="/studio/transform" data-flow-route="/studio/transform">Revise transformation</a><a class="flow-button secondary" href="/studio/understand" data-flow-route="/studio/understand">Review problem columns</a></div></div></section>'
+      : assessment.status === 'WARNING'
+        ? '<section class="flow-safety-banner"><div><span>TEST PASSED WITH REJECTIONS</span><strong>Processing is allowed, but rejected rows will remain explicit.</strong><p>Dry-test acceptance: ' +
+          pct(result.validRows, result.processedRows) + ' · safety floor: ' + Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '%</p></div><i>!</i></section>'
+        : '<section class="flow-safety-banner"><div><span>TEST PASSED</span><strong>The sampled rows satisfy the processing safety gate.</strong><p>Dry-test acceptance: 100% · safety floor: ' + Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '%</p></div><i>✓</i></section>') +
+    metrics([
       ['Rows tested', num(result.processedRows), 'Real engine, bounded sample'],
       ['Passed', num(result.validRows), 'Typed output accepted'],
       ['Rejected', num(result.invalidRows), 'Kept explicit'],
@@ -413,7 +435,11 @@ function testPage(state) {
     '<section class="flow-safety-banner"><div><span>READ-ONLY TEST</span><strong>Current durable output remains untouched.</strong><p>Mapping revision ' + num(state.mappingRevision) +
     ' · source fingerprint ' + esc(String(state.source.fingerprint).slice(0, 18)) + '…</p></div><i>TEST</i></section>' + resultHtml +
     actions('<a class="flow-button ghost" href="/studio/transform" data-flow-route="/studio/transform">← Transformation</a>',
-      result ? '<button class="flow-button secondary" data-flow-action="run-preview">Re-run test</button><a class="flow-button primary" href="/studio/process" data-flow-route="/studio/process">Approve test & continue →</a>' : '');
+      result
+        ? (previewAssessment(state).status === 'BLOCK'
+          ? '<button class="flow-button secondary" data-flow-action="run-preview">Re-run test</button><a class="flow-button primary" href="/studio/transform" data-flow-route="/studio/transform">Revise transformation →</a>'
+          : '<button class="flow-button secondary" data-flow-action="run-preview">Re-run test</button><a class="flow-button primary" href="/studio/process" data-flow-route="/studio/process">Approve test & continue →</a>')
+        : '');
 }
 function processPage(state) {
   if (!state || !state.source) return prerequisite(5, 'A source is required.', '/studio/original', 'Load original file');
@@ -432,11 +458,14 @@ function processPage(state) {
   const paused = phase === PHASES.PAUSED || phase === PHASES.PAUSED_RECOVERED;
   const complete = phase === PHASES.COMPLETE;
   const preview = previewState(state);
+  const assessment = previewAssessment(state);
   const progress = Number(state.job.totalRows) ? Math.min(100, Number(state.job.processedRows) / Number(state.job.totalRows) * 100) : 0;
-  const blocked = !preview && phase === PHASES.MAPPING_VALID
-    ? '<section class="flow-blocked"><span>TEST REQUIRED</span><div><h2>Run the dry test before processing.</h2><p>The current mapping revision has not completed the explicit non-committing test stage.</p><a class="flow-button secondary" href="/studio/test" data-flow-route="/studio/test">Go to Test without changes</a></div></section>' : '';
+  const blocked = phase === PHASES.MAPPING_VALID && !preview
+    ? '<section class="flow-blocked"><span>TEST REQUIRED</span><div><h2>Run the dry test before processing.</h2><p>The current mapping revision has not completed the explicit non-committing test stage.</p><a class="flow-button secondary" href="/studio/test" data-flow-route="/studio/test">Go to Test without changes</a></div></section>'
+    : phase === PHASES.MAPPING_VALID && assessment.status === 'BLOCK'
+      ? '<section class="flow-blocked"><span>TEST FAILED</span><div><h2>Processing is blocked by the dry-test safety gate.</h2><p>Acceptance is ' + pct(preview.result.validRows, preview.result.processedRows) + '; at least ' + Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '% is required.</p><div class="flow-terminal-actions"><a class="flow-button primary" href="/studio/transform" data-flow-route="/studio/transform">Revise transformation</a><a class="flow-button secondary" href="/studio/test" data-flow-route="/studio/test">Re-run dry test</a></div></div></section>' : '';
   let buttons = '';
-  if (phase === PHASES.MAPPING_VALID && preview) buttons = '<button class="flow-button primary large" data-flow-action="start-process">Process the full dataset</button>';
+  if (phase === PHASES.MAPPING_VALID && preview && assessment.status !== 'BLOCK') buttons = '<button class="flow-button primary large" data-flow-action="start-process">Process the full dataset</button>';
   if (running) buttons = '<button class="flow-button secondary" data-flow-action="pause-process">Pause safely</button>';
   if (paused) buttons = '<button class="flow-button primary" data-flow-action="resume-process">Resume from checkpoint</button>';
   if (complete) buttons = '<a class="flow-button primary large" href="/studio/validate" data-flow-route="/studio/validate">Validate final results →</a>';
@@ -603,6 +632,8 @@ async function preview() {
 async function startProcess() {
   const state = api().state();
   if (!previewState(state)) return setNotice('danger', 'Dry test required', 'Run the non-committing test for this mapping revision first.');
+  const assessment = previewAssessment(state);
+  if (assessment.status === 'BLOCK') return setNotice('danger', 'Dry test failed', 'Processing requires at least ' + Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '% sample acceptance. Revise the transformation first.');
   const response = await api().invoke('start_migration', {});
   if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
   setNotice('success', 'Processing started', 'The full dataset is running through the approved transformation.');
