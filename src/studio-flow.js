@@ -639,6 +639,8 @@ document.addEventListener('drop', event => {
   if (zone) { event.preventDefault(); zone.classList.remove('dragover'); void upload(event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0]); }
 }, true);
 window.addEventListener('popstate', schedule);
+window.addEventListener('spool:statechange', schedule);
+window.addEventListener('spool:studio-route', schedule);
 
 const root = document.getElementById('app-root');
 if (root) {
