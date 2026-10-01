@@ -349,10 +349,10 @@ function newMigrationPage(state) {
   return shell('/studio/new', `
     <section class="studio-heading"><div><span class="kicker">NEW MIGRATION</span><h1>Source + outcome. That is the setup.</h1><p>SPOOL handles the schema, mapping, dry-run and execution unless it finds a genuinely unsafe ambiguity.</p></div>${terminal ? '<button class="button secondary" data-action="reset-workspace">Clear completed workspace</button>' : ''}</section>
     <section class="setup-layout">
-      <article class="setup-card"><div class="setup-number">01</div><div class="card-head"><div><span class="kicker">SOURCE</span><h2>Add the CSV</h2></div>${source ? '<span class="status-pill success"><i></i>Loaded</span>' : ''}</div>
+      <article class="setup-card"><div class="setup-number">01</div><div class="card-head"><div><span class="kicker">SOURCE</span><h2>Add CSV or XLSX</h2></div>${source ? '<span class="status-pill success"><i></i>Loaded</span>' : ''}</div>
         <label class="dropzone" id="source-dropzone" tabindex="0">
-          <input id="source-file" type="file" accept=".csv,text/csv" hidden>
-          <span class="upload-mark">＋</span><strong>${source ? 'Replace source file' : 'Drop CSV here or choose a file'}</strong><p>The candidate is parsed and fingerprinted before active work is replaced.</p><span class="button secondary compact">Choose CSV</span>
+          <input id="source-file" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
+          <span class="upload-mark">＋</span><strong>${source ? 'Replace source file' : 'Drop CSV or XLSX here or choose a file'}</strong><p>The candidate is parsed and fingerprinted before active work is replaced.</p><span class="button secondary compact">Choose CSV</span>
         </label>
         <div class="or-line"><span>or</span></div>
         <button class="demo-row" data-action="load-demo"><span><strong>Try the 25k-row dirty customer example</strong><small>Includes bad dates and amounts so quality handling is visible.</small></span>${arrowIcon()}</button>
@@ -524,13 +524,21 @@ async function loadFile(file) {
   if (!file || isBusy) return;
   if ([PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(latestState?.job?.phase)
     && !window.confirm('Replace the source? This will stop the active migration and discard its current output.')) return;
-  if (file.size > 50 * 1024 * 1024) return toast('This UI currently limits file selection to 50 MB. Use a smaller CSV for this release.', 'danger');
-  if (!file.name.toLowerCase().endsWith('.csv') && file.type !== 'text/csv') return toast('SPOOL currently accepts CSV source files.', 'danger');
+  if (file.size > 50 * 1024 * 1024) return toast('Browser Studio accepts CSV/XLSX files up to 50 MiB.', 'danger');
+  const lowerName = file.name.toLowerCase();
+  const isCsv = lowerName.endsWith('.csv') || file.type === 'text/csv';
+  const isXlsx = lowerName.endsWith('.xlsx') || file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (!isCsv && !isXlsx) return toast('SPOOL accepts CSV and XLSX source files in Browser Studio.', 'danger');
   isBusy = true;
   render();
   try {
     await new Promise(resolve => window.requestAnimationFrame(() => setTimeout(resolve, 0)));
-    const text = await file.text();
+    let text;
+    if (isXlsx) {
+      const { xlsxFileToCsv } = await import('./xlsx-ingest.js');
+      const converted = await xlsxFileToCsv(file);
+      text = converted.csv;
+    } else text = await file.text();
     await kernel.loadSourceText(text, file.name);
     selectedOutcome = 'database_ready';
     toast(`${file.name} is profiled locally.`, 'success');
@@ -654,6 +662,7 @@ async function boot() {
   render();
   window.__spoolTest = Object.freeze({
     state: () => kernel.snapshot(),
+    viewState: () => kernel.viewSnapshot(),
     tools: () => toolNamesForPhase(kernel.snapshot().job.phase),
     invoke: (name, args = {}) => kernel.invoke(name, args),
     navigate,
