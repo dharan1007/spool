@@ -48,6 +48,15 @@ test('Studio terminal, active-run and blocked states always expose recovery acti
   assert.match(studio, /Finish or abort the active processing run/);
 });
 
+test('dry test is a real safety gate before full processing', () => {
+  assert.match(studio, /DRY_RUN_MIN_ACCEPTANCE = 0\.95/);
+  assert.match(studio, /TEST BLOCKED/);
+  assert.match(studio, /Processing is blocked by the dry-test safety gate/);
+  assert.match(studio, /assessment\.status !== 'BLOCK'/);
+  assert.match(studio, /Dry test failed/);
+  assert.match(studio, /Revise transformation/);
+});
+
 test('visual redesign is responsive and keeps action bars visible', () => {
   assert.match(css, /\.redesign-topbar/);
   assert.match(css, /\.redesign-workflow/);
