@@ -62,7 +62,7 @@ export async function runWorkerLoad({ profile, seed, evidenceWriter, pgConfig, r
           sourceRef: { connector: 'filesystem', connectionId: 'src', resource: `dataset-${idx}.csv`, path: csvPath },
           targetRef: { connector: 'postgres', connectionId: 'pg', resource: `public.${table}`, endpoint: `postgresql://${pgConfig.host}:${pgConfig.port}?sslmode=disable`, database: pgConfig.database, schema: 'public', table, identity: { user: pgConfig.user }, secretRef: { provider: 'env', key: 'PGPASSWORD' } },
           targetSchema: [{ name: 'id', type: 'integer', nullable: false }, { name: 'payload', type: 'string', nullable: false }],
-          mapping: [{ target: 'id', expr: { op: 'field', name: 'id' } }, { target: 'payload', expr: { op: 'field', name: 'payload' } }],
+          mapping: [{ target: 'id', expr: { op: 'cast_number', value: { op: 'field', name: 'id' } } }, { target: 'payload', expr: { op: 'field', name: 'payload' } }],
           mappingRevision: 1,
           writeStrategy: { mode: 'insert', batchSize, bulk: false },
           verification: { checks: ['row_accounting', 'ledger_complete'] },
