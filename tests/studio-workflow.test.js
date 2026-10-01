@@ -41,6 +41,17 @@ test('Studio exposes seven separate ordered workflow routes', () => {
   ]) assert.ok(flow.includes(phrase), 'missing Studio stage label: ' + phrase);
 });
 
+test('legacy Studio renderer cannot replace the seven-stage workflow', () => {
+  assert.match(app, /STUDIO_FLOW_PATHS/);
+  assert.match(app, /data-spool-flow-root/);
+  assert.match(app, /spool:studio-route/);
+  assert.match(app, /spool:statechange/);
+  assert.match(flow, /window\.addEventListener\('spool:studio-route', schedule\)/);
+  assert.match(flow, /window\.addEventListener\('spool:statechange', schedule\)/);
+  assert.ok(app.indexOf("if (STUDIO_FLOW_PATHS.has(path))") < app.indexOf("const pages = {"),
+    'Studio handoff must occur before legacy page dispatch');
+});
+
 test('Studio workflow separates approval, dry run, execution and validation', () => {
   assert.match(flow, /define_target_schema/);
   assert.match(flow, /set_mapping/);
