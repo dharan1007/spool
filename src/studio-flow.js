@@ -64,6 +64,21 @@ function jsonWrite(storage, key, value) {
 function metaKey(fp) { return 'spool:source-meta:' + (fp || 'none'); }
 function planKey(fp) { return 'spool:plan:' + (fp || 'none'); }
 function previewKey(state) { return 'spool:preview:' + (state && state.source ? state.source.fingerprint : 'none') + ':' + Number(state && state.mappingRevision || 0); }
+function progressKey(state) { return 'spool:flow-progress:' + (state && state.source ? state.source.fingerprint : 'none'); }
+function flowProgress(state) {
+  if (!state || !state.source) return 0;
+  let derived = 1;
+  const phase = state.job && state.job.phase;
+  if (READY_OR_LATER.has(phase)) derived = 4;
+  if ([PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED, PHASES.COMPLETE].includes(phase)) derived = 5;
+  if (phase === PHASES.COMPLETE) derived = 6;
+  const saved = Number(jsonRead(sessionStorage, progressKey(state), derived));
+  return Math.max(derived, Number.isFinite(saved) ? saved : derived);
+}
+function markProgress(state, index) {
+  if (!state || !state.source) return;
+  jsonWrite(sessionStorage, progressKey(state), Math.max(flowProgress(state), index));
+}
 function sourceMeta(state) {
   const source = state && state.source;
   const saved = source ? jsonRead(localStorage, metaKey(source.fingerprint), null) : null;
@@ -122,17 +137,24 @@ function intro(index, kicker, title, copy) {
     '</span><h1>' + title + '</h1><p>' + copy + '</p></div><div class="flow-step-count"><strong>' + FLOW[index][1] +
     '</strong><span>of 07</span></div></section>';
 }
-function stepStatus(state, index) {
+function stepStatus(state, index, current) {
   if (!state || !state.source) return index === 0 ? 'current' : 'locked';
-  if (index <= 2) return 'done';
+  const progress = flowProgress(state);
   const phase = state.job.phase;
-  if (index === 3) return READY_OR_LATER.has(phase) ? 'done' : 'available';
-  if (index === 4) return READY_OR_LATER.has(phase) ? (jsonRead(sessionStorage, previewKey(state), null) ? 'done' : 'available') : 'locked';
-  if (index === 5) return phase === PHASES.COMPLETE ? 'done' : READY_OR_LATER.has(phase) ? 'available' : 'locked';
-  return phase === PHASES.COMPLETE ? 'available' : 'locked';
+  if (index === current) return 'current';
+  if (index < current && index <= progress) return 'done';
+  if (index === 0) return 'done';
+  if (index <= progress) return 'available';
+  if (index === 4 && READY_OR_LATER.has(phase)) return jsonRead(sessionStorage, previewKey(state), null) ? 'done' : 'available';
+  if (index === 5 && [PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED, PHASES.COMPLETE].includes(phase)) return phase === PHASES.COMPLETE ? 'done' : 'available';
+  if (index === 6 && phase === PHASES.COMPLETE) return 'available';
+  return 'locked';
 }
 function navigate(path, replace) {
   if (!PATHS.has(path)) return;
+  const state = api() && api().state ? api().state() : null;
+  const targetIndex = indexFor(path);
+  if (state && state.source) markProgress(state, targetIndex);
   if (replace) window.history.replaceState({}, '', path);
   else if (window.location.pathname !== path) window.history.pushState({}, '', path);
   window.scrollTo({ top: 0, behavior: 'instant' });
@@ -142,7 +164,7 @@ function shell(path, state, body) {
   const current = indexFor(path);
   const meta = sourceMeta(state);
   const nav = FLOW.map((step, index) => {
-    const status = index === current ? 'current' : stepStatus(state, index);
+    const status = stepStatus(state, index, current);
     const locked = status === 'locked';
     const open = locked ? '<span' : '<a href="' + step[0] + '" data-flow-route="' + step[0] + '"';
     const close = locked ? '</span>' : '</a>';
@@ -150,8 +172,11 @@ function shell(path, state, body) {
       '</strong><small>' + (status === 'done' ? 'Completed / ready' : status === 'locked' ? 'Complete earlier stages' : status === 'current' ? 'Current stage' : 'Available') +
       '</small></span>' + close;
   }).join('');
-  const mobile = FLOW.map((step, index) => '<a href="' + step[0] + '" data-flow-route="' + step[0] + '" class="' +
-    (index === current ? 'active' : '') + '"><span>' + step[1] + '</span>' + esc(step[3]) + '</a>').join('');
+  const mobile = FLOW.map((step, index) => {
+    const status = stepStatus(state, index, current);
+    if (status === 'locked') return '<span class="locked"><b>' + step[1] + '</b>' + esc(step[3]) + '</span>';
+    return '<a href="' + step[0] + '" data-flow-route="' + step[0] + '" class="' + (index === current ? 'active' : '') + '"><span>' + step[1] + '</span>' + esc(step[3]) + '</a>';
+  }).join('');
   const sourcePill = state && state.source
     ? '<span class="flow-file-pill"><b>' + esc(meta.format) + '</b>' + esc(meta.originalName) + '</span>'
     : '<span class="flow-file-pill muted">No source loaded</span>';
@@ -259,6 +284,7 @@ function analyze(state) {
 }
 function understandPage(state) {
   if (!state || !state.source) return prerequisite(2, 'Load and inspect a source before SPOOL can explain the columns.', '/studio/original', 'Go to Original file');
+  if (flowProgress(state) < 2) return prerequisite(2, 'Inspect the raw data before moving to column understanding.', '/studio/inspect', 'Inspect the data');
   const columns = analyze(state);
   const issueColumns = columns.filter(item => item.empty || item.padded || item.failures).length;
   const signals = columns.reduce((sum, item) => sum + item.empty + item.padded + item.failures, 0);
@@ -310,6 +336,7 @@ function outcomeCards(selected, locked) {
 }
 function transformPage(state) {
   if (!state || !state.source) return prerequisite(3, 'A source is required before a transformation can be prepared.', '/studio/original', 'Load original file');
+  if (flowProgress(state) < 3) return prerequisite(3, 'Review the column understanding before preparing the output contract.', '/studio/understand', 'Understand columns');
   const locked = READY_OR_LATER.has(state.job.phase);
   const selected = locked && savedPlan(state) ? savedPlan(state).outcome : outcome();
   const plan = locked ? null : planFor(state, selected);
