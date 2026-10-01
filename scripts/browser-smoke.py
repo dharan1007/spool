@@ -153,7 +153,7 @@ def main():
     cdp = None
     if remote:
         base_url = remote.rstrip('/')
-        target = base_url + '/studio/new'
+        target = base_url + '/studio/original'
     else:
         serve_dir = resolve_serve_dir()
         server = subprocess.Popen(['python3', '-m', 'http.server', str(HTTP_PORT), '--directory', serve_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -178,6 +178,8 @@ def main():
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='SPOOL app bootstrap')
 
         product_checks = [
+            ('/', 'Prepare a dataset', 'Write to SQLite'),
+            ('/how-it-works', 'Seven pages', 'Test without changes'),
             ('/local-runner', f'npm install -g github:dharan1007/spool#{RELEASE_TAG}', 'spool receipt'),
             ('/examples', '5 source records', '3 valid'),
             ('/security', "connect-src 'none'", 'STALE_FENCE'),
@@ -186,88 +188,110 @@ def main():
         for route, needle_a, needle_b in product_checks:
             cdp.call('Page.navigate', {'url': base_url + route})
             wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=15, label=f'{route} load')
-            wait_for(lambda r=route: cdp.eval(f'document.querySelector("[data-product-route=\\"{r}\\"]") !== null'), timeout=15, label=f'{route} product surface')
+            wait_for(lambda: cdp.eval('document.querySelector("[data-spool-site-root]") !== null'), timeout=15, label=f'{route} redesigned public surface')
             text = cdp.eval('document.body.innerText')
             assert needle_a in text, f'{route} missing {needle_a!r}'
             assert needle_b in text, f'{route} missing {needle_b!r}'
+            assert 'Run Autopilot' not in text, f'{route} still exposes legacy Autopilot as a primary user action'
             assert 'Migration Preflight' not in text, f'{route} still exposes paid Hobby-hosted migration copy'
             assert 'Local-first migration demo' not in cdp.eval('document.title')
 
-        cdp.call('Page.navigate', {'url': base_url + '/studio/new'})
-        wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=15, label='Studio deep-link load')
-        wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='Studio bootstrap after product routes')
-        assert cdp.eval('window.__spoolTest.state().job.phase') in ('EMPTY', 'COMPLETE')
+        # Legacy Autopilot URL must route into the explicit first Studio stage.
+        cdp.call('Page.navigate', {'url': base_url + '/autopilot'})
+        wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=15, label='legacy Autopilot route load')
+        wait_for(lambda: cdp.eval('location.pathname === "/studio/original"'), timeout=15, label='legacy Autopilot redirect')
+        wait_for(lambda: cdp.eval('document.querySelector("[data-spool-flow-root]") !== null'), timeout=15, label='Studio flow after redirect')
+        assert 'Run Autopilot' not in cdp.eval('document.body.innerText')
 
-        if cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'):
+        cdp.call('Page.navigate', {'url': base_url + '/studio/original'})
+        wait_for(lambda: cdp.eval('document.readyState === "complete"'), timeout=15, label='Studio deep-link load')
+        wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='Studio bootstrap after public routes')
+        wait_for(lambda: cdp.eval('document.querySelector("[data-spool-flow-root]") !== null'), timeout=15, label='seven-stage Studio root')
+        assert cdp.eval('window.__spoolTest.state().job.phase') in ('EMPTY', 'COMPLETE', 'FAILED', 'ABORTED')
+
+        if cdp.eval('window.__spoolTest.state().job.phase !== "EMPTY"'):
             cdp.eval('window.__spoolTest.invoke("start_new_migration", {})')
             wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "EMPTY"'), label='workspace reset')
 
-        bad_indexes = set([i * 1999 // 99 for i in range(100) if i * 1999 // 99 >= 1000][:9])
-        # Regression for the exact 91/100 blocked Autopilot mission.
-        # Source indices are spread across the CSV, so this also verifies
-        # diagnostic record numbers refer to the original file, not a
-        # synthetic 0..99 preview numbering.
-        blocked_rows = [
-            f'{index + 1},{("not-a-number" if index in bad_indexes else str(index + 100) + ".25")},Customer {index + 1}'
-            for index in range(2000)
-        ]
-        blocked_csv = 'Customer ID,amount,Name\n' + '\n'.join(blocked_rows)
-        before_blocked = cdp.eval('performance.now()')
-        cdp.eval('window.__spoolTest.loadCsv(' + json.dumps(blocked_csv) + ')')
-        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "SOURCE_READY"'), label='blocked fixture load')
-        blocked_load_ms = round(cdp.eval('performance.now()') - before_blocked)
-        blocked_response = cdp.eval('window.__spoolTest.runAutopilot("database_ready")')
-        assert blocked_response['ok'] is True
-        assert blocked_response['result']['status'] == 'NEEDS_ATTENTION'
-        blocked_state = cdp.eval('window.__spoolTest.state()')
-        assert blocked_state['mission']['dryRun']['validRows'] == 91
-        assert blocked_state['mission']['dryRun']['invalidRows'] == 9
-        assert blocked_state['job']['phase'] == 'SOURCE_READY'
-        assert blocked_state['output'] == []
-        cdp.eval('window.__spoolTest.navigate("/studio/mission")')
-        wait_for(lambda: cdp.eval('document.querySelector("[data-action=retry-autopilot]") !== null'), label='blocked mission recovery UI')
-        assert cdp.eval('document.querySelectorAll(".quality-examples > div").length') > 0
-        assert cdp.eval('document.body.innerText.includes("Source record")')
-        assert cdp.eval('document.querySelectorAll(".recovery-option").length') == 3
-        cdp.eval('document.querySelector("[data-outcome=preserve_contract]").click()')
-        assert cdp.eval('document.querySelector("[data-outcome=\\\"preserve_contract\\\"]').getAttribute("aria-pressed")') == 'true'
-        cdp.eval('document.querySelector("[data-action=retry-autopilot]").click()')
-        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'), timeout=20, label='blocked workflow recovery completion')
-        recovered = cdp.eval('window.__spoolTest.state()')
-        assert recovered['job']['validRows'] == 2000
-        assert recovered['job']['invalidRows'] == 0
-        assert recovered['mission']['outcome'] == 'preserve_contract'
-        assert cdp.eval('document.querySelector(".result-hero")') is None  # Still on mission; no fake result screen.
+        # Blocked transformation case: normalized source-name collision must never
+        # become a dead-end or silently execute.
+        collision_csv = 'Customer ID,customer-id\\na,b\\nc,d'
+        cdp.eval('window.__spoolTest.loadCsv(' + json.dumps(collision_csv) + ', "collision.csv")')
+        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "SOURCE_READY"'), label='collision fixture load')
+        cdp.call('Page.navigate', {'url': base_url + '/studio/inspect'})
+        wait_for(lambda: cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/understand\\\"]") !== null'), label='inspect next action')
+        cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/understand\\\"]").click()')
+        wait_for(lambda: cdp.eval('location.pathname === "/studio/understand"'), label='understand navigation')
+        cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/transform\\\"]").click()')
+        wait_for(lambda: cdp.eval('location.pathname === "/studio/transform"'), label='transform navigation')
+        wait_for(lambda: cdp.eval('document.querySelector(".flow-blocked") !== null'), label='blocked transformation UI')
+        assert cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/original\\\"]") !== null')
+        assert cdp.eval('document.body.innerText.includes("Replace source file")')
+        assert cdp.eval('document.body.innerText.includes("Review problem columns")')
+        assert cdp.eval('window.__spoolTest.state().job.phase') == 'SOURCE_READY'
+        assert cdp.eval('window.__spoolTest.state().output.length') == 0
         cdp.eval('window.__spoolTest.invoke("start_new_migration", {})')
-        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "EMPTY"'), label='recovery fixture cleanup')
-        print(json.dumps({'blockedDryRun': 'PASS', 'accepted': 91, 'sampleSize': 100,
-                          'originalRecordDiagnostics': 'PASS', 'recoverableViaButtons': 'PASS',
-                          'sampleLoadMs': blocked_load_ms}), flush=True)
+        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "EMPTY"'), label='collision fixture cleanup')
 
+        # Successful 25k explicit seven-stage run. This deliberately avoids the
+        # kernel run_autopilot shortcut and clicks the visible user actions.
+        before_demo = cdp.eval('performance.now()')
         cdp.eval('window.__spoolTest.loadDemo()')
         wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "SOURCE_READY"'), timeout=15, label='demo source load')
         assert cdp.eval('window.__spoolTest.state().source.rows.length') == 25000
+        demo_load_ms = round(cdp.eval('performance.now()') - before_demo)
 
-        result = cdp.eval('window.__spoolTest.runAutopilot("database_ready")')
-        assert result['ok'] is True
-        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'), timeout=35, label='25k Autopilot completion')
+        cdp.call('Page.navigate', {'url': base_url + '/studio/inspect'})
+        wait_for(lambda: cdp.eval('document.querySelector("[data-spool-flow-root]") !== null'), label='inspect page')
+        assert cdp.eval('document.body.innerText.includes("Inspect what is actually inside the dataset")')
+        cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/understand\\\"]").click()')
+        wait_for(lambda: cdp.eval('location.pathname === "/studio/understand"'), label='understand page')
+        assert cdp.eval('document.body.innerText.includes("Understand columns, formats and problematic values")')
+        cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/transform\\\"]").click()')
+        wait_for(lambda: cdp.eval('location.pathname === "/studio/transform"'), label='transform page')
+        wait_for(lambda: cdp.eval('document.querySelector("[data-flow-action=\\\"approve-plan\\\"]") !== null'), label='approve transformation action')
+        cdp.eval('document.querySelector("[data-flow-action=\\\"approve-plan\\\"]").click()')
+        wait_for(lambda: cdp.eval('location.pathname === "/studio/test"'), timeout=15, label='test page after mapping approval')
+        wait_for(lambda: cdp.eval('document.querySelector("[data-flow-action=\\\"run-preview\\\"]") !== null'), label='dry test action')
+        cdp.eval('document.querySelector("[data-flow-action=\\\"run-preview\\\"]").click()')
+        wait_for(lambda: cdp.eval('document.body.innerText.includes("TEST OUTPUT") || document.body.innerText.includes("Transformed sample")'), timeout=15, label='dry test result')
+        assert cdp.eval('window.__spoolTest.state().job.phase') == 'MAPPING_VALID'
+        assert cdp.eval('window.__spoolTest.state().output.length') == 0
+        cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/process\\\"]").click()')
+        wait_for(lambda: cdp.eval('location.pathname === "/studio/process"'), label='process page')
+        wait_for(lambda: cdp.eval('document.querySelector("[data-flow-action=\\\"start-process\\\"]") !== null'), label='process action')
+        cdp.eval('document.querySelector("[data-flow-action=\\\"start-process\\\"]").click()')
+        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'), timeout=35, label='25k explicit workflow completion')
         state = cdp.eval('window.__spoolTest.state()')
         assert state['job']['processedRows'] == 25000
         assert state['job']['validRows'] > 24900
         assert state['job']['invalidRows'] > 0
-        assert state['mission']['status'] == 'COMPLETE_WITH_REJECTIONS'
         tools = cdp.eval('window.__spoolTest.tools()')
         assert 'export_csv' in tools and 'start_migration' not in tools
 
-        cdp.eval('window.__spoolTest.navigate("/studio/results")')
-        wait_for(lambda: cdp.eval('document.querySelectorAll(".result-metrics article").length === 4'), label='results UI')
-        assert cdp.eval('document.querySelectorAll(".quality-grid article").length > 0')
+        wait_for(lambda: cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/validate\\\"]") !== null'), label='validate action')
+        cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/validate\\\"]").click()')
+        wait_for(lambda: cdp.eval('location.pathname === "/studio/validate"'), label='validate page')
+        assert cdp.eval('document.querySelectorAll(".flow-metrics article").length === 4')
+        assert cdp.eval('document.querySelector("[data-flow-action=\\\"export-csv\\\"]") !== null')
+        assert cdp.eval('document.querySelector("[data-flow-action=\\\"export-json\\\"]") !== null')
 
+        # Refresh must restore both durable migration state and the correct page.
         cdp.call('Page.reload', {'ignoreCache': True})
         wait_for(lambda: cdp.eval('Boolean(window.__spoolTest)'), timeout=15, label='reload bootstrap')
         wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "COMPLETE"'), timeout=10, label='IndexedDB restoration')
+        wait_for(lambda: cdp.eval('document.querySelector("[data-spool-flow-root]") !== null'), timeout=10, label='Studio flow restoration')
         assert cdp.eval('window.__spoolTest.state().output.length > 24900')
-        assert cdp.eval('window.__spoolTest.state().mission.status') == 'COMPLETE_WITH_REJECTIONS'
+        assert cdp.eval('location.pathname === "/studio/validate"')
+
+        print(json.dumps({
+            'explicitStudioWorkflow': 'PASS',
+            'blockedTransformationRecovery': 'PASS',
+            'sampleLoadMs': demo_load_ms,
+            'rows': state['job']['processedRows'],
+            'valid': state['job']['validRows'],
+            'invalid': state['job']['invalidRows']
+        }), flush=True)
 
         exceptions = [e for e in cdp.events if e.get('method') == 'Runtime.exceptionThrown']
         failed = [e for e in cdp.events if e.get('method') == 'Network.loadingFailed' and not e.get('params', {}).get('canceled')]
@@ -294,6 +318,7 @@ def main():
             'mission': state['mission']['status'],
             'tools': tools,
             'recovery': 'PASS',
+            'explicitStudioWorkflow': 'PASS',
             'runtimeExceptions': 0,
             'failedNetworkLoads': 0,
             'screenshot': screenshot_path
