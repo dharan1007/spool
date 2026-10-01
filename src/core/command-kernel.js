@@ -223,7 +223,7 @@ export class CommandKernel {
   }
 
   async cmd_describe_supported_formats() {
-    return this.envelope({ input: ['CSV'], output: ['CSV', 'JSON'], limits: { maxRows: 1_000_000, maxColumns: 1000, maxCellLength: 1_048_576 }, privacy: 'All dataset processing is local to this browser.' });
+    return this.envelope({ input: ['CSV', 'XLSX'], output: ['CSV', 'JSON'], notes: { XLSX: 'Browser Studio imports the first visible worksheet locally and never executes workbook formulas.' }, limits: { maxRows: 1_000_000, maxColumns: 1000, maxCellLength: 1_048_576 }, privacy: 'All dataset processing is local to this browser.' });
   }
   async cmd_inspect_workspace() {
     const source = this.workspace.source ? {

@@ -6,8 +6,8 @@ SPOOL is an open-source local-first migration product built and commercially sup
 
 SPOOL has two deliberately separate local-first execution paths:
 
-1. **Browser Studio** — profile, infer, deterministically transform, validate and export CSV data without sending rows to an application backend.
-2. **Gate B Local Runner** — bounded-memory streaming execution of an approved UTF-8 filesystem CSV into an existing ordinary SQLite table with a durable content-bound source snapshot, live target preflight, transactional batch evidence, crash reconciliation, fencing, verification and a commit-bound receipt. The Local Runner defaults to a **256 MiB** source ceiling while Browser Studio remains capped at **50 MiB**.
+1. **Browser Studio** — profile, infer, deterministically transform, validate and export CSV/XLSX source data without sending rows to an application backend. XLSX import uses the first visible worksheet, never executes formulas, and normalizes the worksheet into the same deterministic local source contract used by CSV.
+2. **Gate B Local Runner** — bounded-memory streaming execution of an approved UTF-8 filesystem CSV into an existing ordinary SQLite table with a durable content-bound source snapshot, live target preflight, transactional batch evidence, crash reconciliation, fencing, verification and a commit-bound receipt. The Local Runner defaults to a **256 MiB** source ceiling while Browser Studio remains capped at **50 MiB** for CSV/XLSX source files.
 
 [Technical browser surface](https://spool-webmcp.vercel.app/) · [Request a Migration Assessment](https://github.com/dharan1007/spool/issues/new?template=migration-assessment.yml) · [Local Runner](docs/LOCAL_RUNNER.md) · [Customer engagement workflow](docs/CUSTOMER_ENGAGEMENT.md) · [Migration services](docs/MIGRATION_SERVICES.md) · [Security](SECURITY.md)
 
@@ -54,7 +54,7 @@ messy CSV
   → typed output + violations + lineage
 ```
 
-The browser path is local-first and retains the production CSP boundary `connect-src 'none'`. The current browser input limit is **50 MiB**. SPOOL fails closed on ambiguous dates/numbers, invalid target values, storage-capacity failure and unsafe export cells. A blocked Autopilot mission remains recoverable in the Studio: bounded failed-sample diagnostics identify implicated fields and original record numbers, and the operator can correct/replace the CSV or explicitly choose another output contract and rerun the dry run. The 95% automatic-acceptance floor is never silently reduced; preserving original CSV field names is a different output contract, not a data-cleaning shortcut.
+The browser path is local-first and retains the production CSP boundary `connect-src 'none'`. The current browser input limit is **50 MiB** for both CSV and XLSX. XLSX decompression is additionally capped at 256 MiB expanded content, encrypted/ZIP64 workbooks fail closed, and workbook formulas are never executed. SPOOL fails closed on ambiguous dates/numbers, invalid target values, storage-capacity failure and unsafe export cells. A blocked Autopilot mission remains recoverable in the Studio: bounded failed-sample diagnostics identify implicated fields and original record numbers, and the operator can correct/replace the CSV or explicitly choose another output contract and rerun the dry run. The 95% automatic-acceptance floor is never silently reduced; preserving original CSV field names is a different output contract, not a data-cleaning shortcut.
 
 ### Gate B Local Runner
 

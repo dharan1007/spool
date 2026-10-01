@@ -6,7 +6,7 @@ User datasets, inferred schemas, transformation mappings, checkpoints, output ro
 
 ## Trust boundaries
 
-1. User-provided CSV is untrusted input.
+1. User-provided CSV/XLSX is untrusted input. XLSX ZIP/XML content is parsed locally and formulas are never evaluated.
 2. WebMCP tool arguments are untrusted structured input.
 3. Worker messages cross an asynchronous component boundary.
 4. IndexedDB is durable client state and may survive an interrupted tab.
@@ -16,7 +16,7 @@ User datasets, inferred schemas, transformation mappings, checkpoints, output ro
 
 - No `eval`, `Function` constructor, arbitrary transform scripts, dynamic code download or remote model execution.
 - Transform operator allowlist, recursion-depth cap, conservative regex rejection and bounded regex length.
-- CSV limits for cells, rows and columns; unique/non-empty headers; prototype-sensitive header names rejected.
+- CSV/XLSX limits for cells, rows and columns; unique/non-empty headers; prototype-sensitive header names rejected. XLSX additionally rejects encrypted, ZIP64, path-traversing, unsupported-compression, integrity-mismatched, and over-expanded archives.
 - Target schemas are enforced on every valid output row.
 - CSV cells beginning with `=`, `+`, `-`, or `@` are prefixed before export to neutralize formula interpretation.
 - Worker messages require matching job/revision and strictly increasing sequence numbers.

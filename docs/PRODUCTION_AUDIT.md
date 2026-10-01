@@ -7,7 +7,7 @@ The production release is blocked unless the product is understandable without r
 ## Current release controls
 
 - Route-driven product with dedicated Overview, Autopilot, How it works, WebMCP, Benchmarks, Docs and Studio surfaces.
-- Default migration setup requires only a CSV source and desired outcome.
+- Browser Studio accepts CSV or XLSX source input; XLSX uses the first visible worksheet locally and never evaluates formulas.
 - `run_autopilot` profiles, infers, plans, dry-runs and starts the existing Worker runtime without manual target/mapping commands.
 - Ambiguous destructive decisions fail closed before execution.
 - Full migration engine remains deterministic and arbitrary-code execution is prohibited.
@@ -29,7 +29,7 @@ The production release is blocked unless the product is understandable without r
 
 ## Known bounded limitations
 
-- Current file selection is limited to 50 MB and the source parser materializes CSV text/rows in browser memory. 1 GB streaming/OPFS is not claimed in this release.
+- Current file selection is limited to 50 MiB and the source parser materializes normalized rows in browser memory. XLSX expanded content is capped at 256 MiB. 1 GB streaming/OPFS is not claimed in this release.
 - Native WebMCP availability depends on the browser implementation.
 - The release benchmark does not establish LLM completion-rate improvement; that requires a controlled flat-vs-temporal agent evaluation.
 - Browser storage quota varies by device/browser.
