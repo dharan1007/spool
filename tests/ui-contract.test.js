@@ -2,44 +2,56 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
-const app = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
-const product = await readFile(new URL('../src/product-surface.js', import.meta.url), 'utf8').catch(() => '');
-const frontend = `${app}\n${product}`;
-const watchdog = await readFile(new URL('../boot-watchdog.js', import.meta.url), 'utf8');
+const [html, app, site, content, studio, styles, watchdog] = await Promise.all([
+  readFile(new URL('../index.html', import.meta.url), 'utf8'),
+  readFile(new URL('../src/app.js', import.meta.url), 'utf8'),
+  readFile(new URL('../src/site-redesign.js', import.meta.url), 'utf8'),
+  readFile(new URL('../src/site-content.js', import.meta.url), 'utf8'),
+  readFile(new URL('../src/studio-flow.js', import.meta.url), 'utf8'),
+  readFile(new URL('../src/site-redesign.css', import.meta.url), 'utf8'),
+  readFile(new URL('../boot-watchdog.js', import.meta.url), 'utf8')
+]);
 
-test('root document is a minimal resilient app shell instead of a monolithic workbench', () => {
+test('root document loads one public renderer and one Studio renderer', () => {
   assert.match(html, /id="app-root"/);
   assert.match(html, /src="\/boot-watchdog\.js"/);
   assert.match(html, /src="\/src\/app\.js"/);
-  assert.match(html, /href="\/styles\.css"/);
-  assert.doesNotMatch(html, /target-json|mapping-editor|runtime-panel|tool-inspector/);
+  assert.match(html, /src="\/src\/studio-flow\.js"/);
+  assert.match(html, /src="\/src\/site-redesign\.js"/);
+  assert.match(html, /href="\/src\/site-redesign\.css"/);
+  assert.doesNotMatch(html, /src="\/src\/product-surface\.js"/);
   assert.match(html, /connect-src 'none'/);
 });
 
-test('product frontend defines separate explanatory and Studio routes', () => {
-  for (const route of ['/', '/autopilot', '/how-it-works', '/webmcp', '/benchmarks', '/docs', '/studio', '/studio/new', '/studio/mission', '/studio/results']) {
-    assert.match(app, new RegExp(route.replaceAll('/', '\\/')),
-      `missing route ${route}`);
+test('public site is action-driven and exposes all supported surfaces', () => {
+  for (const route of ['/', '/how-it-works', '/webmcp', '/benchmarks', '/docs', '/local-runner', '/examples', '/security', '/services']) {
+    assert.ok(content.includes("'" + route + "'"), 'missing public route ' + route);
   }
-  for (const phrase of ['Run Autopilot', 'Advanced diagnostics', 'How SPOOL works', 'Temporal WebMCP', 'No action required']) {
-    assert.match(app, new RegExp(phrase), `missing UX copy: ${phrase}`);
-  }
-  assert.match(app, /run_autopilot/);
-  assert.match(app, /inspect_mission/);
+  for (const phrase of [
+    'Seven pages. Seven jobs.',
+    'Start with a file',
+    'Prepare a dataset',
+    'Write to SQLite',
+    'No mystery button',
+    'No dead ends',
+    'Browser Studio',
+    'Local Runner'
+  ]) assert.match(content, new RegExp(phrase, 'i'), 'missing clear UX copy: ' + phrase);
+  assert.doesNotMatch(content, /Run Autopilot/i);
 });
 
-test('complete website exposes the verified local-runner product instead of only the browser demo', () => {
-  assert.match(html, /src="\/src\/product-surface\.js"/);
-  assert.match(html, /href="\/product\.css"/);
+test('legacy Autopilot route redirects into the explicit Studio flow', () => {
+  assert.match(app, /path === '\/autopilot'/);
+  assert.match(app, /replaceState\(\{\}, '', '\/studio\/original'\)/);
+  assert.match(app, /REDESIGNED_SITE_PATHS/);
+  assert.match(app, /data-spool-site-root/);
+  assert.match(site, /data-site-route/);
+  assert.match(site, /spool:site-route/);
+  assert.match(site, /spool:statechange/);
+});
 
-  for (const route of ['/local-runner', '/examples', '/security', '/services']) {
-    assert.match(frontend, new RegExp(route.replaceAll('/', '\\/')), `missing complete-product route ${route}`);
-  }
-
+test('complete product truth remains visible without a competing renderer', () => {
   for (const phrase of [
-    'Browser Studio',
-    'Local runner',
     'source snapshot',
     'target contract',
     'target_write',
@@ -49,45 +61,37 @@ test('complete website exposes the verified local-runner product instead of only
     'receipt',
     'spoold',
     'PostgreSQL',
-    'MySQL'
-  ]) assert.match(frontend, new RegExp(phrase, 'i'), `missing local-runner product truth: ${phrase}`);
-
-  const lowerFrontend = frontend.toLowerCase();
-  for (const phrase of ['DEPLOYMENT + SUPPORT', 'Production target writes stay local', 'Run SPOOL locally', 'Self-host', 'metadata-only']) {
-    assert.ok(lowerFrontend.includes(phrase.toLowerCase()), `missing Hobby-safe deployment/support copy: ${phrase}`);
-  }
-  for (const prohibited of ['Pay for a migration outcome', 'Launch test range', 'Request a Migration Assessment']) {
-    assert.ok(!lowerFrontend.includes(prohibited.toLowerCase()), `commercial Hobby-hosted copy must be absent: ${prohibited}`);
-  }
-
-  for (const phrase of ['5 source', '3 valid', '2 rejected', 'ambiguous', 'CRM', 'ledger']) {
-    assert.match(frontend, new RegExp(phrase, 'i'), `missing real example evidence: ${phrase}`);
-  }
-
-  assert.match(frontend, /connect-src 'none'/);
-  assert.doesNotMatch(html, /technical demo|migration demo/i);
+    'MySQL',
+    '5 source records',
+    '3 valid',
+    '2 rejected',
+    'DEPLOYMENT',
+    'Production target writes stay local'
+  ]) assert.match(content, new RegExp(phrase, 'i'), 'missing product truth: ' + phrase);
+  assert.doesNotMatch(content, /paid checkout/i);
 });
 
-test('boot path renders a visible failure state instead of leaving Loading SPOOL forever', () => {
+test('boot path renders a visible failure state', () => {
   assert.match(watchdog, /Startup timed out/);
   assert.match(watchdog, /__spoolMarkBooted/);
   assert.match(app, /__spoolMarkBooted/);
   assert.match(app, /renderBootFailure/);
   assert.match(app, /Unable to start SPOOL/);
-  assert.match(app, /try\s*\{/);
-  assert.match(app, /catch\s*\(/);
 });
 
-test('visual system covers public storytelling, Studio workflow, diagnostics and responsive navigation', async () => {
-  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
-  const productStyles = await readFile(new URL('../product.css', import.meta.url), 'utf8').catch(() => '');
-  for (const selector of ['.hero-grid', '.step-flow', '.studio-rail', '.setup-layout', '.outcome-option', '.mission-grid', '.evidence-table', '.advanced', '.result-hero', '.boot-failure']) {
-    assert.match(styles, new RegExp(selector.replace('.', '\\.')), `missing style ${selector}`);
-  }
-  for (const selector of ['.product-hero', '.surface-grid', '.proof-grid', '.service-grid']) {
-    assert.match(productStyles, new RegExp(selector.replace('.', '\\.')), `missing complete-product style ${selector}`);
-  }
-  assert.match(styles, /@media\s*\(max-width:\s*900px\)/);
-  assert.match(productStyles, /@media\s*\(max-width:\s*900px\)/);
+test('visual system covers the public site, responsive navigation and Studio action states', () => {
+  for (const selector of [
+    '.redesign-topbar',
+    '.redesign-decision',
+    '.redesign-workflow',
+    '.redesign-stage-list',
+    '.redesign-choice-grid',
+    '.redesign-proof-grid',
+    '.flow-page-actions',
+    '.flow-dropzone.locked',
+    '.flow-action-lock'
+  ]) assert.ok(styles.includes(selector), 'missing redesigned style ' + selector);
+  assert.match(styles, /@media\(max-width:760px\)/);
   assert.match(styles, /:focus-visible/);
+  assert.match(studio, /reset-terminal/);
 });

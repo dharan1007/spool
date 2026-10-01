@@ -23,11 +23,13 @@ const READY_OR_LATER = new Set([
   PHASES.PAUSED, PHASES.PAUSED_RECOVERED, PHASES.COMPLETE
 ]);
 const MAX_BROWSER_BYTES = 50 * 1024 * 1024;
+const DRY_RUN_MIN_ACCEPTANCE = 0.95;
 const ACCEPT = '.csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 let queued = false;
 let rendering = false;
 let poll = null;
 let notice = null;
+let busyAction = false;
 
 function esc(value) {
   return String(value == null ? '' : value).replace(/[&<>'"]/g, char => ({
@@ -63,6 +65,21 @@ function jsonWrite(storage, key, value) {
 function metaKey(fp) { return 'spool:source-meta:' + (fp || 'none'); }
 function planKey(fp) { return 'spool:plan:' + (fp || 'none'); }
 function previewKey(state) { return 'spool:preview:' + (state && state.source ? state.source.fingerprint : 'none') + ':' + Number(state && state.mappingRevision || 0); }
+function progressKey(state) { return 'spool:flow-progress:' + (state && state.source ? state.source.fingerprint : 'none'); }
+function flowProgress(state) {
+  if (!state || !state.source) return 0;
+  let derived = 1;
+  const phase = state.job && state.job.phase;
+  if (READY_OR_LATER.has(phase)) derived = 4;
+  if ([PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED, PHASES.COMPLETE].includes(phase)) derived = 5;
+  if (phase === PHASES.COMPLETE) derived = 6;
+  const saved = Number(jsonRead(sessionStorage, progressKey(state), derived));
+  return Math.max(derived, Number.isFinite(saved) ? saved : derived);
+}
+function markProgress(state, index) {
+  if (!state || !state.source) return;
+  jsonWrite(sessionStorage, progressKey(state), Math.max(flowProgress(state), index));
+}
 function sourceMeta(state) {
   const source = state && state.source;
   const saved = source ? jsonRead(localStorage, metaKey(source.fingerprint), null) : null;
@@ -121,17 +138,25 @@ function intro(index, kicker, title, copy) {
     '</span><h1>' + title + '</h1><p>' + copy + '</p></div><div class="flow-step-count"><strong>' + FLOW[index][1] +
     '</strong><span>of 07</span></div></section>';
 }
-function stepStatus(state, index) {
+function stepStatus(state, index, current) {
   if (!state || !state.source) return index === 0 ? 'current' : 'locked';
-  if (index <= 2) return 'done';
+  const progress = flowProgress(state);
   const phase = state.job.phase;
-  if (index === 3) return READY_OR_LATER.has(phase) ? 'done' : 'available';
-  if (index === 4) return READY_OR_LATER.has(phase) ? (jsonRead(sessionStorage, previewKey(state), null) ? 'done' : 'available') : 'locked';
-  if (index === 5) return phase === PHASES.COMPLETE ? 'done' : READY_OR_LATER.has(phase) ? 'available' : 'locked';
-  return phase === PHASES.COMPLETE ? 'available' : 'locked';
+  if (index === current && index > progress) return 'locked';
+  if (index === current) return 'current';
+  if (index < current && index <= progress) return 'done';
+  if (index === 0) return 'done';
+  if (index <= progress) return 'available';
+  if (index === 4 && READY_OR_LATER.has(phase)) return jsonRead(sessionStorage, previewKey(state), null) ? 'done' : 'available';
+  if (index === 5 && [PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED, PHASES.COMPLETE].includes(phase)) return phase === PHASES.COMPLETE ? 'done' : 'available';
+  if (index === 6 && phase === PHASES.COMPLETE) return 'available';
+  return 'locked';
 }
 function navigate(path, replace) {
   if (!PATHS.has(path)) return;
+  const state = api() && api().state ? api().state() : null;
+  const targetIndex = indexFor(path);
+  if (state && state.source) markProgress(state, targetIndex);
   if (replace) window.history.replaceState({}, '', path);
   else if (window.location.pathname !== path) window.history.pushState({}, '', path);
   window.scrollTo({ top: 0, behavior: 'instant' });
@@ -141,7 +166,7 @@ function shell(path, state, body) {
   const current = indexFor(path);
   const meta = sourceMeta(state);
   const nav = FLOW.map((step, index) => {
-    const status = index === current ? 'current' : stepStatus(state, index);
+    const status = stepStatus(state, index, current);
     const locked = status === 'locked';
     const open = locked ? '<span' : '<a href="' + step[0] + '" data-flow-route="' + step[0] + '"';
     const close = locked ? '</span>' : '</a>';
@@ -149,8 +174,11 @@ function shell(path, state, body) {
       '</strong><small>' + (status === 'done' ? 'Completed / ready' : status === 'locked' ? 'Complete earlier stages' : status === 'current' ? 'Current stage' : 'Available') +
       '</small></span>' + close;
   }).join('');
-  const mobile = FLOW.map((step, index) => '<a href="' + step[0] + '" data-flow-route="' + step[0] + '" class="' +
-    (index === current ? 'active' : '') + '"><span>' + step[1] + '</span>' + esc(step[3]) + '</a>').join('');
+  const mobile = FLOW.map((step, index) => {
+    const status = stepStatus(state, index, current);
+    if (status === 'locked') return '<span class="locked"><b>' + step[1] + '</b>' + esc(step[3]) + '</span>';
+    return '<a href="' + step[0] + '" data-flow-route="' + step[0] + '" class="' + (index === current ? 'active' : '') + '"><span>' + step[1] + '</span>' + esc(step[3]) + '</a>';
+  }).join('');
   const sourcePill = state && state.source
     ? '<span class="flow-file-pill"><b>' + esc(meta.format) + '</b>' + esc(meta.originalName) + '</span>'
     : '<span class="flow-file-pill muted">No source loaded</span>';
@@ -162,12 +190,14 @@ function shell(path, state, body) {
     '<div class="flow-layout"><aside class="flow-sidebar"><div class="flow-sidebar-head"><span>STUDIO WORKFLOW</span><strong>7-stage controlled migration</strong>' +
     '<p>Each stage has one job. Nothing is applied until the transformation is approved and processing starts.</p></div><nav aria-label="Studio workflow">' + nav +
     '</nav><div class="flow-local"><i></i><div><strong>Local data plane</strong><span>Rows stay in this browser. Production CSP blocks network connections.</span></div></div></aside>' +
-    '<main class="flow-main"><div class="flow-mobile-steps">' + mobile + '</div>' + noticeHtml + body + '</main></div></div>';
+    '<main class="flow-main"><div class="flow-mobile-steps">' + mobile + '</div>' + noticeHtml + body + '</main></div>' +
+    (busyAction ? '<div class="flow-action-lock" role="status" aria-live="polite"><div>Applying this action locally…</div></div>' : '') + '</div>';
 }
 
 function originalPage(state) {
   const source = state && state.source;
   const meta = sourceMeta(state);
+  const sourceLocked = Boolean(source && [PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(state.job.phase));
   let details = '<div class="flow-empty tall"><strong>Source not loaded</strong><p>The workflow starts only after a valid CSV or XLSX is parsed locally.</p></div>';
   let preview = '';
   if (source) {
@@ -188,9 +218,9 @@ function originalPage(state) {
     'Load the original source without transforming records. CSV and XLSX are parsed locally; XLSX uses the first visible worksheet and formulas are never executed.') +
     '<section class="flow-two-col"><article class="flow-card upload-card"><div class="flow-card-title"><div><span class="flow-kicker">SOURCE FILE</span><h2>' +
     (source ? 'Replace original file' : 'Add original file') + '</h2></div>' + (source ? '<span class="flow-badge good">Loaded</span>' : '') + '</div>' +
-    '<label class="flow-dropzone" id="flow-dropzone" tabindex="0"><input type="file" id="flow-file" accept="' + ACCEPT + '" hidden><span class="flow-upload-icon">＋</span>' +
-    '<strong>Drop CSV or XLSX here</strong><p>Browser Studio supports <b>.csv</b> and <b>.xlsx</b> up to 50 MiB. XLSX is normalized locally into SPOOL’s deterministic source contract.</p>' +
-    '<span class="flow-button secondary">Choose file</span></label><div class="flow-divider"><span>or</span></div><button class="flow-demo" data-flow-action="load-demo">' +
+    '<label class="flow-dropzone' + (sourceLocked ? ' locked' : '') + '" id="flow-dropzone" tabindex="' + (sourceLocked ? '-1' : '0') + '"><input type="file" id="flow-file" accept="' + ACCEPT + '" hidden' + (sourceLocked ? ' disabled' : '') + '><span class="flow-upload-icon">＋</span>' +
+    '<strong>' + (sourceLocked ? 'Source replacement is locked while processing' : 'Drop CSV or XLSX here') + '</strong><p>' + (sourceLocked ? 'Finish or abort the active processing run before replacing the source.' : 'Browser Studio supports <b>.csv</b> and <b>.xlsx</b> up to 50 MiB. XLSX is normalized locally into SPOOL’s deterministic source contract.') + '</p>' +
+    (sourceLocked ? '<a class="flow-button secondary" href="/studio/process" data-flow-route="/studio/process">Open current processing →</a>' : '<span class="flow-button secondary">Choose file</span>') + '</label><div class="flow-divider"><span>or</span></div><button class="flow-demo" data-flow-action="load-demo"' + (sourceLocked ? ' disabled' : '') + '>' +
     '<span><strong>Load 25k-row dirty-data example</strong><small>Useful for testing validation and rejection behavior.</small></span><b>→</b></button></article>' +
     '<article class="flow-card"><div class="flow-card-title"><div><span class="flow-kicker">SOURCE IDENTITY</span><h2>' + (source ? esc(meta.originalName) : 'Nothing loaded yet') +
     '</h2></div>' + (source ? '<span class="format-tile">' + (meta.format === 'XLSX' ? 'X' : 'C') + '</span>' : '') + '</div>' + details + '</article></section>' + preview;
@@ -256,6 +286,7 @@ function analyze(state) {
 }
 function understandPage(state) {
   if (!state || !state.source) return prerequisite(2, 'Load and inspect a source before SPOOL can explain the columns.', '/studio/original', 'Go to Original file');
+  if (flowProgress(state) < 2) return prerequisite(2, 'Inspect the raw data before moving to column understanding.', '/studio/inspect', 'Inspect the data');
   const columns = analyze(state);
   const issueColumns = columns.filter(item => item.empty || item.padded || item.failures).length;
   const signals = columns.reduce((sum, item) => sum + item.empty + item.padded + item.failures, 0);
@@ -307,6 +338,7 @@ function outcomeCards(selected, locked) {
 }
 function transformPage(state) {
   if (!state || !state.source) return prerequisite(3, 'A source is required before a transformation can be prepared.', '/studio/original', 'Load original file');
+  if (flowProgress(state) < 3) return prerequisite(3, 'Review the column understanding before preparing the output contract.', '/studio/understand', 'Understand columns');
   const locked = READY_OR_LATER.has(state.job.phase);
   const selected = locked && savedPlan(state) ? savedPlan(state).outcome : outcome();
   const plan = locked ? null : planFor(state, selected);
@@ -328,7 +360,8 @@ function transformPage(state) {
   });
   const blocked = !locked && (plan.needsAttention || plan.ambiguities.length);
   const blockedHtml = blocked ? '<section class="flow-blocked"><span>BLOCKED</span><div><h2>Transformation requires a source decision.</h2>' +
-    plan.ambiguities.map(item => '<p><strong>' + esc(item.code) + '</strong> — ' + esc(item.message) + '</p>').join('') + '</div></section>' : '';
+    plan.ambiguities.map(item => '<p><strong>' + esc(item.code) + '</strong> — ' + esc(item.message) + '</p>').join('') +
+    '<div class="flow-terminal-actions"><a class="flow-button secondary" href="/studio/original" data-flow-route="/studio/original">Replace source file</a><a class="flow-button ghost" href="/studio/understand" data-flow-route="/studio/understand">Review problem columns</a></div></div></section>' : '';
   return intro(3, 'TRANSFORMATION CONTRACT', 'Determine how every input field becomes a valid output field.',
     'This page prepares the target schema and constrained transformation IR only. It does not process the full dataset.') +
     '<section class="flow-section"><div class="flow-section-head"><div><span class="flow-kicker">OUTPUT INTENT</span><h2>Choose the transformation policy</h2><p>' +
@@ -349,6 +382,18 @@ function previewState(state) {
   const saved = jsonRead(sessionStorage, previewKey(state), null);
   return saved && state && state.source && saved.fingerprint === state.source.fingerprint && saved.mappingRevision === state.mappingRevision ? saved : null;
 }
+function previewAssessment(state) {
+  const saved = previewState(state);
+  const result = saved && saved.result;
+  if (!result) return { status: 'MISSING', acceptance: 0 };
+  const processed = Number(result.processedRows || 0);
+  const valid = Number(result.validRows || 0);
+  const acceptance = processed ? valid / processed : 1;
+  return {
+    status: valid === 0 || acceptance < DRY_RUN_MIN_ACCEPTANCE ? 'BLOCK' : result.invalidRows > 0 ? 'WARNING' : 'PASS',
+    acceptance
+  };
+}
 function violationCards(groups) {
   if (!groups || !groups.length) return '<div class="flow-clean"><span>✓</span><div><strong>No violations in this result</strong><p>The evaluated rows satisfied the target contract.</p></div></div>';
   return '<div class="flow-violation-grid">' + groups.map(group => '<article><span>' + esc(group.code) + '</span><strong>' +
@@ -362,10 +407,19 @@ function testPage(state) {
   let resultHtml = '<section class="flow-test-empty"><span class="test-ring">05</span><h2>No dry test exists for revision ' + num(state.mappingRevision) +
     '.</h2><p>Run up to 100 records through the exact transformation and typed validation engine without starting the Worker.</p><button class="flow-button primary large" data-flow-action="run-preview">Run dry test now</button></section>';
   if (result) {
+    const assessment = previewAssessment(state);
     const output = (result.output || []).slice(0, 12);
     const headers = output.length ? Object.keys(output[0]) : state.targetSchema.map(field => field.name);
     const rows = output.map((row, i) => ['<strong>' + num(i + 1) + '</strong>'].concat(headers.map(header => cell(row[header]))));
-    resultHtml = metrics([
+    resultHtml = (assessment.status === 'BLOCK'
+      ? '<section class="flow-blocked"><span>TEST BLOCKED</span><div><h2>Do not process this transformation yet.</h2><p>Only ' +
+        pct(result.validRows, result.processedRows) + ' of the dry-test sample passed. SPOOL requires at least ' +
+        Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '% before full processing.</p><div class="flow-terminal-actions"><a class="flow-button primary" href="/studio/transform" data-flow-route="/studio/transform">Revise transformation</a><a class="flow-button secondary" href="/studio/understand" data-flow-route="/studio/understand">Review problem columns</a></div></div></section>'
+      : assessment.status === 'WARNING'
+        ? '<section class="flow-safety-banner"><div><span>TEST PASSED WITH REJECTIONS</span><strong>Processing is allowed, but rejected rows will remain explicit.</strong><p>Dry-test acceptance: ' +
+          pct(result.validRows, result.processedRows) + ' · safety floor: ' + Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '%</p></div><i>!</i></section>'
+        : '<section class="flow-safety-banner"><div><span>TEST PASSED</span><strong>The sampled rows satisfy the processing safety gate.</strong><p>Dry-test acceptance: 100% · safety floor: ' + Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '%</p></div><i>✓</i></section>') +
+    metrics([
       ['Rows tested', num(result.processedRows), 'Real engine, bounded sample'],
       ['Passed', num(result.validRows), 'Typed output accepted'],
       ['Rejected', num(result.invalidRows), 'Kept explicit'],
@@ -381,21 +435,37 @@ function testPage(state) {
     '<section class="flow-safety-banner"><div><span>READ-ONLY TEST</span><strong>Current durable output remains untouched.</strong><p>Mapping revision ' + num(state.mappingRevision) +
     ' · source fingerprint ' + esc(String(state.source.fingerprint).slice(0, 18)) + '…</p></div><i>TEST</i></section>' + resultHtml +
     actions('<a class="flow-button ghost" href="/studio/transform" data-flow-route="/studio/transform">← Transformation</a>',
-      result ? '<button class="flow-button secondary" data-flow-action="run-preview">Re-run test</button><a class="flow-button primary" href="/studio/process" data-flow-route="/studio/process">Approve test & continue →</a>' : '');
+      result
+        ? (previewAssessment(state).status === 'BLOCK'
+          ? '<button class="flow-button secondary" data-flow-action="run-preview">Re-run test</button><a class="flow-button primary" href="/studio/transform" data-flow-route="/studio/transform">Revise transformation →</a>'
+          : '<button class="flow-button secondary" data-flow-action="run-preview">Re-run test</button><a class="flow-button primary" href="/studio/process" data-flow-route="/studio/process">Approve test & continue →</a>')
+        : '');
 }
 function processPage(state) {
   if (!state || !state.source) return prerequisite(5, 'A source is required.', '/studio/original', 'Load original file');
-  if (!READY_OR_LATER.has(state.job.phase)) return prerequisite(5, 'Approve and validate the transformation first.', '/studio/transform', 'Prepare transformation');
   const phase = state.job.phase;
+  if (phase === PHASES.FAILED || phase === PHASES.ABORTED) {
+    const reason = state.lastError && state.lastError.message ? state.lastError.message : (phase === PHASES.ABORTED ? 'The processing run was aborted.' : 'The processing run stopped safely.');
+    return intro(5, 'EXECUTION STOPPED', phase === PHASES.ABORTED ? 'Processing was aborted.' : 'Processing failed safely.',
+      'SPOOL did not leave this run in a fake running state. Review the reason below, then start a clean migration when ready.') +
+      '<section class="flow-blocked"><span>' + esc(phase) + '</span><div><h2>No processing action is running.</h2><p>' + esc(reason) + '</p>' +
+      '<div class="flow-terminal-actions"><button class="flow-button primary" data-flow-action="reset-terminal">Start a new migration</button>' +
+      '<a class="flow-button secondary" href="/studio/understand" data-flow-route="/studio/understand">Review source problems</a></div></div></section>' +
+      actions('<a class="flow-button ghost" href="/studio/original" data-flow-route="/studio/original">← Original file</a>', '<span>Resolve the failure before starting another run.</span>');
+  }
+  if (!READY_OR_LATER.has(phase)) return prerequisite(5, 'Approve and validate the transformation first.', '/studio/transform', 'Prepare transformation');
   const running = phase === PHASES.RUNNING || phase === PHASES.REPLAYING;
   const paused = phase === PHASES.PAUSED || phase === PHASES.PAUSED_RECOVERED;
   const complete = phase === PHASES.COMPLETE;
   const preview = previewState(state);
+  const assessment = previewAssessment(state);
   const progress = Number(state.job.totalRows) ? Math.min(100, Number(state.job.processedRows) / Number(state.job.totalRows) * 100) : 0;
-  const blocked = !preview && phase === PHASES.MAPPING_VALID
-    ? '<section class="flow-blocked"><span>TEST REQUIRED</span><div><h2>Run the dry test before processing.</h2><p>The current mapping revision has not completed the explicit non-committing test stage.</p><a class="flow-button secondary" href="/studio/test" data-flow-route="/studio/test">Go to Test without changes</a></div></section>' : '';
+  const blocked = phase === PHASES.MAPPING_VALID && !preview
+    ? '<section class="flow-blocked"><span>TEST REQUIRED</span><div><h2>Run the dry test before processing.</h2><p>The current mapping revision has not completed the explicit non-committing test stage.</p><a class="flow-button secondary" href="/studio/test" data-flow-route="/studio/test">Go to Test without changes</a></div></section>'
+    : phase === PHASES.MAPPING_VALID && assessment.status === 'BLOCK'
+      ? '<section class="flow-blocked"><span>TEST FAILED</span><div><h2>Processing is blocked by the dry-test safety gate.</h2><p>Acceptance is ' + pct(preview.result.validRows, preview.result.processedRows) + '; at least ' + Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '% is required.</p><div class="flow-terminal-actions"><a class="flow-button primary" href="/studio/transform" data-flow-route="/studio/transform">Revise transformation</a><a class="flow-button secondary" href="/studio/test" data-flow-route="/studio/test">Re-run dry test</a></div></div></section>' : '';
   let buttons = '';
-  if (phase === PHASES.MAPPING_VALID && preview) buttons = '<button class="flow-button primary large" data-flow-action="start-process">Process the full dataset</button>';
+  if (phase === PHASES.MAPPING_VALID && preview && assessment.status !== 'BLOCK') buttons = '<button class="flow-button primary large" data-flow-action="start-process">Process the full dataset</button>';
   if (running) buttons = '<button class="flow-button secondary" data-flow-action="pause-process">Pause safely</button>';
   if (paused) buttons = '<button class="flow-button primary" data-flow-action="resume-process">Resume from checkpoint</button>';
   if (complete) buttons = '<a class="flow-button primary large" href="/studio/validate" data-flow-route="/studio/validate">Validate final results →</a>';
@@ -407,8 +477,8 @@ function processPage(state) {
     'This is the first stage that commits transformed records into SPOOL’s durable browser result state. A mapping revision is fixed for the run.') +
     blocked + '<section class="flow-process-panel"><div class="flow-process-status"><span class="flow-kicker">RUN STATUS</span><h2>' + title +
     '</h2><p>' + copy + '</p></div><div class="flow-progress-number"><strong>' + progress.toFixed(1) + '%</strong><span>' + num(state.job.processedRows) +
-    ' / ' + num(state.job.totalRows) + ' rows</span></div><div class="flow-progress-track"><i style="width:' + progress.toFixed(2) +
-    '%"></i></div><div class="flow-process-stats"><div><span>Valid</span><strong>' + num(state.job.validRows) + '</strong></div><div><span>Rejected</span><strong>' +
+    ' / ' + num(state.job.totalRows) + ' rows</span></div><progress class="flow-native-progress" max="100" value="' + progress.toFixed(2) +
+    '">' + progress.toFixed(1) + '%</progress><div class="flow-process-stats"><div><span>Valid</span><strong>' + num(state.job.validRows) + '</strong></div><div><span>Rejected</span><strong>' +
     num(state.job.invalidRows) + '</strong></div><div><span>Checkpoint</span><strong>' + num(state.job.checkpoint) + '</strong></div><div><span>Mapping revision</span><strong>' +
     num(state.mappingRevision) + '</strong></div></div><div class="flow-process-actions">' + buttons + '</div></section>' +
     '<section class="flow-section"><div class="flow-section-head"><div><span class="flow-kicker">EXECUTION GUARANTEES</span><h2>What SPOOL enforces while records move</h2></div></div>' +
@@ -498,7 +568,11 @@ function setNotice(tone, title, message) {
   setNotice.timer = window.setTimeout(() => { notice = null; schedule(); }, 5000);
 }
 async function upload(file) {
-  if (!file) return;
+  if (!file || busyAction) return;
+  const current = api() && api().state ? api().state() : null;
+  if (current && [PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(current.job.phase)) {
+    return setNotice('danger', 'Source replacement locked', 'Finish or abort the active processing run before loading a different source.');
+  }
   if (Number(file.size || 0) > MAX_BROWSER_BYTES) return setNotice('danger', 'File too large', 'Browser Studio accepts CSV/XLSX files up to 50 MiB.');
   const lower = String(file.name || '').toLowerCase();
   const csv = lower.endsWith('.csv') || file.type === 'text/csv';
@@ -518,7 +592,8 @@ async function upload(file) {
       text = await file.text();
       meta = { format: 'CSV', originalName: file.name, originalBytes: file.size, worksheet: null, worksheetCount: null, warnings: [], loadedAt: new Date().toISOString() };
     }
-    await api().loadCsv(text, file.name);
+    const loaded = await api().loadCsv(text, file.name);
+    if (loaded && loaded.ok === false) throw new Error(loaded.message || 'SPOOL refused to replace the active source.');
     const state = api().state();
     if (!state || !state.source) throw new Error('SPOOL did not create a source workspace.');
     jsonWrite(localStorage, metaKey(state.source.fingerprint), meta);
@@ -557,6 +632,8 @@ async function preview() {
 async function startProcess() {
   const state = api().state();
   if (!previewState(state)) return setNotice('danger', 'Dry test required', 'Run the non-committing test for this mapping revision first.');
+  const assessment = previewAssessment(state);
+  if (assessment.status === 'BLOCK') return setNotice('danger', 'Dry test failed', 'Processing requires at least ' + Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '% sample acceptance. Revise the transformation first.');
   const response = await api().invoke('start_migration', {});
   if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
   setNotice('success', 'Processing started', 'The full dataset is running through the approved transformation.');
@@ -570,8 +647,13 @@ function download(result) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 async function action(name) {
+  if (busyAction) return;
+  busyAction = true;
+  schedule();
+  try {
   if (name === 'load-demo') {
-    await api().loadDemo();
+    const loaded = await api().loadDemo();
+    if (loaded && loaded.ok === false) return setNotice('danger', loaded.code || 'LOAD_BLOCKED', loaded.message || 'Could not load demo source.');
     const state = api().state();
     if (state && state.source) jsonWrite(localStorage, metaKey(state.source.fingerprint), {
       format: 'CSV', originalName: state.source.fileName, originalBytes: state.source.bytes, worksheet: null, worksheetCount: null, warnings: []
@@ -598,13 +680,23 @@ async function action(name) {
     if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
     return download(response.result);
   }
+  if (name === 'reset-terminal') {
+    const response = await api().invoke('start_new_migration', {});
+    if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
+    setNotice('success', 'New migration ready', 'The previous terminal run was cleared. Load or review the source from step 1.');
+    return navigate('/studio/original');
+  }
   if (name === 'new-source') {
     const state = api().state();
-    if (state && state.job.phase === PHASES.COMPLETE) {
+    if (state && [PHASES.COMPLETE, PHASES.FAILED, PHASES.ABORTED].includes(state.job.phase)) {
       const response = await api().invoke('start_new_migration', {});
       if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
     }
     return navigate('/studio/original');
+  }
+  } finally {
+    busyAction = false;
+    schedule();
   }
 }
 

@@ -39,7 +39,8 @@ test('release build emits ordinary same-origin static modules with no compressed
 
   for (const file of [
     'index.html', 'styles.css', 'product.css', 'vercel.json',
-    'src/app.js', 'src/product-surface.js', 'src/core/autopilot.js', 'src/core/command-kernel.js',
+    'src/app.js', 'src/studio-flow.js', 'src/site-content.js', 'src/site-redesign.js', 'src/site-redesign.css',
+    'src/product-surface.js', 'src/core/autopilot.js', 'src/core/command-kernel.js',
     'src/runtime/browser-worker-runtime.js', 'src/worker/migration.worker.js'
   ]) {
     const info = await stat(join(distDir, file));
@@ -49,17 +50,20 @@ test('release build emits ordinary same-origin static modules with no compressed
   const html = await readFile(join(distDir, 'index.html'), 'utf8');
   assert.match(html, /src="\/boot-watchdog\.js"/);
   assert.match(html, /src="\/src\/app\.js"/);
-  assert.match(html, /src="\/src\/product-surface\.js"/);
+  assert.match(html, /src="\/src\/studio-flow\.js"/);
+  assert.match(html, /src="\/src\/site-redesign\.js"/);
   assert.match(html, /href="\/styles\.css"/);
-  assert.match(html, /href="\/product\.css"/);
+  assert.match(html, /href="\/src\/site-redesign\.css"/);
+  assert.doesNotMatch(html, /src="\/src\/product-surface\.js"/);
   assert.match(html, /script-src 'self'/);
   assert.match(html, /connect-src 'none'/);
   assert.doesNotMatch(html, /payload-\d+\.js|bootstrap\.js|DecompressionStream|__SPOOL_PAYLOAD__/);
 
   const app = await readFile(join(distDir, 'src/app.js'), 'utf8');
-  const product = await readFile(join(distDir, 'src/product-surface.js'), 'utf8');
+  const site = await readFile(join(distDir, 'src/site-redesign.js'), 'utf8');
+  const content = await readFile(join(distDir, 'src/site-content.js'), 'utf8');
   assert.doesNotMatch(app, /DecompressionStream|await\s+import\(jsUrl\)|__SPOOL_PAYLOAD__/);
-  assert.doesNotMatch(`${app}\n${product}`, /\bfetch\s*\(|XMLHttpRequest|WebSocket\s*\(|sendBeacon\s*\(/);
+  assert.doesNotMatch(`${app}\n${site}\n${content}`, /\bfetch\s*\(|XMLHttpRequest|WebSocket\s*\(|sendBeacon\s*\(/);
 });
 
 test('host-consumed deployment config ships in dist but stays out of the served-artifact manifest', async t => {

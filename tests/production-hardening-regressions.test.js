@@ -174,13 +174,18 @@ test('local command service honors its configured source ceiling above the 50 Mi
   }
 });
 
-test('strict production CSP has no inline style attributes in the application render source', async () => {
-  const app = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
-  assert.doesNotMatch(app, /\sstyle\s*=\s*["']/i);
+test('strict production CSP has no inline style attributes in loaded render sources', async () => {
+  const sources = await Promise.all([
+    readFile(new URL('../src/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/studio-flow.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/site-redesign.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/site-content.js', import.meta.url), 'utf8')
+  ]);
+  assert.doesNotMatch(sources.join('\n'), /\sstyle\s*=\s*["']/i);
 });
 
 test('deployed Local Runner page contains a complete copyable CLI path for real device use', async () => {
-  const surface = await readFile(new URL('../src/product-surface.js', import.meta.url), 'utf8');
+  const surface = await readFile(new URL('../src/site-content.js', import.meta.url), 'utf8');
   for (const required of [
     `npm install -g github:dharan1007/spool#${releaseTag}`,
     'spool --help',
@@ -196,6 +201,6 @@ test('deployed Local Runner page contains a complete copyable CLI path for real 
 });
 
 test('Hobby deployment surface does not advertise paid commercial transactions', async () => {
-  const surface = await readFile(new URL('../src/product-surface.js', import.meta.url), 'utf8');
+  const surface = await readFile(new URL('../src/site-content.js', import.meta.url), 'utf8');
   assert.doesNotMatch(surface, /Pay for a migration|Launch test range|Request a Migration Assessment/);
 });
