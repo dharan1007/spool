@@ -43,10 +43,10 @@ progress" below for the exact step cursor.
 | 24 | Document intended CDC drain state-machine invariant | DONE — `docs/engineering/CDC_DRAIN_LIFECYCLE.md` |
 | 25 | Fix root cause (no timeout-as-success) | DONE — bounded-drain `DRAIN_BLOCKED` watchdog (timer-race wake, data-driven progress only) + durable `FAILED_RECOVERABLE` transition with §13 capture set (`#recordDrainBlocked`) |
 | 26 | Promote scratch repros to permanent tests | DONE — 6 tests in `postgres-cdc-{drain-lifecycle,cutover-drain,restart-drain}.test.js` (+ existing replica-identity file); scratch deleted; suite 592/572/0/20 |
-| 27 | PostgreSQL correctness/red-team suite | NOT STARTED (next) |
-| 28 | CI_CORRECTNESS profile (only when prerequisites ready) | NOT STARTED — needs workload envelope stage bound into correctness profile (100k rows/30s CDC) |
-| 29 | Record evidence | PARTIAL (R1-R7 in QUALIFICATION_EVIDENCE.md; CI_CORRECTNESS run pending) |
-| 30 | Push integration branch (never main) | NOT STARTED |
+| 27 | PostgreSQL correctness/red-team suite | DONE — `--profile postgres` PASS at clean `38dbcc2` (592/20-skipped, self-verified, R10); adversarial suite 21/21 (R9 + envelope-binding pin) |
+| 28 | CI_CORRECTNESS profile (only when prerequisites ready) | PARTIAL — envelope stage bound + pinned (`b2c42b7`); disk prerequisite NOT met (see below); execution BLOCKED fail-closed, class stays NOT_ESTABLISHED |
+| 29 | Record evidence | PARTIAL (R1-R11 in QUALIFICATION_EVIDENCE.md; CI_CORRECTNESS run pending disk) |
+| 30 | Push integration branch (never main) | NOT STARTED (next) |
 
 ## Completed changes (commits on this lineage)
 
@@ -84,6 +84,17 @@ progress" below for the exact step cursor.
 - `4d605fc` fix: CI_CORRECTNESS/PILOT class claims require a bound workload
   envelope (workload-claim + class-claim verifier rules; adversarial test 20).
 
+- `b2c42b7` feat: CI workload envelope bound into the `correctness`
+  profile (`correctness-envelope` stage running immutable
+  `industrial-postgres.js --profile CI` + `workload` manifest binding +
+  `correctness`-kind disk gate; adversarial pin test 21, 21/21).
+- `79c2620` fix: `browser-smoke.py` repairs (it never parsed: stray
+  `\"` escapes; Windows Chrome resolution; SPA client-side navigation
+  for product routes, `/studio/new`, and reload) + `src/app.js`
+  `ROUTES` admits product routes (in-app product links collapsed to
+  `/` before). Standalone smoke: PASS exit 0 (25k rows,
+  91/9 blockedDryRun, recovery, 0 exceptions).
+
 ## Tested commits and commands (resume exactly)
 
 ```bash
@@ -113,8 +124,9 @@ node -e "import('./scripts/qualify/disk-preflight.js').then(m=>console.log(m.mea
 node scripts/qualify/run-standalone.js --list
 node scripts/qualify/run-standalone.js --profile quick
 node scripts/qualify/run-standalone.js --profile postgres   # needs spooltest.env loaded
+node scripts/qualify/run-standalone.js --profile correctness # CI_CORRECTNESS: needs spooltest.env + >=8 GiB free
 node scripts/qualify/run-standalone.js --verify <evidence-dir>
-node --test tests/qualify-standalone.test.js                # adversarial suite (20)
+node --test tests/qualify-standalone.test.js                # adversarial suite (21)
 ```
 
 ## Known failures / not executed
@@ -123,16 +135,27 @@ node --test tests/qualify-standalone.test.js                # adversarial suite 
 - NOT_EXECUTED (never PASS): 8 SQL Server conformance (no MSSQL env),
   7 MySQL conformance (no MySQL env), 3 SIGKILL cutover tests
   (Windows: `process.platform === 'win32'` skip), 2 POSIX-only tests.
-- Load/fault qualification tiers are refused by disk policy at current
-  ~4.7 GiB free (correct behavior, not a failure).
+- Load/fault qualification tiers are refused by disk policy (correct
+  behavior, not a failure). Timeline: ~4.3 GiB free → safe cache
+  reclamation (npm `_cacache`, npx store incl. long-path cleanup,
+  update-download/temp caches, thumb/pip caches; user Downloads and all
+  project data untouched) → **8.44 GiB** (correctness tier admitted) →
+  concurrent external machine activity consumed ~5.5 GiB within ~20 min
+  → 2.89 GiB. The `correctness`-kind disk gate then correctly refused
+  the envelope run (all stages NOT_EXECUTED, FAIL, self-verification
+  OK): the fail-closed design working as specified. See R11.
 
 ## Remaining defects (open)
 
-- CI_CORRECTNESS class evidence has not been executed (Step 28): the
-  correctness profile still lacks the bound workload envelope stage
-  (100k rows / 30s real CDC from `PROFILE_DEFINITIONS.CI`), so any PASS
-  correctly reports `NOT_ESTABLISHED` for that class. This is the last
-  P0 blocker in `INDUSTRIAL_GAP_REGISTER.md`.
+- CI_CORRECTNESS execution has not run (Step 28): the envelope stage and
+  workload binding are implemented and pinned (`b2c42b7`), but the
+  `correctness`-kind disk gate (8 GiB floor, D2) cannot be satisfied
+  while concurrent external activity consumes C: faster than safe
+  reclamation allows. Attempt #1 executed 11/14 stages (all PASS until
+  the since-fixed browser-smoke defect); attempt #2 was refused at
+  2.89 GiB. Rerun `--profile correctness` when >=8.2 GiB is stably
+  free. This is the last P0 blocker (`INDUSTRIAL_GAP_REGISTER.md`
+  Q-04).
 - Known bounded-drain gap (documented in `CDC_DRAIN_LIFECYCLE.md`,
   non-blocking for Steps 23-26): the stall watchdog runs in the pump's
   empty-queue wait branch; a target-side apply that blocks indefinitely

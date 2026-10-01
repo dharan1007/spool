@@ -38,7 +38,7 @@ nothing is estimated. States:
 | Q-01 | Standalone qualification runner profiles | P0 | `run-standalone.js` 5 profiles | COMPLETE | PASSING | QUALIFIED | — | `scripts/qualify/run-standalone.js`; R6/R7 quick+postgres runs | `821aa6b` | STEP 21; exit 0 only on PASS, self-verifying |
 | Q-02 | Qualification outcome model + manifest binding | P0 | PASS/FAIL/NOT_EXECUTED/BLOCKED/NOT_APPLICABLE | COMPLETE | PASSING | QUALIFIED | — | manifest schema v1 (§10 fields), `evaluateOverall` | `821aa6b` | mandatory NOT_EXECUTED/BLOCKED prevent PASS |
 | Q-03 | Adversarial qualification tests (18 invariants) | P0 | fail-closed proofs | COMPLETE | PASSING | QUALIFIED | — | `tests/qualify-standalone.test.js` (20/20) | `81ffe72`, `4d605fc` | STEP 22; verifier fails closed on every contradiction |
-| Q-04 | CI_CORRECTNESS profile execution | P0 | ≥100k rows, ≥30s real CDC + mandatory tests | NOT_STARTED | NONE | NOT_EXECUTED | **P0** | (planned: workload envelope stage bound into correctness profile) | — | Step 28; class claims gated until then (`4d605fc`) |
+| Q-04 | CI_CORRECTNESS profile execution | P0 | ≥100k rows, ≥30s real CDC + mandatory tests | PARTIAL | PARTIAL | NOT_EXECUTED | **P0** | envelope stage bound + pinned (`b2c42b7`); attempt evidence R11 | `b2c42b7` | Step 28: execution BLOCKED by D2 disk gate (needs stably ≥8.2 GiB; external consumption); class stays NOT_ESTABLISHED |
 | Q-05 | Evidence writer/verifier/checksums | P1 | tamper-detection tests | COMPLETE | PASSING | QUALIFIED | — | `tests/qualify-harness.test.js` + adversarial tests 4/5/14/15 | `821aa6b` | reused by runner (no duplicate implementation) |
 | D-01 | CDC drain/cutover hang: root cause established | P0 | captured position/worker/barrier state | COMPLETE | PASSING | QUALIFIED | — | §23 repro log + `CDC_DRAIN_LIFECYCLE.md` root-cause sections | `6c79479` | Steps 23-24: original hang closed by `c023d52`/`1ce26fa`; remaining class = unbounded silent wait + clean stream end never surfaced to the pump |
 | D-02 | Documented drain state-machine invariant | P0 | authoritative lifecycle doc | COMPLETE | PASSING | QUALIFIED | — | `docs/engineering/CDC_DRAIN_LIFECYCLE.md` | `6c79479` | Step 24; conceptual→SPOOL mapping, pump micro-lifecycle, §13 capture set, bounded/unbounded rules |
@@ -57,9 +57,9 @@ nothing is estimated. States:
 ### IMPLEMENTATION COMPLETION
 
 - `COMPLETE`: **26**
-- `PARTIAL`: **7** (C-08, C-09, C-12, C-13, H-01, H-02, E-01)
-- `NOT_STARTED`: **4** (Q-04, H-03, H-04, H-05)
-- Report: **26/37 complete (7 partial, 4 not started)**
+- `PARTIAL`: **8** (C-08, C-09, C-12, C-13, Q-04, H-01, H-02, E-01)
+- `NOT_STARTED`: **3** (H-03, H-04, H-05)
+- Report: **26/37 complete (8 partial, 3 not started)**
 
 ### QUALIFICATION READINESS
 
@@ -87,8 +87,14 @@ D-01/D-02/D-03/D-04 resolved by the Steps 23-26 drain lifecycle unit.)
 
 ### EXTERNAL BLOCKERS
 
-- Disk headroom ~4.7 GiB: load/fault/pilot tiers refused by policy (D2).
-  CI_CORRECTNESS (conformance tier) remains permitted with explicit
-  estimate.
+- Disk headroom volatile (2.9-8.4 GiB observed this session): the
+  `correctness` tier needs stably ≥8.2 GiB per D2 (8 GiB floor +
+  ~230 MiB CI-envelope estimate + 1 GiB headroom). Safe reclamation
+  reached 8.44 GiB once; concurrent external machine activity consumed
+  it before the envelope could run. CI_CORRECTNESS execution stays
+  NOT_EXECUTED until headroom is stable — the D2 gate refuses, fail
+  closed. (An earlier note claiming CI_CORRECTNESS "remains permitted"
+  at conformance tier was wrong and is corrected here: D2 and
+  `disk-preflight.js` govern.)
 - No MSSQL/MySQL environments → 15 conformance tests NOT_EXECUTED.
 - No POSIX host → 3 SIGKILL + 2 POSIX tests NOT_EXECUTED.

@@ -182,3 +182,40 @@ silent stream never resolves `notified`.
 **Consequences:** `cdc-apply.js` carries an explicit `sleep-sync`
 allowlist entry: the deadline converts an unresolved drain into a
 `DRAIN_BLOCKED` failure and never into success.
+
+## D15 — CI_CORRECTNESS claims require a bound, immutable, executed envelope
+
+**Date:** 2026-10-01
+**Decision:** the `correctness` runner profile binds a `workload`
+manifest object (`profile: CI`, 100k rows, >=30s real CDC, from
+`PROFILE_DEFINITIONS.CI`) and runs it as a mandatory
+`correctness-envelope` stage (`industrial-postgres.js --profile CI`).
+Its disk gate is `correctness`-kind (8 GiB floor): at lower headroom the
+profile refuses before anything runs. The envelope script records its own
+effective configuration and rejects a diverged immutable name, so the
+workload cannot be silently downsized while keeping the CI label — the
+same guarantee `resolveProfile` gives ad-hoc runs, now wired into the
+runner contract (Q-04). The conformance-level `postgres` profile keeps
+`workload: null` and therefore can never report the class as established
+(D11 stands).
+**Why:** sections 23/24 (class definition) + D2 (disk tiers): executing a
+class without its envelope, or with a reduced envelope, is exactly the
+false claim the class-claim/workload-claim verifiers exist to prevent.
+**Consequences:** `release`/`pilot` inherit the envelope stage through the
+`correctness` spread; the adversarial suite pins the binding (test 21).
+
+## D16 — Never-executed stages are defect surface, not coverage
+
+**Date:** 2026-10-01
+**Decision:** the first-ever `correctness` profile run exposed that
+`browser-smoke.py` never parsed (stray escapes), never resolved Windows
+Chrome, and navigated SPA routes in a way no plain static server can
+serve — plus a real app defect (`ROUTES` excluded product routes, so
+in-app product links collapsed to `/`). All repaired in `79c2620` with
+standalone PASS evidence; the smoke artifact paths are gitignored.
+**Why:** "run the suite" (Step 27) is what these gates are for — a stage
+that never executes contributes nothing and rots. Stop conditions say
+investigate and repair on failure, which is what happened.
+**Consequences:** `src/app.js` navigation now admits product routes;
+production hosting needed no change (Vercel rewrite already covers SPA
+fallback).
