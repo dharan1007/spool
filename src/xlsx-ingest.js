@@ -38,7 +38,7 @@ function textFromEntry(value) {
 
 function requiredXml(entries, path) {
   const value = entries[path];
-  if (!value) throw new Error(\`XLSX archive is missing required part \${path}.\`);
+  if (!value) throw new Error(`XLSX archive is missing required part ${path}.`);
   return textFromEntry(value);
 }
 
@@ -50,7 +50,7 @@ function optionalXml(entries, path) {
 function normalizeZipPath(base, target) {
   if (!target) return '';
   if (target.startsWith('/')) return target.replace(/^\/+/, '');
-  const parts = \`\${base}/\${target}\`.split('/');
+  const parts = `${base}/${target}`.split('/');
   const normalized = [];
   for (const part of parts) {
     if (!part || part === '.') continue;
@@ -172,7 +172,7 @@ function cellValue(cellXml, sharedStrings, styles, date1904) {
   if (type === 's') return sharedStrings[Number.parseInt(rawValue || '0', 10)] ?? '';
   if (type === 'b') return rawValue === '1' ? 'TRUE' : 'FALSE';
   if (type === 'str') return rawValue;
-  if (type === 'e') return rawValue ? \`#\${rawValue}\` : '#ERROR';
+  if (type === 'e') return rawValue ? `#${rawValue}` : '#ERROR';
   if (type === 'd') {
     const date = new Date(rawValue);
     return Number.isNaN(date.valueOf()) ? rawValue : date.toISOString().replace(/\.000Z$/, 'Z');
@@ -185,7 +185,7 @@ function worksheetMatrix(sheetXml, sharedStrings, styles, date1904) {
   const matrix = [];
   let fallbackRow = 0;
   for (const rowMatch of sheetXml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/gi)) {
-    if (matrix.length >= MAX_ROWS) throw new Error(\`XLSX exceeds the Browser Studio limit of \${MAX_ROWS - 1} data rows.\`);
+    if (matrix.length >= MAX_ROWS) throw new Error(`XLSX exceeds the Browser Studio limit of ${MAX_ROWS - 1} data rows.`);
     const rowTag = rowMatch[0].match(/^<row\b[^>]*>/i)?.[0] ?? '<row>';
     const rowAttrs = readAttributes(rowTag);
     const declared = Number.parseInt(rowAttrs.r ?? '', 10);
@@ -197,7 +197,7 @@ function worksheetMatrix(sheetXml, sharedStrings, styles, date1904) {
       const opening = cellMatch[0].match(/^<c\b[^>]*\/?>/i)?.[0] ?? '<c>';
       const attrs = readAttributes(opening);
       const index = columnIndex(attrs.r) ?? fallbackColumn;
-      if (index >= MAX_COLUMNS) throw new Error(\`XLSX exceeds the Browser Studio limit of \${MAX_COLUMNS} columns.\`);
+      if (index >= MAX_COLUMNS) throw new Error(`XLSX exceeds the Browser Studio limit of ${MAX_COLUMNS} columns.`);
       fallbackColumn = index + 1;
       row[index] = cellValue(cellMatch[0], sharedStrings, styles, date1904);
     }
@@ -210,31 +210,31 @@ function worksheetMatrix(sheetXml, sharedStrings, styles, date1904) {
 function csvEscape(value) {
   const text = String(value ?? '');
   if (!/[",\r\n]/.test(text)) return text;
-  return \`"\${text.replaceAll('"', '""')}"\`;
+  return `"${text.replaceAll('"', '""')}"`;
 }
 
 function matrixToCsv(matrix) {
   const firstContentRow = matrix.findIndex(row => Array.isArray(row) && row.some(value => String(value ?? '') !== ''));
   if (firstContentRow < 0) throw new Error('XLSX worksheet is empty.');
   const warnings = [];
-  if (firstContentRow > 0) warnings.push(\`Skipped \${firstContentRow} blank row\${firstContentRow === 1 ? '' : 's'} before the header row.\`);
+  if (firstContentRow > 0) warnings.push(`Skipped ${firstContentRow} blank row${firstContentRow === 1 ? '' : 's'} before the header row.`);
 
   const trimmed = matrix.slice(firstContentRow);
   const headers = trimmed[0] ?? [];
   const width = Math.max(...trimmed.map(row => row.length), headers.length);
   if (!width) throw new Error('XLSX worksheet does not contain a header row.');
-  if (width > MAX_COLUMNS) throw new Error(\`XLSX exceeds the Browser Studio limit of \${MAX_COLUMNS} columns.\`);
+  if (width > MAX_COLUMNS) throw new Error(`XLSX exceeds the Browser Studio limit of ${MAX_COLUMNS} columns.`);
 
   const normalizedHeaders = Array.from({ length: width }, (_, index) => String(headers[index] ?? ''));
   const emptyHeaders = normalizedHeaders
     .map((header, index) => ({ header, index }))
     .filter(item => item.header.trim() === '');
   if (emptyHeaders.length) {
-    throw new Error(\`XLSX header row contains \${emptyHeaders.length} empty column name\${emptyHeaders.length === 1 ? '' : 's'} (first at column \${emptyHeaders[0].index + 1}). Give every column a name before importing.\`);
+    throw new Error(`XLSX header row contains ${emptyHeaders.length} empty column name${emptyHeaders.length === 1 ? '' : 's'} (first at column ${emptyHeaders[0].index + 1}). Give every column a name before importing.`);
   }
   const seen = new Set();
   for (const header of normalizedHeaders) {
-    if (seen.has(header)) throw new Error(\`XLSX header "\${header}" is duplicated. SPOOL requires unique source headers.\`);
+    if (seen.has(header)) throw new Error(`XLSX header "${header}" is duplicated. SPOOL requires unique source headers.`);
     seen.add(header);
   }
 
@@ -246,7 +246,7 @@ function matrixToCsv(matrix) {
     ...dataRows.map(row => Array.from({ length: width }, (_, index) => csvEscape(row[index] ?? '')).join(','))
   ];
   return {
-    csv: \`\${lines.join('\n')}\n\`,
+    csv: `${lines.join('\n')}\n`,
     rowCount: dataRows.length,
     columnCount: width,
     warnings
@@ -260,7 +260,7 @@ export function xlsxEntriesToCsv(entries) {
   const rels = parseRelationships(requiredXml(entries, 'xl/_rels/workbook.xml.rels'));
   const visibleSheet = workbook.sheets.find(sheet => !sheet.hidden) ?? workbook.sheets[0];
   const sheetPath = rels.get(visibleSheet.relationshipId);
-  if (!sheetPath) throw new Error(\`XLSX relationship \${visibleSheet.relationshipId} for worksheet "\${visibleSheet.name}" is missing.\`);
+  if (!sheetPath) throw new Error(`XLSX relationship ${visibleSheet.relationshipId} for worksheet "${visibleSheet.name}" is missing.`);
 
   const sharedStrings = parseSharedStrings(optionalXml(entries, 'xl/sharedStrings.xml'));
   const styles = parseStyles(optionalXml(entries, 'xl/styles.xml'));
@@ -285,7 +285,7 @@ export async function xlsxFileToCsv(file) {
   try {
     entries = await unzipZip(new Uint8Array(await file.arrayBuffer()));
   } catch (error) {
-    throw new Error(\`Unable to open XLSX workbook: \${error?.message || String(error)}\`);
+    throw new Error(`Unable to open XLSX workbook: ${error?.message || String(error)}`);
   }
 
   const expandedBytes = Object.values(entries).reduce((total, entry) => total + Number(entry?.byteLength ?? 0), 0);
