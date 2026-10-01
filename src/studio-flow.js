@@ -141,6 +141,7 @@ function stepStatus(state, index, current) {
   if (!state || !state.source) return index === 0 ? 'current' : 'locked';
   const progress = flowProgress(state);
   const phase = state.job.phase;
+  if (index === current && index > progress) return 'locked';
   if (index === current) return 'current';
   if (index < current && index <= progress) return 'done';
   if (index === 0) return 'done';
