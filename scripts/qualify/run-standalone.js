@@ -124,6 +124,14 @@ function diskStage(kind, estimatedPeakBytes, description) {
   };
 }
 
+// Peak-storage estimate for the CI correctness envelope, using the same
+// rows*(payload+512)*3 formula `industrial-postgres.js` enforces itself:
+// the runner's disk gate and the envelope's own preflight agree.
+function ciPeakBytes() {
+  const ci = PROFILE_DEFINITIONS.CI;
+  return Math.ceil(ci.rows * (ci.payloadBytes + 512) * 3);
+}
+
 const QUICK_STAGES = Object.freeze([
   diskStage('conformance', 256 * 1024 * 1024, 'Disk headroom admits bounded conformance work'),
   proc('dependency-validation', 'Installed dependency tree validates', ['ls', '--depth=0'], {
@@ -170,7 +178,11 @@ function buildProfiles() {
   const quick = [...QUICK_STAGES];
 
   const correctness = [
-    ...quick,
+    // The correctness tier admits bounded correctness-sized workloads
+    // (disk policy, `spool-disk-preflight-v1`): below the 8 GiB floor this
+    // stage refuses before anything runs, fail closed.
+    diskStage('correctness', ciPeakBytes(), 'Disk headroom admits the bounded CI correctness workload'),
+    ...quick.filter(stage => stage.id !== 'disk-preflight'),
     nodeTest('integration', 'Core integration tests', [
       '--test', 'tests/command-service.test.js', 'tests/e2e.test.js', 'tests/workers.test.js', 'tests/spoold.test.js'
     ]),
@@ -209,7 +221,23 @@ function buildProfiles() {
     ]),
     proc('svmp-model', 'Migration model gate passes', ['scripts/check-svmp-model.js'], {
       timeoutMs: 5 * 60 * 1000
-    })
+    }),
+    // Q-04: the CI_CORRECTNESS class requires a bound workload envelope
+    // (>=100k rows with >=30s real CDC, `PROFILE_DEFINITIONS.CI`). Running
+    // the immutable CI profile through `industrial-postgres.js` (which
+    // independently records its effective configuration and refuses a
+    // diverged immutable name) makes the class claim evidence-backed; a
+    // PASS without this stage can never claim the class (class-claim gate).
+    {
+      id: 'correctness-envelope',
+      description: 'CI workload envelope: >=100k rows with >=30s real CDC against the isolated qualification instance',
+      mandatory: true,
+      command: NODE,
+      args: ['scripts/qualify/industrial-postgres.js', '--profile', 'CI'],
+      requireEnv: [...PG_ENV_REQUIRED],
+      whenEnvAbsent: 'blocked',
+      timeoutMs: 2 * 60 * 60 * 1000
+    }
   ];
 
   const postgres = [
@@ -267,7 +295,18 @@ function buildProfiles() {
 
   return Object.freeze({
     quick: Object.freeze({ name: 'quick', stages: Object.freeze(quick), workload: null, classLabel: 'SMOKE' }),
-    correctness: Object.freeze({ name: 'correctness', stages: Object.freeze(correctness), workload: null, classLabel: 'CI_CORRECTNESS' }),
+    correctness: Object.freeze({
+      name: 'correctness',
+      stages: Object.freeze(correctness),
+      workload: Object.freeze({
+        profile: 'CI',
+        rows: PROFILE_DEFINITIONS.CI.rows,
+        cdcDurationSeconds: PROFILE_DEFINITIONS.CI.cdcDurationSeconds,
+        payloadBytes: PROFILE_DEFINITIONS.CI.payloadBytes,
+        source: 'scripts/qualify/profiles.js CI'
+      }),
+      classLabel: 'CI_CORRECTNESS'
+    }),
     postgres: Object.freeze({ name: 'postgres', stages: Object.freeze(postgres), workload: null, classLabel: 'CI_CORRECTNESS' }),
     release: Object.freeze({ name: 'release', stages: Object.freeze(release), workload: null, classLabel: 'RELEASE' }),
     pilot: Object.freeze({

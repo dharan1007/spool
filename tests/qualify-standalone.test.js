@@ -9,7 +9,8 @@ import {
   verifyQualification,
   assertNoSymlinks,
   LIVE_PG_MARKER,
-  QUALIFICATION_SCHEMA_VERSION
+  QUALIFICATION_SCHEMA_VERSION,
+  PROFILES
 } from '../scripts/qualify/run-standalone.js';
 import { writeSha256Sums } from '../scripts/qualify/checksums.js';
 
@@ -396,4 +397,23 @@ test('20. CI_CORRECTNESS class cannot be claimed without a bound workload envelo
     verifyQualification(dir, { profiles: { fixture: noWorkloadProfile } }),
     /class-claim|workload-claim/
   );
+});
+
+test('21. correctness profile binds the immutable CI workload envelope', async () => {
+  // Q-04: the CI_CORRECTNESS claim is evidence-backed only when the
+  // profile binds the >=100k-row/>=30s-CDC envelope AND runs it as a
+  // mandatory stage. Unbinding either must fail this test loudly.
+  const profile = PROFILES.correctness;
+  assert.equal(profile.classLabel, 'CI_CORRECTNESS');
+  assert.ok(profile.workload, 'correctness must bind a workload envelope');
+  assert.equal(profile.workload.profile, 'CI');
+  assert.ok(profile.workload.rows >= 100_000, `envelope must cover >=100k rows, has ${profile.workload.rows}`);
+  assert.ok(profile.workload.cdcDurationSeconds >= 30, `envelope must cover >=30s real CDC, has ${profile.workload.cdcDurationSeconds}`);
+  const envelope = profile.stages.find(stage => stage.id === 'correctness-envelope');
+  assert.ok(envelope, 'correctness must run the envelope stage');
+  assert.equal(envelope.mandatory, true);
+  assert.deepEqual(envelope.args, ['scripts/qualify/industrial-postgres.js', '--profile', 'CI']);
+  // The conformance-level postgres profile claims no envelope on its own:
+  // without a bound workload it may never report the class as established.
+  assert.equal(PROFILES.postgres.workload, null);
 });
