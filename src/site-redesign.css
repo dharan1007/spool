@@ -80,3 +80,8 @@
 @media(max-width:460px){.redesign-workflow{grid-template-columns:1fr}}
 .flow-mobile-steps>span.locked{min-width:max-content;padding:7px 9px;border:1px solid var(--rd-line);border-radius:8px;background:#edf1ef;color:#98a39d;font-size:9px;cursor:not-allowed}
 .flow-mobile-steps>span.locked b{font-weight:900;margin-right:4px}
+
+.flow-native-progress{display:block;width:100%;height:10px;margin:10px 0 20px;border:0;border-radius:999px;overflow:hidden;background:#e8eeeb;appearance:none}
+.flow-native-progress::-webkit-progress-bar{background:#e8eeeb;border-radius:999px}
+.flow-native-progress::-webkit-progress-value{background:var(--rd-accent);border-radius:999px}
+.flow-native-progress::-moz-progress-bar{background:var(--rd-accent);border-radius:999px}
