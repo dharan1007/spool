@@ -95,6 +95,14 @@ async function main() {
   // Environment capture
   const { env, digest: envDigest } = await captureEnvironment({ pgConfig: envPgConfig });
   const gitDirty = env.git.dirty;
+  // Scenarios construct production command services, which require a
+  // release identity with an exact git SHA. Bind the captured HEAD SHA
+  // through the existing SPOOL_COMMIT_SHA seam the scenarios already read
+  // (explicit overrides win), so the envelope fails only on workload
+  // behavior, never on release identity.
+  if (!process.env.SPOOL_COMMIT_SHA && /^[a-f0-9]{40}$/.test(env.git?.sha ?? '')) {
+    process.env.SPOOL_COMMIT_SHA = env.git.sha;
+  }
   const releaseGrade = !gitDirty;
   const startTime = new Date().toISOString();
   const startMonotonic = process.hrtime.bigint();
