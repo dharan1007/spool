@@ -14,7 +14,8 @@ test('Unified site exposes the current Local Runner release and full installed-C
   const version = JSON.parse(pkgText).version;
   const escapedVersion = escapeRegex(version);
   assert.match(source, new RegExp(`npm install -g github:dharan1007/spool#v${escapedVersion}`));
-  assert.match(source, new RegExp(`releases/tag/v${escapedVersion}`));
+  assert.match(source, new RegExp(`const RELEASE = 'v${escapedVersion}'`));
+  assert.match(source, /REPO \+ '\/releases\/tag\/' \+ RELEASE/);
   for (const command of ['spool inspect', 'spool plan', 'spool dry-run', 'spool approve', 'spool run', 'spool status', 'spool verify', 'spool receipt']) {
     assert.ok(source.includes(command), `Local Runner page must show ${command}`);
   }
