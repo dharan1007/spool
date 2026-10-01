@@ -170,6 +170,50 @@ that — never `PASS`.
   external machine activity consumed ~5.5 GiB in ~20 min → 2.89.
   Execution stays NOT_EXECUTED until headroom is stably ≥8.2 GiB.
 
+### R12 — CI_CORRECTNESS profile PASS with bound envelope (STEP 28 proof)
+
+- Command: `node scripts/qualify/run-standalone.js --profile correctness`
+  with `spooltest.env` loaded; SHA `9965e99`, tree clean at start and
+  end (manifest binds start==end).
+- Result: **PASS**, exit 0, self-verification OK; independently
+  re-verified (`--verify`: `result=PASS profile=correctness
+  class=CI_CORRECTNESS`).
+- Stages: **14/14 PASS** — disk-preflight (correctness-kind, 12.91 GiB
+  free), dependency-validation, static-check, core-unit, browser-source,
+  integration, unit-suite, sqlite-conformance, postgres-probe,
+  postgres-correctness, browser-smoke, release-contract, svmp-model,
+  correctness-envelope (1120s).
+- Aggregate: **621 tests / 616 pass / 0 fail / 5 skipped** (profile
+  stage set; skips within each stage's allowlist, enforced by the
+  verifier). Class: **CI_CORRECTNESS** — the first evidence-backed
+  class claim in this lineage (workload bound: CI 100k rows / 30s CDC).
+- Envelope detail (`industrial-postgres.js --profile CI`, 100k rows,
+  30s real CDC, commit `9965e99`): **10/10 scenarios PASS**, incl.
+  content-exact verification, repair, CDC soak + production lifecycle,
+  parallel workers (2×50k rows exact), large transactions, crash
+  recovery. Peak RSS 414 MiB (ceiling 768 MiB).
+- Two envelope-blocking defects were found by this run and fixed before
+  any claim (`c366902`, `9965e99`): scenarios built production command
+  services with placeholder release identity (`RELEASE_IDENTITY_REQUIRED`
+  ×5 — the harness now binds the captured HEAD SHA through the existing
+  `SPOOL_COMMIT_SHA` seam), and the worker scenario mapped CSV string
+  ids without `cast_number` (100% TYPE_MISMATCH rejections, exactly
+  accounted — the product behaved honestly; the mapping was wrong).
+- Browser-smoke needed three profile attempts: attempt A failed on the
+  since-fixed script defect; attempt B failed on two transient loopback
+  `ERR_CONNECTION_REFUSED` Document loads under heavy machine
+  contention (all functional assertions passed; the zero-tolerance
+  network ledger correctly failed closed); attempt C (this run) clean
+  PASS. Standalone smoke is 4/4 PASS. No product change for the flake;
+  the assertion stands.
+- Evidence: gitignored
+  `qualification/standalone-correctness-2026-10-01T07-00-16-737Z`
+  (manifest, sha256sums, 14 stage logs, envelope evidence linked).
+- Disk timeline close-out: user freed the VS installer package cache in
+  an elevated shell (9.43 GiB, re-downloadable payloads; VS re-fetches
+  on demand) → 12.43 GiB at run start; the run holds the correctness
+  tier throughout.
+
 ### PostgreSQL live status summary
 
 | Area | Tests | Live result |
@@ -186,6 +230,7 @@ that — never `PASS`.
 | Standalone runner postgres profile at drain-fix line (R10) | 592 / 20 skipped | PASS, self-verified |
 | Adversarial suites (R8: 20, R11 pin test 21) | 21 | PASS |
 | Correctness profile (R11): 11/14 stages executed | 11 × PASS, envelope blocked by disk gate | FAIL-closed (refusal, not product failure) |
+| Correctness profile (R12): 14/14 stages | 621 / 616 pass / 0 fail / 5 skipped | PASS, self-verified + independently verified, class CI_CORRECTNESS |
 
 ## Environment
 
@@ -214,6 +259,7 @@ that — never `PASS`.
 | During drain unit (Steps 23-26) | ~4.3-4.6 GiB | conformance tier only (headroom > 1 GiB still holds) |
 | After safe cache reclamation (Step 28 prep) | **8.44 GiB** | correctness tier admitted (8 GiB floor + ~230 MiB CI estimate + 1 GiB headroom all hold) |
 | Before correctness attempt #2 | 2.89 GiB | external machine activity consumed ~5.5 GiB; correctness refused fail-closed |
+| After user freed VS installer cache (elevated) | **12.43 GiB** | correctness tier holds for the full R12 run (12.91 GiB at R12 start) |
 
 Policy: `spool-disk-preflight-v1` (`scripts/qualify/disk-preflight.js`),
 unit-tested 8/8 (`tests/qualify-disk-preflight.test.js`) incl. exact tier

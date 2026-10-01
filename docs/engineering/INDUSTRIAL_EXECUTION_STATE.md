@@ -44,9 +44,9 @@ progress" below for the exact step cursor.
 | 25 | Fix root cause (no timeout-as-success) | DONE — bounded-drain `DRAIN_BLOCKED` watchdog (timer-race wake, data-driven progress only) + durable `FAILED_RECOVERABLE` transition with §13 capture set (`#recordDrainBlocked`) |
 | 26 | Promote scratch repros to permanent tests | DONE — 6 tests in `postgres-cdc-{drain-lifecycle,cutover-drain,restart-drain}.test.js` (+ existing replica-identity file); scratch deleted; suite 592/572/0/20 |
 | 27 | PostgreSQL correctness/red-team suite | DONE — `--profile postgres` PASS at clean `38dbcc2` (592/20-skipped, self-verified, R10); adversarial suite 21/21 (R9 + envelope-binding pin) |
-| 28 | CI_CORRECTNESS profile (only when prerequisites ready) | PARTIAL — envelope stage bound + pinned (`b2c42b7`); disk prerequisite NOT met (see below); execution BLOCKED fail-closed, class stays NOT_ESTABLISHED |
-| 29 | Record evidence | PARTIAL (R1-R11 in QUALIFICATION_EVIDENCE.md; CI_CORRECTNESS run pending disk) |
-| 30 | Push integration branch (never main) | NOT STARTED (next) |
+| 28 | CI_CORRECTNESS profile (only when prerequisites ready) | DONE — R12: 14/14 stages PASS, 621/616/0/5, class CI_CORRECTNESS independently verified (`9965e99`); envelope 10/10 scenarios; two harness defects fixed pre-claim (`c366902`, `9965e99`) |
+| 29 | Record evidence | DONE (R1-R12 in QUALIFICATION_EVIDENCE.md) |
+| 30 | Push integration branch (never main) | DONE (pending re-push of the Q-04 commits) |
 
 ## Completed changes (commits on this lineage)
 
@@ -147,23 +147,20 @@ node --test tests/qualify-standalone.test.js                # adversarial suite 
 
 ## Remaining defects (open)
 
-- CI_CORRECTNESS execution has not run (Step 28): the envelope stage and
-  workload binding are implemented and pinned (`b2c42b7`), but the
-  `correctness`-kind disk gate (8 GiB floor, D2) cannot be satisfied
-  while concurrent external activity consumes C: faster than safe
-  reclamation allows. Attempt #1 executed 11/14 stages (all PASS until
-  the since-fixed browser-smoke defect); attempt #2 was refused at
-  2.89 GiB. Rerun `--profile correctness` when >=8.2 GiB is stably
-  free. This is the last P0 blocker (`INDUSTRIAL_GAP_REGISTER.md`
-  Q-04).
 - Known bounded-drain gap (documented in `CDC_DRAIN_LIFECYCLE.md`,
-  non-blocking for Steps 23-26): the stall watchdog runs in the pump's
+  registered H-05, non-blocking): the stall watchdog runs in the pump's
   empty-queue wait branch; a target-side apply that blocks indefinitely
-  (e.g. locked target table) keeps the queue non-empty and is not
-  covered. Pre-existing class, distinct from the fixed silent-stream
-  hang; registered as follow-up, not papered over.
-- Qualification runner exists and is proven on quick + postgres profiles
-  (resolved Steps 21-22; adversarial suite 20/20).
+  keeps the queue non-empty and is not covered. Pre-existing class,
+  distinct from the fixed silent-stream hang.
+- Browser-smoke network ledger flaked twice under heavy machine
+  contention (transient loopback `ERR_CONNECTION_REFUSED`; all
+  functional assertions green both times; clean PASS on the R12 run and
+  4/4 standalone). Assertion stands — fail-closed is correct — but a
+  future hardening pass could log server-side accept timestamps to
+  distinguish contention from regression.
+- Qualification runner exists and is proven on quick + postgres +
+  correctness profiles (resolved Steps 21-22; adversarial suite 21/21;
+  correctness independently verified CI_CORRECTNESS in R12).
 
 ## Important architectural decisions
 

@@ -219,3 +219,31 @@ investigate and repair on failure, which is what happened.
 **Consequences:** `src/app.js` navigation now admits product routes;
 production hosting needed no change (Vercel rewrite already covers SPA
 fallback).
+
+## D17 — Envelope scenarios inherit the harness release identity
+
+**Date:** 2026-10-01
+**Decision:** `industrial-postgres.js` binds its captured HEAD SHA into
+`process.env.SPOOL_COMMIT_SHA` (explicit overrides win) before running
+scenarios, so scenario-built production command services carry an exact
+release identity.
+**Why:** the `RELEASE_IDENTITY_REQUIRED` gate (exact 40-hex SHA) failed
+5 scenarios at once — the harness, not the product, was at fault: the
+scenarios already read the `SPOOL_COMMIT_SHA` seam, but nothing set it.
+Failing the envelope on identity instead of workload behavior would have
+been a false signal.
+**Consequences:** one-line harness change (`c366902`); no scenario or
+product code touched.
+
+## D18 — Scenario mappings use the same casts as conformance proofs
+
+**Date:** 2026-10-01
+**Decision:** the worker-load scenario maps CSV string ids through
+`cast_number`, mirroring the conformance fixtures.
+**Why:** without the cast every row rejected with TYPE_MISMATCH while
+the run honestly reported COMPLETE-with-rejections and exact accounting
+— 0 target rows with a green run state. The product was correct; the
+scenario mapping was written against an assumed integer source.
+Reproduced at small scale, fixed in one line (`9965e99`), re-verified
+exact (2x1000 rows, 0 failures) before the official run.
+**Consequences:** envelope workers prove exact parallel writes.
