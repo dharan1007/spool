@@ -106,3 +106,28 @@ test('ZIP rejects duplicated normalized entry names', async () => {
   const file = zip([{ name: 'xl/workbook.xml', data: 'one' }, { name: 'xl/workbook.xml', data: 'two' }]);
   await assert.rejects(unzipZip(file), /duplicate|entry.*already/i);
 });
+
+test('XLSX refuses duplicated cell coordinates and row-mismatched A1 references', () => {
+  const duplicateCells = entries(workbookRows([
+    '<row r="1"><c r="A1" t="inlineStr"><is><t>ID</t></is></c><c r="A1" t="inlineStr"><is><t>Name</t></is></c></row>',
+    inlineRow('2', '101')
+  ]));
+  assert.throws(() => xlsxEntriesToCsv(duplicateCells), /duplicate cell/i);
+
+  const mismatch = entries(workbookRows([
+    inlineRow('1', 'ID'),
+    '<row r="2"><c r="B3" t="inlineStr"><is><t>unexpected</t></is></c></row>'
+  ]));
+  assert.throws(() => xlsxEntriesToCsv(mismatch), /cell reference.*row/i);
+});
+
+test('XLSX refuses Excel 1900 serial 60 rather than inventing a date', () => {
+  const input = {
+    ...entries(workbookRows([
+      inlineRow('1', 'Date'),
+      '<row r="2"><c r="A2" s="0"><v>60</v></c></row>'
+    ])),
+    'xl/styles.xml': enc.encode('<styleSheet><cellXfs><xf numFmtId="14"/></cellXfs></styleSheet>')
+  };
+  assert.throws(() => xlsxEntriesToCsv(input), /serial 60|nonexistent.*leap/i);
+});
