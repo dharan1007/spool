@@ -68,3 +68,22 @@ test('purity scanner accepts narrow error mapping with rethrow and passes the cl
     assert.ok(entry.justification.length > 20, `allowlist entry needs a real justification: ${entry.file}`);
   }
 });
+
+test('purity scanner classifies actual timers, not quoted timer signatures in its rules', async () => {
+  const root = await fixture({
+    'src/timers.js': [
+      "const literal = 'window.setTimeout(() => {}, 10)';",
+      'window.setTimeout(() => {}, 10);',
+      '// setTimeout(() => {}, 10);'
+    ].join('\n') + '\n'
+  });
+  try {
+    const report = await scanProductionPurity({ root });
+    const timers = report.violations.filter(hit => hit.pattern === 'sleep-sync');
+    assert.equal(timers.length, 1);
+    assert.equal(timers[0].line, 2);
+    assert.equal(report.ok, false, 'unknown executable timer must still fail the gate');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
