@@ -218,7 +218,7 @@ function worksheetMatrix(sheetXml, sharedStrings, styles, date1904) {
       const opening = cellMatch[0].match(/^<c\b[^>]*\/?>/i)?.[0] ?? '<c>';
       const attrs = readAttributes(opening);
       if (attrs.r !== undefined) {
-        const ref = /^([A-Za-z]+)([1-9]\\d*)$/.exec(attrs.r);
+        const ref = /^([A-Za-z]+)([1-9]\d*)$/.exec(attrs.r);
         if (!ref || !Number.isSafeInteger(Number(ref[2])) || Number(ref[2]) !== rowIndex + 1) {
           throw new Error('XLSX cell reference does not match its worksheet row.');
         }
