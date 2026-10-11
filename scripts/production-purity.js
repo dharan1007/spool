@@ -147,7 +147,8 @@ export async function scanProductionPurity({ root = process.cwd() } = {}) {
         continue;
       }
       lines.forEach((line, index) => {
-        if (pattern.regex.test(line)) violations.push({ file: relative, line: index + 1, pattern: pattern.id, statement: line.trim() });
+        const code = pattern.id === 'sleep-sync' ? removeStringLiterals(stripLineComments(line)) : line;
+        if (pattern.regex.test(code)) violations.push({ file: relative, line: index + 1, pattern: pattern.id, statement: line.trim() });
       });
     }
   }
