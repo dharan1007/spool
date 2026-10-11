@@ -21,6 +21,13 @@ const PATTERNS = Object.freeze([
 
 const ALLOWLIST = Object.freeze([
   { pattern: 'sleep-sync', file: 'src/app.js', justification: 'Browser toast/object-URL timers; UI scheduling, never evidence synchronization.' },
+  { pattern: 'sleep-sync', file: 'src/site-redesign.js', signature: 'var poll = window.setInterval(function () {', justification: 'Temporary browser bootstrap poll until the SPA API exists; bounded and not used for migration proof.' },
+  { pattern: 'sleep-sync', file: 'src/site-redesign.js', signature: 'window.setTimeout(function () { window.clearInterval(poll); }, 15000);', justification: 'Hard stop for the bootstrap UI polling timer; never synchronization of transaction evidence.' },
+  { pattern: 'sleep-sync', file: 'src/studio-flow.js', signature: 'if (should && !poll) poll = window.setInterval(schedule, 400);', justification: 'Refreshes only the running-process progress view from canonical state; not run completion evidence.' },
+  { pattern: 'sleep-sync', file: 'src/studio-flow.js', signature: 'setNotice.timer = window.setTimeout(() => { notice = null; schedule(); }, 5000);', justification: 'Expires transient browser notification text; does not change transaction state.' },
+  { pattern: 'sleep-sync', file: 'src/studio-flow.js', signature: 'window.setTimeout(() => URL.revokeObjectURL(url), 1000);', justification: 'Releases a temporary browser CSV download Object URL after the click; not receipt/commit signaling.' },
+  { pattern: 'sleep-sync', file: 'src/studio-flow.js', signature: 'const bootPoll = window.setInterval(() => {', justification: 'Temporary browser startup readiness poll, only schedules view redraws.' },
+  { pattern: 'sleep-sync', file: 'src/studio-flow.js', signature: 'window.setTimeout(() => window.clearInterval(bootPoll), 15000);', justification: 'Hard deadline to stop transient UI bootstrap polling, not a migration completion gate.' },
   { pattern: 'sleep-sync', file: 'src/worker/migration.worker.js', justification: 'Browser worker event-loop yield and pause polling; UI scheduling only.' },
   { pattern: 'sleep-sync', file: 'src/runtime/browser-worker-runtime.js', justification: 'Browser pause timer; UI scheduling only.' },
   { pattern: 'random-evidence', file: 'src/core/state-machine.js', justification: 'Client-side job label suffix; never part of any evidence chain (evidence uses sha256Canonical).' },
@@ -140,11 +147,11 @@ export async function scanProductionPurity({ root = process.cwd() } = {}) {
         continue;
       }
       lines.forEach((line, index) => {
-        if (pattern.regex.test(line)) violations.push({ file: relative, line: index + 1, pattern: pattern.id });
+        if (pattern.regex.test(line)) violations.push({ file: relative, line: index + 1, pattern: pattern.id, statement: line.trim() });
       });
     }
   }
-  const uncovered = violations.filter(hit => !ALLOWLIST.some(entry => entry.pattern === hit.pattern && hit.file === entry.file));
+  const uncovered = violations.filter(hit => !ALLOWLIST.some(entry => entry.pattern === hit.pattern && hit.file === entry.file && (entry.signature === undefined || entry.signature === hit.statement)));
   return Object.freeze({
     filesScanned: files.length,
     violations: Object.freeze(violations),
@@ -154,7 +161,7 @@ export async function scanProductionPurity({ root = process.cwd() } = {}) {
 }
 
 export function stalePurityAllowlist(violations = []) {
-  return Object.freeze(ALLOWLIST.filter(entry => !violations.some(hit => hit.pattern === entry.pattern && hit.file === entry.file)));
+  return Object.freeze(ALLOWLIST.filter(entry => !violations.some(hit => hit.pattern === entry.pattern && hit.file === entry.file && (entry.signature === undefined || entry.signature === hit.statement))));
 }
 
 export function allowlistedPurity() {
