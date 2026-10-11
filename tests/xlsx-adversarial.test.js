@@ -35,7 +35,7 @@ test('XLSX rejects duplicate and out-of-order worksheet row positions', () => {
 test('XLSX skips sparse blank leading positions without huge memory expansion', () => {
   const input = entries(workbookRows([inlineRow('5', 'ID'), inlineRow('6', '101')]));
   const result = xlsxEntriesToCsv(input);
-  assert.equal(result.csv, 'ID\\n101\\n');
+  assert.equal(result.csv, 'ID\n101\n');
   assert.match(result.warnings.join(' '), /Skipped 4 blank rows/i);
 });
 
@@ -105,6 +105,31 @@ test('ZIP rejects disagreement between central and local entry paths', async () 
 test('ZIP rejects duplicated normalized entry names', async () => {
   const file = zip([{ name: 'xl/workbook.xml', data: 'one' }, { name: 'xl/workbook.xml', data: 'two' }]);
   await assert.rejects(unzipZip(file), /duplicate|entry.*already/i);
+});
+
+test('ZIP validates actual inflated bytes and CRC for a valid entry', async () => {
+  const data = Buffer.alloc(2 * 1024 * 1024, 65);
+  const result = await unzipZip(zip([{ name: 'xl/workbook.xml', data }]));
+  assert.deepEqual(Buffer.from(result['xl/workbook.xml']), data);
+});
+
+test('ZIP rejects corrupted central CRC and local CRC/size metadata', async () => {
+  const original = zip([{ name: 'xl/workbook.xml', data: 'content' }]);
+  const central = original.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  for (const offset of [central + 16, 14, 18, 22]) {
+    const corrupt = Buffer.from(original);
+    corrupt.writeUInt32LE((corrupt.readUInt32LE(offset) ^ 1) >>> 0, offset);
+    await assert.rejects(unzipZip(corrupt), /integrity|metadata|size|mismatch/i);
+  }
+});
+
+test('ZIP rejects a central directory with a false byte count or trailing truncation', async () => {
+  const original = zip([{ name: 'xl/workbook.xml', data: 'content' }]);
+  const corrupt = Buffer.from(original);
+  const end = corrupt.length - 22;
+  corrupt.writeUInt32LE(corrupt.readUInt32LE(end + 12) - 1, end + 12);
+  await assert.rejects(unzipZip(corrupt), /central.*(bounds|size|directory)/i);
+  await assert.rejects(unzipZip(original.subarray(0, original.length - 1)), /archive|directory/i);
 });
 
 test('XLSX refuses duplicated cell coordinates and row-mismatched A1 references', () => {

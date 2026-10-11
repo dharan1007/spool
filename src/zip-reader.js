@@ -11,7 +11,7 @@ function u32(view, offset) { return view.getUint32(offset, true); }
 function findEocd(bytes, view) {
   const minimum = Math.max(0, bytes.length - 22 - 0xffff);
   for (let offset = bytes.length - 22; offset >= minimum; offset -= 1) {
-    if (u32(view, offset) === EOCD) return offset;
+    if (u32(view, offset) === EOCD && offset + 22 + u16(view, offset + 20) === bytes.length) return offset;
   }
   throw new Error('Invalid XLSX ZIP archive: end-of-central-directory record is missing.');
 }
@@ -94,7 +94,8 @@ export async function unzipZip(input) {
     throw new Error('ZIP64 XLSX workbooks are outside the Browser Studio import boundary.');
   }
   if (entriesTotal > MAX_ENTRIES) throw new Error('XLSX contains too many archive entries.');
-  if (centralOffset + centralSize > bytes.byteLength) throw new Error('Invalid XLSX ZIP central directory bounds.');
+  if (centralOffset + centralSize !== eocd) throw new Error('Invalid XLSX ZIP central directory bounds.');
+  const centralEnd = centralOffset + centralSize;
 
   const decoder = new TextDecoder('utf-8', { fatal: false });
   const entries = Object.create(null);
@@ -102,7 +103,7 @@ export async function unzipZip(input) {
   let cursor = centralOffset;
 
   for (let index = 0; index < entriesTotal; index += 1) {
-    if (cursor + 46 > bytes.byteLength || u32(view, cursor) !== CENTRAL) {
+    if (cursor + 46 > centralEnd || u32(view, cursor) !== CENTRAL) {
       throw new Error('Invalid XLSX ZIP central directory entry.');
     }
     const flags = u16(view, cursor + 8);
@@ -116,7 +117,7 @@ export async function unzipZip(input) {
     const localOffset = u32(view, cursor + 42);
     const nameStart = cursor + 46;
     const nameEnd = nameStart + nameLength;
-    if (nameEnd + extraLength + commentLength > bytes.byteLength) throw new Error('Invalid XLSX ZIP entry bounds.');
+    if (nameEnd + extraLength + commentLength > centralEnd) throw new Error('Invalid XLSX ZIP central directory entry bounds.');
     const name = safePath(decoder.decode(bytes.subarray(nameStart, nameEnd)));
     cursor = nameEnd + extraLength + commentLength;
 
@@ -126,15 +127,15 @@ export async function unzipZip(input) {
     if (uncompressedSize > MAX_EXPANDED_BYTES || expanded + uncompressedSize > MAX_EXPANDED_BYTES) {
       throw new Error('XLSX expands beyond the 256 MiB browser safety ceiling.');
     }
-    if (localOffset + 30 > bytes.byteLength || u32(view, localOffset) !== LOCAL) {
+    if (localOffset + 30 > centralOffset || u32(view, localOffset) !== LOCAL) {
       throw new Error('Invalid XLSX ZIP local file header.');
     }
     const localNameLength = u16(view, localOffset + 26);
     const localExtraLength = u16(view, localOffset + 28);
     const dataStart = localOffset + 30 + localNameLength + localExtraLength;
-    if (dataStart > bytes.byteLength) throw new Error('Invalid XLSX ZIP local header name/extra bounds.');
+    if (dataStart > centralOffset) throw new Error('Invalid XLSX ZIP local header name/extra bounds.');
     const dataEnd = dataStart + compressedSize;
-    if (dataEnd > bytes.byteLength) throw new Error('Invalid XLSX ZIP compressed-data bounds.');
+    if (dataEnd > centralOffset) throw new Error('Invalid XLSX ZIP compressed-data bounds.');
 
     // Central and local headers must refer to the same file and codec.
     const localFlags = u16(view, localOffset + 6);
@@ -142,6 +143,15 @@ export async function unzipZip(input) {
     const localName = safePath(decoder.decode(bytes.subarray(localOffset + 30, localOffset + 30 + localNameLength)));
     if (localName !== name || localFlags !== flags || localMethod !== method) {
       throw new Error('XLSX ZIP entry name, flags or compression method mismatch.');
+    }
+    // With bit 3 set, sizes/CRC are supplied by a data descriptor rather
+    // than the local header. Otherwise every local field must agree.
+    if ((flags & 0x8) === 0 && (u32(view, localOffset + 14) !== expectedCrc ||
+        u32(view, localOffset + 18) !== compressedSize || u32(view, localOffset + 22) !== uncompressedSize)) {
+      throw new Error('XLSX ZIP local/central CRC or size metadata mismatch.');
+    }
+    if (method === 0 && compressedSize !== uncompressedSize) {
+      throw new Error('XLSX ZIP stored entry size mismatch.');
     }
     if (Object.hasOwn(entries, name)) throw new Error('Duplicate XLSX ZIP archive entry name.');
 
@@ -155,6 +165,8 @@ export async function unzipZip(input) {
     expanded += output.byteLength;
     entries[name] = output;
   }
+
+  if (cursor !== centralEnd) throw new Error('Invalid XLSX ZIP central directory size.');
 
   return entries;
 }
