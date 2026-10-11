@@ -182,15 +182,30 @@ function cellValue(cellXml, sharedStrings, styles, date1904) {
 }
 
 function worksheetMatrix(sheetXml, sharedStrings, styles, date1904) {
+  // A worksheet may claim enormous sparse coordinates in a tiny XML file.
+  // Only materialize observed rows, never the numeric gaps between them.
   const matrix = [];
-  let fallbackRow = 0;
+  let nextRowIndex = 0;
+  let leadingBlankRows = 0;
+  let sawFirstContent = false;
   for (const rowMatch of sheetXml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/gi)) {
     if (matrix.length >= MAX_ROWS) throw new Error(`XLSX exceeds the Browser Studio limit of ${MAX_ROWS - 1} data rows.`);
     const rowTag = rowMatch[0].match(/^<row\b[^>]*>/i)?.[0] ?? '<row>';
     const rowAttrs = readAttributes(rowTag);
-    const declared = Number.parseInt(rowAttrs.r ?? '', 10);
-    const rowIndex = Number.isInteger(declared) && declared > 0 ? declared - 1 : fallbackRow;
-    fallbackRow = rowIndex + 1;
+    const rawIndex = rowAttrs.r;
+    if (rawIndex !== undefined && !/^[1-9]\d*$/.test(rawIndex)) {
+      throw new Error('XLSX worksheet row index must be a positive integer.');
+    }
+    const declared = rawIndex === undefined ? null : Number(rawIndex);
+    if (declared !== null && (!Number.isSafeInteger(declared) || declared > MAX_ROWS)) {
+      throw new Error('XLSX worksheet row index exceeds the row limit.');
+    }
+    const rowIndex = declared === null ? nextRowIndex : declared - 1;
+    if (rowIndex < nextRowIndex) {
+      throw new Error('XLSX worksheet rows must have strictly increasing indices; duplicates are invalid.');
+    }
+    if (!sawFirstContent) leadingBlankRows += rowIndex - nextRowIndex;
+    nextRowIndex = rowIndex + 1;
     const row = [];
     let fallbackColumn = 0;
     for (const cellMatch of rowMatch[1].matchAll(/<c\b[^>]*>[\s\S]*?<\/c>|<c\b[^>]*\/>/gi)) {
@@ -201,10 +216,13 @@ function worksheetMatrix(sheetXml, sharedStrings, styles, date1904) {
       fallbackColumn = index + 1;
       row[index] = cellValue(cellMatch[0], sharedStrings, styles, date1904);
     }
-    while (matrix.length < rowIndex) matrix.push([]);
-    matrix[rowIndex] = row;
+    if (!sawFirstContent) {
+      if (row.some(value => String(value ?? '') !== '')) sawFirstContent = true;
+      else leadingBlankRows += 1;
+    }
+    matrix.push(row);
   }
-  return matrix;
+  return { matrix, leadingBlankRows };
 }
 
 function csvEscape(value) {
@@ -213,15 +231,18 @@ function csvEscape(value) {
   return `"${text.replaceAll('"', '""')}"`;
 }
 
-function matrixToCsv(matrix) {
+function matrixToCsv(matrix, leadingBlankRows = 0) {
   const firstContentRow = matrix.findIndex(row => Array.isArray(row) && row.some(value => String(value ?? '') !== ''));
   if (firstContentRow < 0) throw new Error('XLSX worksheet is empty.');
   const warnings = [];
-  if (firstContentRow > 0) warnings.push(`Skipped ${firstContentRow} blank row${firstContentRow === 1 ? '' : 's'} before the header row.`);
+  const blanksBeforeHeader = Math.max(leadingBlankRows, firstContentRow);
+  if (blanksBeforeHeader > 0) warnings.push(`Skipped ${blanksBeforeHeader} blank row${blanksBeforeHeader === 1 ? '' : 's'} before the header row.`);
 
   const trimmed = matrix.slice(firstContentRow);
   const headers = trimmed[0] ?? [];
-  const width = Math.max(...trimmed.map(row => row.length), headers.length);
+  // Avoid a call-stack overflow from spreading up to one million row widths.
+  let width = headers.length;
+  for (const row of trimmed) width = Math.max(width, row.length);
   if (!width) throw new Error('XLSX worksheet does not contain a header row.');
   if (width > MAX_COLUMNS) throw new Error(`XLSX exceeds the Browser Studio limit of ${MAX_COLUMNS} columns.`);
 
@@ -258,14 +279,15 @@ export function xlsxEntriesToCsv(entries) {
   const workbookXml = requiredXml(entries, 'xl/workbook.xml');
   const workbook = parseWorkbook(workbookXml);
   const rels = parseRelationships(requiredXml(entries, 'xl/_rels/workbook.xml.rels'));
-  const visibleSheet = workbook.sheets.find(sheet => !sheet.hidden) ?? workbook.sheets[0];
+  const visibleSheet = workbook.sheets.find(sheet => !sheet.hidden);
+  if (!visibleSheet) throw new Error('XLSX workbook has no visible worksheet.');
   const sheetPath = rels.get(visibleSheet.relationshipId);
   if (!sheetPath) throw new Error(`XLSX relationship ${visibleSheet.relationshipId} for worksheet "${visibleSheet.name}" is missing.`);
 
   const sharedStrings = parseSharedStrings(optionalXml(entries, 'xl/sharedStrings.xml'));
   const styles = parseStyles(optionalXml(entries, 'xl/styles.xml'));
-  const matrix = worksheetMatrix(requiredXml(entries, sheetPath), sharedStrings, styles, workbook.date1904);
-  const converted = matrixToCsv(matrix);
+  const { matrix, leadingBlankRows } = worksheetMatrix(requiredXml(entries, sheetPath), sharedStrings, styles, workbook.date1904);
+  const converted = matrixToCsv(matrix, leadingBlankRows);
   return {
     ...converted,
     sheetName: visibleSheet.name,
