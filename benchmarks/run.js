@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
 import { createDemoCsv, demoMapping, demoTargetSchema } from '../src/core/demo.js';
 import { parseCsv } from '../src/core/csv.js';
 import { MigrationEngine } from '../src/core/migration.js';
@@ -82,7 +83,9 @@ const report = {
   caveat: 'These are local deterministic engine and serialized-schema measurements, not universal LLM success-rate claims.'
 };
 
-await writeFile(new URL('./latest.json', import.meta.url), `${JSON.stringify(report, null, 2)}\n`);
+const boundedEvidenceDir = process.env.SPOOL_BENCHMARK_OUTPUT_DIR?.trim();
+if (boundedEvidenceDir) await mkdir(resolve(boundedEvidenceDir), { recursive: true });
+await writeFile(boundedEvidenceDir ? join(resolve(boundedEvidenceDir), 'latest.json') : new URL('./latest.json', import.meta.url), `${JSON.stringify(report, null, 2)}\n`);
 const lines = [
   '# SPOOL Benchmarks',
   '',
@@ -138,8 +141,9 @@ const lines = [
   '> These are local deterministic engine and serialized-schema measurements. They are not claims about universal model success rate, tokenization, or browser-agent performance.',
   ''
 ];
-await writeFile(new URL('../docs/BENCHMARKS.md', import.meta.url), `${lines.join('\n')}`);
+await writeFile(boundedEvidenceDir ? join(resolve(boundedEvidenceDir), 'BENCHMARKS.md') : new URL('../docs/BENCHMARKS.md', import.meta.url), `${lines.join('\n')}`);
 const evidence = await writeBenchmarkEvidence({
+  ...(boundedEvidenceDir ? { resultsDir: join(resolve(boundedEvidenceDir), 'results') } : {}),
   suite: report.suite,
   suiteVersion: report.suiteVersion,
   metrics: report,
