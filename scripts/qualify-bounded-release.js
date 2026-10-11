@@ -160,9 +160,15 @@ export function validateBoundEvidence(value, sha, id, expectedLogSha256 = null) 
 
 export function qualify() {
   const identity = candidatePreflight();
-  const evidence = join(process.cwd(), 'release', 'bounded-qualification', identity.sha);
-  // The journal remains untracked and can be copied outside the checkout at any time.
-  // Benchmark and packed-package products are confined to this SHA-bound evidence path.
+  const checkout = resolve('.');
+  const evidenceRoot = resolve(process.env.SPOOL_QUALIFICATION_EVIDENCE_ROOT?.trim() || join(checkout, '..', 'evidence'));
+  const evidence = resolve(evidenceRoot, 'bounded-qualification', identity.sha);
+  if (evidence === checkout || evidence.startsWith(checkout + sep)) {
+    throw new Error('Qualification evidence must be stored outside the source checkout');
+  }
+  // Keep logs, benchmark products and the exact installed tarball external.
+  // Build outputs under dist are excluded from committed source, but tracked files
+  // must remain unmodified after every command.
   mkdirSync(evidence, { recursive: true });
   const root = { ...identity, evidence };
   const entries = [];
