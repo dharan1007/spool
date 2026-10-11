@@ -15,9 +15,9 @@ SPOOL orders work by **migration correctness, recoverability and evidence**, not
 - Explicit 50 MiB browser input boundary.
 - Built-artifact Chrome release smoke with deep-link and IndexedDB-reload validation.
 
-## Delivered in Gate B — production CSV → SQLite execution
+## Implemented in Gate B — CSV → SQLite (production qualification pending)
 
-The production claim is intentionally limited to filesystem UTF-8 CSV → existing ordinary SQLite table using insert mode.
+The **intended production scope** is filesystem UTF-8 CSV → existing ordinary SQLite table using insert mode. As of 11 October 2026, `sqlite.target` is EXPERIMENTAL in `capabilities/matrix.json`: the supported production claim is **blocked** pending 256 MiB sustained-load, Windows/Unix crash and permission evidence, and exact-SHA release qualification.
 
 Implemented safety contract:
 
@@ -41,14 +41,14 @@ Implemented safety contract:
 18. Snapshot cleanup only after VERIFIED terminal truth; interrupted runs retain recovery material.
 19. Shared production command service used by CLI/`spoold` transports.
 20. Loopback-only authenticated `spoold` transport with Host/Origin and request-boundary checks.
-21. Dedicated SQLite conformance/fault suite and Linux/Windows/macOS native-driver matrix.
+21. Dedicated SQLite conformance/fault suite; a complete live Linux/Windows/macOS qualification matrix has **not** been demonstrated for the current candidate.
 22. Streaming malformed-input, source-ceiling, source-change, target-lock and crash/restart fault coverage.
 23. Constrained-old-space large-source proof above the Browser Studio 50 MiB boundary.
 24. Canonical customer-style CRM migration fixture using the real command-service path.
 
 Gate B explicitly rejects virtual/triggered SQLite targets, unsupported destructive/write strategies, unlimited source size and hosted raw-row ingestion.
 
-## Delivered in Gate C — verified multi-engine migration
+## Implemented research/experimental Gate C — verified multi-engine migration (not production-authorized)
 
 - Protocol-level exact content verification (`content_exact`): per-batch target-content proofs with durable evidence, no receipt on mismatch, replay-determinism and accounting guards, connector capability enforcement.
 - Verified repair protocol: separately-authorized `RepairApproval` (a migration approval can never authorize repair), fenced per-operation execution with hash-bound preconditions and crash-resume, exact re-verification, and `RepairReceipt`; failed-verification evidence is preserved and runs advance to `REPAIR_COMPLETE`.
