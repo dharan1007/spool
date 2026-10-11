@@ -2,31 +2,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-test('primary CI workflow dispatches immutable release publication through a dedicated script', async () => {
-  const workflow = await readFile('.github/workflows/ci.yml', 'utf8');
-  assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /release:/);
-  assert.match(workflow, /type:\s*boolean/);
-  assert.match(workflow, /commit_sha:/);
-  assert.match(workflow, /type:\s*string/);
-  assert.match(workflow, /version:/);
-  assert.match(workflow, /publish-release/);
-  assert.match(workflow, /contents:\s*write/);
-  assert.match(workflow, /scripts\/publish-release\.sh/);
-});
-
-test('release publication script proves protected main and creates immutable verifiable assets', async () => {
+test('local manual release publishing runs strict qualification before any tag or GitHub release', async () => {
   const script = await readFile('scripts/publish-release.sh', 'utf8');
+  assert.match(script, /git symbolic-ref HEAD/);
   assert.match(script, /refs\/heads\/main/);
   assert.match(script, /origin\/main/);
-  assert.match(script, /npm run check/);
-  assert.match(script, /npm run pack:verify/);
-  assert.match(script, /npm pack/);
+  assert.match(script, /SPOOL_COMMIT_SHA="\$COMMIT".*node scripts\/qualify-bounded-release\.js/);
+  assert.match(script, /npm ci/);
+  assert.ok(script.indexOf('node scripts/qualify-bounded-release.js') < script.indexOf('git tag -a'));
+  assert.ok(script.indexOf('node scripts/qualify-bounded-release.js') < script.indexOf('gh release create'));
   assert.match(script, /SHA256SUMS/);
   assert.match(script, /release-record\.json/);
-  assert.match(script, /gh release create/);
-  assert.match(script, /gh release download/);
   assert.doesNotMatch(script, /--clobber/);
+  assert.doesNotMatch(script, /github-actions\[bot\]|workflow_dispatch/);
+});
+
+test('publication is bound to requested SHA and refuses tag rewriting', async () => {
+  const script = await readFile('scripts/publish-release.sh', 'utf8');
+  assert.match(script, /test "\$HEAD_SHA" = "\$COMMIT"/);
+  assert.match(script, /test "\$MAIN_SHA" = "\$COMMIT"/);
+  assert.match(script, /EXISTING_TAG_SHA/);
+  assert.match(script, /git fetch origin/);
+  assert.match(script, /gh release download/);
+  assert.match(script, /gh release view/);
+  assert.match(script, /--verify-tag/);
 });
 
 test('release manifest generator binds artifact digest to version and commit', async () => {
