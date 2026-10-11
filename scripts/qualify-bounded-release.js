@@ -17,7 +17,7 @@ const REQUIRED_REAL_SURFACES = Object.freeze([
   { id: 'production_denial', command: ['node', '--test', '--test-reporter=tap', 'tests/production-connector-policy.test.js'], source: 'tests/production-connector-policy.test.js' }
 ]);
 const CHECKS = Object.freeze([
-  { id: 'full_suite', command: ['npm', 'test', '--', '--test-reporter=tap'] },
+  { id: 'full_suite', command: ['npm', 'test'] },
   { id: 'required_sqlite_suite', command: ['node', '--test', '--test-reporter=tap', '--test-concurrency=1',
     'tests/sqlite-target.test.js', 'tests/sqlite-preflight.test.js', 'tests/conformance/sqlite-conformance.test.js',
     'tests/conformance/sqlite-faults.test.js', 'tests/crash-recovery.test.js', 'tests/fencing.test.js'] },
