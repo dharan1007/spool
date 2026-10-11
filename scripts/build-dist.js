@@ -74,6 +74,7 @@ execFileSync(process.execPath, ['--test',
   'tests/autopilot-kernel.test.js',
   'tests/ui-contract.test.js',
   'tests/studio-workflow.test.js',
+  'tests/xlsx-adversarial.test.js',
   'tests/site-redesign.test.js'
 ], { stdio: 'inherit' });
 
