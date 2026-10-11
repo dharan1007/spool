@@ -41,12 +41,38 @@ function crc32(bytes) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-async function inflateRaw(bytes) {
+async function inflateRaw(bytes, maxBytes) {
   if (typeof DecompressionStream !== 'function') {
     throw new Error('This browser does not provide the native decompression required for XLSX import.');
   }
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+  // Do not use Response(stream).arrayBuffer(): that buffers potentially
+  // attacker-controlled expansion before validating its actual size.
+  const reader = new Blob([bytes]).stream()
+    .pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      if (value.byteLength > maxBytes - total) {
+        await reader.cancel('XLSX expanded entry exceeded its declared size or safety ceiling').catch(() => {});
+        throw new Error('XLSX ZIP entry decompression exceeds its declared size or safety ceiling.');
+      }
+      total += value.byteLength;
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
 }
 
 export async function unzipZip(input) {
@@ -106,11 +132,24 @@ export async function unzipZip(input) {
     const localNameLength = u16(view, localOffset + 26);
     const localExtraLength = u16(view, localOffset + 28);
     const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    if (dataStart > bytes.byteLength) throw new Error('Invalid XLSX ZIP local header name/extra bounds.');
     const dataEnd = dataStart + compressedSize;
     if (dataEnd > bytes.byteLength) throw new Error('Invalid XLSX ZIP compressed-data bounds.');
 
+    // Central and local headers must refer to the same file and codec.
+    const localFlags = u16(view, localOffset + 6);
+    const localMethod = u16(view, localOffset + 8);
+    const localName = safePath(decoder.decode(bytes.subarray(localOffset + 30, localOffset + 30 + localNameLength)));
+    if (localName !== name || localFlags !== flags || localMethod !== method) {
+      throw new Error('XLSX ZIP entry name, flags or compression method mismatch.');
+    }
+    if (Object.hasOwn(entries, name)) throw new Error('Duplicate XLSX ZIP archive entry name.');
+
     const compressed = bytes.subarray(dataStart, dataEnd);
-    const output = method === 0 ? new Uint8Array(compressed) : await inflateRaw(compressed);
+    const remaining = MAX_EXPANDED_BYTES - expanded;
+    const output = method === 0
+      ? new Uint8Array(compressed)
+      : await inflateRaw(compressed, Math.min(uncompressedSize, remaining));
     if (output.byteLength !== uncompressedSize) throw new Error('XLSX ZIP entry size check failed.');
     if (crc32(output) !== expectedCrc) throw new Error('XLSX ZIP entry integrity check failed.');
     expanded += output.byteLength;
