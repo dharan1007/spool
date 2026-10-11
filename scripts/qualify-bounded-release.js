@@ -1,0 +1,161 @@
+#!/usr/bin/env node
+/**
+ * Actions-free candidate qualification. Deliberately not a publish/deploy tool.
+ * A successful build is NOT production authorization until the mandatory
+ * browser, SQLite and connector-denial evidence gates have run on this SHA.
+ */
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+
+const SHA = /^[a-f0-9]{40}$/;
+const REQUIRED_REAL_SURFACES = Object.freeze([
+  { id: 'browser_ui', command: ['python3', 'scripts/qualify-browser-ui.py'], source: 'scripts/qualify-browser-ui.py' },
+  { id: 'sqlite_sustained', command: ['node', 'scripts/qualify-sqlite-production.js'], source: 'scripts/qualify-sqlite-production.js' },
+  { id: 'production_denial', command: ['node', '--test', '--test-reporter=tap', 'tests/production-connector-policy.test.js'], source: 'tests/production-connector-policy.test.js' }
+]);
+const CHECKS = Object.freeze([
+  { id: 'full_suite', command: ['npm', 'test', '--', '--test-reporter=tap'] },
+  { id: 'required_sqlite_suite', command: ['node', '--test', '--test-reporter=tap', '--test-concurrency=1',
+    'tests/sqlite-target.test.js', 'tests/sqlite-preflight.test.js', 'tests/conformance/sqlite-conformance.test.js',
+    'tests/conformance/sqlite-faults.test.js', 'tests/crash-recovery.test.js', 'tests/fencing.test.js'] },
+  { id: 'build', command: ['npm', 'run', 'build'] },
+  { id: 'benchmark', command: ['npm', 'run', 'benchmark'] },
+  { id: 'static', command: ['node', 'scripts/static-check.js'] },
+  { id: 'model', command: ['node', 'scripts/check-svmp-model.js'] },
+  { id: 'package', command: ['npm', 'run', 'pack:verify'] },
+  { id: 'release_chain', command: ['node', 'scripts/release-gate.js'] }
+]);
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+function git(args) {
+  return execFileSync('git', args, { encoding: 'utf8' }).trim();
+}
+function outputName(id) {
+  return id.replace(/[^a-z0-9_-]/g, '_');
+}
+function testCounters(output) {
+  const parsed = {};
+  for (const [key, value] of output.matchAll(/^# (tests|pass|fail|skipped|cancelled|todo) (\d+)\s*$/gm)) {
+    parsed[key] = Number(value);
+  }
+  return Object.keys(parsed).length ? parsed : null;
+}
+function runCheck(check, root) {
+  const [tool, ...args] = check.command;
+  const result = spawnSync(tool, args, {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    shell: process.platform === 'win32' && tool === 'npm',
+    env: { ...process.env, SPOOL_COMMIT_SHA: root.sha, EXPECTED_SHA: root.sha }
+  });
+  const output = (result.stdout || '') + '\n' + (result.stderr || '');
+  const log = join(root.evidence, outputName(check.id) + '.log');
+  writeFileSync(log, output, 'utf8');
+  const counters = testCounters(output);
+  let reason = result.error ? result.error.message : result.status !== 0 ? 'nonzero_exit' : null;
+  if (check.id === 'full_suite' && (!counters || counters.fail !== 0 || counters.tests === 0)) reason ||= 'suite_counts_missing_or_failed';
+  if (check.id === 'required_sqlite_suite' &&
+      (!counters || counters.fail !== 0 || counters.skipped !== 0 || counters.tests === 0)) reason ||= 'required_sqlite_skip_or_failure';
+  return {
+    id: check.id,
+    command: check.command,
+    status: reason ? 'FAIL' : 'PASS',
+    reason,
+    exit: result.status,
+    testCounts: counters,
+    logSha256: sha256(Buffer.from(output, 'utf8')),
+    log
+  };
+}
+
+export function qualificationPlan() {
+  return Object.freeze({ actionsFree: true, commands: CHECKS, requiredRealSurfaces: REQUIRED_REAL_SURFACES });
+}
+
+export function candidatePreflight() {
+  const current = git(['rev-parse', 'HEAD']).toLowerCase();
+  if (!SHA.test(current)) throw new Error('release qualification requires an exact Git HEAD SHA');
+  const expected = process.env.SPOOL_COMMIT_SHA || current;
+  if (!SHA.test(expected) || expected !== current) throw new Error('SPOOL_COMMIT_SHA does not match checked-out HEAD');
+  // Ignore untracked cache/build artifacts, not edits to tracked source.
+  if (git(['status', '--porcelain', '--untracked-files=no'])) {
+    throw new Error('release qualification requires a clean tracked source checkout');
+  }
+  const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+  if (!version) throw new Error('package.json version missing');
+  return Object.freeze({ sha: current, version });
+}
+
+export function validateBoundEvidence(value, sha, id) {
+  if (!value || value.status !== 'PASS' || value.commitSha !== sha || value.surface !== id ||
+      value.actualExecution !== true || !Number.isInteger(value.assertions) || value.assertions < 1) {
+    throw new Error(id + ': mandatory executed qualification evidence is missing or not bound to this commit');
+  }
+}
+
+export function qualify() {
+  const identity = candidatePreflight();
+  const evidence = join(process.cwd(), 'release', 'bounded-qualification', identity.sha);
+  mkdirSync(evidence, { recursive: true });
+  const root = { ...identity, evidence };
+  const entries = [];
+  const reportPath = join(evidence, 'qualification.json');
+  function persist() {
+    const passing = entries.every(e => e.status === 'PASS');
+    const report = {
+      schemaVersion: 1, commitSha: root.sha, packageVersion: root.version,
+      status: passing && entries.length === CHECKS.length + REQUIRED_REAL_SURFACES.length + 1 ? 'PASS' : 'BLOCKED',
+      entries
+    };
+    writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
+    return report;
+  }
+  try {
+    const audit = runCheck({
+      id: 'security_audit', command: ['npm', 'audit', '--omit=dev', '--audit-level=high', '--json']
+    }, root);
+    entries.push(audit);
+    persist();
+    if (audit.status !== 'PASS') throw new Error('High/critical dependency audit failed; see audit log');
+
+    for (const check of CHECKS) {
+      const item = runCheck(check, root);
+      entries.push(item);
+      persist();
+      if (item.status !== 'PASS') throw new Error(check.id + ': failed, see ' + item.log);
+    }
+    for (const surface of REQUIRED_REAL_SURFACES) {
+      if (!existsSync(surface.source)) {
+        entries.push({ id: surface.id, status: 'NOT_EXECUTED', reason: 'required_runner_not_implemented' });
+        persist();
+        throw new Error(surface.id + ': required executable gate is not implemented');
+      }
+      const item = runCheck(surface, root);
+      entries.push(item);
+      persist();
+      if (item.status !== 'PASS') throw new Error(surface.id + ': real qualification failed');
+      const evidencePath = join(evidence, surface.id + '.json');
+      if (!existsSync(evidencePath)) throw new Error(surface.id + ': machine-readable evidence missing');
+      validateBoundEvidence(JSON.parse(readFileSync(evidencePath, 'utf8')), root.sha, surface.id);
+    }
+  } catch (error) {
+    persist();
+    process.stderr.write('SPOOL production candidate BLOCKED: ' + error.message + '\nEvidence: ' + reportPath + '\n');
+    return 1;
+  }
+  persist();
+  process.stdout.write('SPOOL bounded candidate PASS (not production deployed): ' + root.sha + '\nEvidence: ' + reportPath + '\n');
+  return 0;
+}
+
+const invoked = process.argv[1] ? pathToFileURL(process.argv[1]).href : null;
+if (invoked === import.meta.url) {
+  if (process.argv.includes('--plan')) process.stdout.write(JSON.stringify(qualificationPlan(), null, 2) + '\n');
+  else process.exitCode = qualify();
+}
