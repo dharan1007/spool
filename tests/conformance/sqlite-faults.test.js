@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, chmod, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdtemp, rm, writeFile, readFile, chmod, mkdir, open, realpath } from 'node:fs/promises';
+import { join, sep } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { SqliteTarget } from '../../src/connectors/sqlite/target.js';
@@ -91,17 +92,34 @@ test('Gate B fault: triggers are rejected because they introduce undeclared targ
   });
 });
 
-test('Gate B fault: unwritable SQLite targets fail closed on POSIX systems', { skip: process.platform === 'win32' }, async () => {
+test('Gate B fault: unwritable SQLite targets fail closed under native filesystem permissions', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'spool-readonly-'));
   const lockedDir = join(dir, 'locked');
   await mkdir(lockedDir);
   const path = join(lockedDir, 'target.db');
+  const marker = join(dir, '.spool-disposable-test');
+  await writeFile(marker, 'sqlite-permission-test-v1');
+  assert.ok((await realpath(dir)).startsWith((await realpath(tmpdir())) + sep));
+  assert.equal(await readFile(marker, 'utf8'), 'sqlite-permission-test-v1');
   const db = new Database(path);
   db.exec('CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT;');
   db.close();
+  let deniedSid = null;
   try {
-    await chmod(path, 0o444);
-    await chmod(lockedDir, 0o555);
+    if (process.platform === 'win32') {
+      const identity = execFileSync('whoami', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' });
+      const sid = identity.match(/S-1-\d+(?:-\d+)+/)?.[0];
+      assert.ok(sid, 'Windows permission proof requires the actual execution SID');
+      deniedSid = sid;
+      execFileSync('icacls', [path, '/deny', `*${sid}:(W)`], { encoding: 'utf8' });
+      await assert.rejects(async () => {
+        const handle = await open(path, 'r+');
+        await handle.close();
+      }, error => ['EACCES', 'EPERM'].includes(error.code), 'ACL must actually deny write access');
+    } else {
+      await chmod(path, 0o444);
+      await chmod(lockedDir, 0o555);
+    }
     assert.throws(() => {
       const target = new SqliteTarget({ path, table: 'customers', busyTimeoutMs: 30 });
       try {
@@ -112,10 +130,23 @@ test('Gate B fault: unwritable SQLite targets fail closed on POSIX systems', { s
           null
         ));
       } finally { target.close(); }
-    });
+    }, error => /READONLY|CANTOPEN|PERM|access|permission|read.only|unable to open/i.test(String(error?.code) + ' ' + String(error?.message)));
+    if (deniedSid) {
+      execFileSync('icacls', [path, '/remove:d', `*${deniedSid}`], { encoding: 'utf8' });
+      deniedSid = null;
+    }
+    const verify = new Database(path, { readonly: true });
+    try {
+      assert.equal(verify.prepare('SELECT COUNT(*) AS n FROM customers').get().n, 0);
+      const ledger = verify.prepare("SELECT name FROM sqlite_master WHERE name='__spool_batch_ledger'").get();
+      if (ledger) assert.equal(verify.prepare('SELECT COUNT(*) AS n FROM __spool_batch_ledger').get().n, 0);
+    } finally { verify.close(); }
   } finally {
-    await chmod(lockedDir, 0o755).catch(() => {});
-    await chmod(path, 0o644).catch(() => {});
+    if (deniedSid) execFileSync('icacls', [path, '/remove:d', `*${deniedSid}`], { encoding: 'utf8' });
+    else if (process.platform !== 'win32') {
+      await chmod(lockedDir, 0o755);
+      await chmod(path, 0o644);
+    }
     await rm(dir, { recursive: true, force: true });
   }
 });

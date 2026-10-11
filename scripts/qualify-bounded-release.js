@@ -7,7 +7,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const SHA = /^[a-f0-9]{40}$/;
@@ -38,12 +38,21 @@ function git(args) {
 function outputName(id) {
   return id.replace(/[^a-z0-9_-]/g, '_');
 }
-function testCounters(output) {
+export function testCounters(output) {
   const parsed = {};
-  for (const [key, value] of output.matchAll(/^# (tests|pass|fail|skipped|cancelled|todo) (\d+)\s*$/gm)) {
+  for (const [, key, value] of output.matchAll(/^# (tests|pass|fail|skipped|cancelled|todo) (\d+)\s*$/gm)) {
     parsed[key] = Number(value);
   }
   return Object.keys(parsed).length ? parsed : null;
+}
+
+export function validateSigningMaterial(privateKey, publicKeyPath) {
+  const key = createPrivateKey(privateKey);
+  if (key.asymmetricKeyType !== 'ed25519') throw new Error('Release signing requires an Ed25519 PEM private key');
+  const enrolled = createPublicKey(readFileSync(publicKeyPath, 'utf8'));
+  const derived = createPublicKey(key);
+  const options = { type: 'spki', format: 'der' };
+  if (!derived.export(options).equals(enrolled.export(options))) throw new Error('Private release key does not match enrolled public trust root');
 }
 function runCheck(check, root) {
   const [tool, ...args] = check.command;
@@ -159,11 +168,12 @@ export function qualify() {
     const privateKey = process.env.SPOOL_RELEASE_PRIVATE_KEY?.trim();
     const publicKey = process.env.SPOOL_RELEASE_PUBLIC_KEY?.trim() || 'keys/release-public.key';
     const signedEvidence = join(process.cwd(), 'release', 'parity-evidence.json');
-    if (!privateKey || !existsSync(privateKey) || !existsSync(publicKey) || !existsSync(signedEvidence)) {
+    if (!privateKey || !existsSync(publicKey) || !existsSync(signedEvidence)) {
       entries.push({ id: 'signed_provenance', status: 'NOT_EXECUTED', reason: 'release_keys_or_parity_evidence_missing' });
       persist();
       throw new Error('Ed25519 release signature, keys or parity evidence missing');
     }
+    validateSigningMaterial(privateKey, publicKey);
     entries.push({ id: 'signed_provenance', status: 'PASS', verifiedBy: 'scripts/release-gate.js' });
   } catch (error) {
     persist();
