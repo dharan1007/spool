@@ -60,6 +60,22 @@ export function validateSigningMaterial(privateKey, publicKeyPath) {
   const options = { type: 'spki', format: 'der' };
   if (!derived.export(options).equals(enrolled.export(options))) throw new Error('Private release key does not match enrolled public trust root');
 }
+export function assertInstalledPackageEvidence(payload, { sha, evidence }) {
+  if (!payload || payload.installedSameRetainedArtifact !== true ||
+      payload.retainedAfterVerification !== true ||
+      payload.releaseCommit !== sha ||
+      !/^[a-f0-9]{64}$/.test(payload.tarballSha256) ||
+      typeof payload.tarballPath !== 'string') {
+    throw new Error('Retained installed package identity is incomplete');
+  }
+  const retainedPath = resolve(payload.tarballPath);
+  const trustedRoot = resolve(evidence, 'packages');
+  if (!retainedPath.startsWith(trustedRoot + sep)) throw new Error('Tested package escaped qualification evidence directory');
+  if (!existsSync(retainedPath)) throw new Error('Retained installed package is missing');
+  if (sha256(readFileSync(retainedPath)) !== payload.tarballSha256) throw new Error('Retained installed package digest differs from attested artifact');
+  return true;
+}
+
 function runCheck(check, root) {
   const [tool, ...args] = check.command;
   const result = spawnSync(tool, args, {
@@ -93,21 +109,7 @@ function runCheck(check, root) {
     else {
       try {
         const payload = JSON.parse((result.stdout || '').slice((result.stdout || '').lastIndexOf('{')));
-        if (payload.installedSameRetainedArtifact !== true ||
-            payload.retainedAfterVerification !== true ||
-            payload.releaseCommit !== root.sha ||
-            !/^[a-f0-9]{64}$/.test(payload.tarballSha256) ||
-            typeof payload.tarballPath !== 'string') {
-          reason ||= 'package_identity_incomplete';
-        } else {
-          const retainedPath = resolve(payload.tarballPath);
-          const trustedRoot = resolve(root.evidence, 'packages');
-          if (!retainedPath.startsWith(trustedRoot + sep) ||
-              !existsSync(retainedPath) ||
-              sha256(readFileSync(retainedPath)) !== payload.tarballSha256) {
-            reason ||= 'retained_package_digest_mismatch';
-          }
-        }
+        assertInstalledPackageEvidence(payload, root);
       } catch {
         reason ||= 'package_identity_invalid';
       }
