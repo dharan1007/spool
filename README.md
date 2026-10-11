@@ -13,8 +13,9 @@ SPOOL has two deliberately separate local-first execution paths:
 
 > The Vercel endpoint is a technical/open-source Browser Studio and documentation surface, not a paid customer data plane or checkout. Paid target work is delivered locally/customer-side so no paid hosting is required before revenue.
 
-[![release-gate](https://github.com/dharan1007/spool/actions/workflows/ci.yml/badge.svg)](https://github.com/dharan1007/spool/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+> **Release qualification notice (11 October 2026):** The current development branch is **NOT RELEASE-AUTHORIZED**. The capability matrix classifies `sqlite.target` as **EXPERIMENTAL** pending sustained-load, fault-injection, and exact-source release evidence. Browser Studio has passed a limited Chrome smoke test but not the complete real-UI upload/export/recovery and maximum-file resource gates. The production Vercel deployment has not been attested to the latest source. This notice concerns the newer candidate; a published historical release is not proof that today's main branch is qualified.
 
 ## Install the Local Runner
 
@@ -39,7 +40,7 @@ npm run pack:verify
 
 The GitHub Release also carries the packed `.tgz` plus SHA-256 release evidence so it can be installed locally without publishing SPOOL to the npm registry.
 
-## What SPOOL is production-claiming
+## Implemented workflows and current qualification boundaries
 
 ### Browser Studio
 
@@ -58,7 +59,7 @@ The browser path is local-first and retains the production CSP boundary `connect
 
 ### Gate B Local Runner
 
-The production connector scope is intentionally narrow and evidence-backed. The Local Runner uses bounded-memory streaming and defaults to a **256 MiB** source ceiling; the ceiling is a deliberate product boundary, not a claim that a 256 MiB dataset is retained in JavaScript memory.
+The **implemented** Local Runner connector scope is intentionally narrow. Its design guarantees and the CLI workflow are described below, but `sqlite.target` remains **EXPERIMENTAL** under the stricter capability-matrix release rule pending the required 256 MiB sustained-load, crash and Windows permissions evidence. The Local Runner uses bounded-memory streaming and defaults to a **256 MiB** source ceiling; the ceiling is a deliberate product boundary, not a claim that a 256 MiB dataset is retained in JavaScript memory.
 
 ```text
 UTF-8 filesystem CSV
@@ -138,9 +139,9 @@ The final receipt includes migration/plan/source/target identities, target-contr
 
 ## Local Runner surfaces
 
-The production transports dispatch into the same command service rather than a second migration engine:
+The implemented transports dispatch into the same command service rather than a second migration engine:
 
-- `SpoolCommandService` — production command boundary;
+- `SpoolCommandService` — shared command boundary;
 - installed `spool` CLI staged commands;
 - `spoold` — loopback-only authenticated HTTP bridge with Host/Origin checks and bounded requests;
 - durable local run/checkpoint store;
@@ -154,7 +155,7 @@ Current safety coverage includes bounded-memory streaming CSV parsing, determini
 
 ## Release evidence
 
-The release gate runs:
+The **required** release qualification sequence (not yet fully green on one SHA) is:
 
 ```text
 npm ci
@@ -171,7 +172,7 @@ packed/global-installed CLI CRM smoke
 real built-artifact Chrome smoke
 ```
 
-SQLite conformance and installed-package verification run on GitHub-hosted Linux, Windows and macOS runners. CodeQL runs independently.
+The older GitHub Actions-based matrix is not an active release authority. Current release qualification runs locally without GitHub Actions, and must independently prove the required SQLite fault, resource, installed-package and browser UI gates. The executable candidate runner is `node scripts/qualify-bounded-release.js`; its **PASS** status is mandatory before manual release publication. A historical CI result or a skipped test is not sufficient.
 
 Every production build can emit `release.json` containing the exact source commit through `SPOOL_COMMIT_SHA`. GitHub releases additionally publish an artifact checksum manifest and release record.
 
