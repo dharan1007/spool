@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync } from 'node:crypto';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { generateKeyPairSync, createHash } from 'node:crypto';
+import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { testCounters, validateSigningMaterial } from '../scripts/qualify-bounded-release.js';
+import { testCounters, validateSigningMaterial, assertInstalledPackageEvidence } from '../scripts/qualify-bounded-release.js';
 
 test('qualification counters preserve real executed pass, failure and skip totals', async () => {
   const root = await mkdtemp(join(tmpdir(), 'spool-gate-counters-'));
@@ -33,4 +33,30 @@ test('release signing accepts actual PEM material only for its enrolled Ed25519 
     assert.throws(() => validateSigningMaterial('malformed PEM', publicPath));
     assert.throws(() => validateSigningMaterial(enrolled.privateKey, join(root, 'missing.pem')), /ENOENT/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('candidate qualification binds the installed CLI to the exact retained package bytes', async () => {
+  const evidence = await mkdtemp(join(tmpdir(), 'spool-packed-evidence-'));
+  const outside = await mkdtemp(join(tmpdir(), 'spool-outside-artifact-'));
+  try {
+    const packages = join(evidence, 'packages');
+    await mkdir(packages);
+    const path = join(packages, 'spool-test.tgz');
+    const original = Buffer.from('actual installed tarball fixture bytes');
+    await writeFile(path, original);
+    const sha = 'a'.repeat(40);
+    const digest = createHash('sha256').update(original).digest('hex');
+    const report = { tarballPath: path, tarballSha256: digest, installedSameRetainedArtifact: true, retainedAfterVerification: true, releaseCommit: sha };
+    assert.equal(assertInstalledPackageEvidence(report, { sha, evidence }), true);
+    assert.throws(() => assertInstalledPackageEvidence({ ...report, installedSameRetainedArtifact: false }, { sha, evidence }), /incomplete/);
+    assert.throws(() => assertInstalledPackageEvidence({ ...report, releaseCommit: 'b'.repeat(40) }, { sha, evidence }), /incomplete/);
+    const outsider = join(outside, 'spool-test.tgz');
+    await writeFile(outsider, original);
+    assert.throws(() => assertInstalledPackageEvidence({ ...report, tarballPath: outsider }, { sha, evidence }), /escaped/);
+    await writeFile(path, Buffer.from('tampered installed bytes'));
+    assert.throws(() => assertInstalledPackageEvidence(report, { sha, evidence }), /digest differs/);
+  } finally {
+    await rm(evidence, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
 });
