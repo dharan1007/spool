@@ -3,13 +3,14 @@ set -euo pipefail
 
 VERSION="${RELEASE_VERSION:?RELEASE_VERSION is required}"
 COMMIT="${RELEASE_COMMIT:?RELEASE_COMMIT is required}"
-REPOSITORY="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
-REF="${GITHUB_REF:?GITHUB_REF is required}"
+REPOSITORY="${RELEASE_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
+[[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'Set RELEASE_REPOSITORY=owner/repo before manual publishing' >&2; exit 2; }
+REF="$(git symbolic-ref HEAD)"
 TAG="v${VERSION}"
 
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || { echo "Invalid semantic version: $VERSION" >&2; exit 2; }
 [[ "$COMMIT" =~ ^[a-f0-9]{40}$ ]] || { echo "RELEASE_COMMIT must be an exact lowercase 40-character Git SHA" >&2; exit 2; }
-test "$REF" = "refs/heads/main" || { echo "Release publication must be dispatched from refs/heads/main" >&2; exit 2; }
+test "$REF" = "refs/heads/main" || { echo "Release publication must run on local refs/heads/main; got $REF" >&2; exit 2; }
 
 git fetch origin main --depth=1
 HEAD_SHA="$(git rev-parse HEAD)"
@@ -21,8 +22,9 @@ PACKAGE_VERSION="$(node -p "require('./package.json').version")"
 test "$PACKAGE_VERSION" = "$VERSION" || { echo "package.json version $PACKAGE_VERSION does not match requested version $VERSION" >&2; exit 2; }
 
 npm audit --omit=dev --audit-level=high
-SPOOL_COMMIT_SHA="$COMMIT" SPOOL_RELEASE_VERSION="$VERSION" npm run check
-SPOOL_COMMIT_SHA="$COMMIT" SPOOL_RELEASE_VERSION="$VERSION" npm run pack:verify
+npm ci
+SPOOL_COMMIT_SHA="$COMMIT" SPOOL_RELEASE_VERSION="$VERSION" node scripts/qualify-bounded-release.js
+# Any failure above stops before tag creation, push, or publication.
 
 rm -rf release existing-release
 mkdir release
@@ -43,8 +45,8 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   EXISTING_TAG_SHA="$(git rev-parse "refs/tags/$TAG^{}")"
   test "$EXISTING_TAG_SHA" = "$COMMIT" || { echo "Tag $TAG already points to $EXISTING_TAG_SHA; refusing to move it" >&2; exit 2; }
 else
-  git config user.name "github-actions[bot]"
-  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+  # Preserve the real local release operator's configured identity.
+  git var GIT_AUTHOR_IDENT >/dev/null
   git tag -a "$TAG" "$COMMIT" -m "SPOOL $TAG"
   git push origin "refs/tags/$TAG"
 fi
