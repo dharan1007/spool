@@ -6,11 +6,17 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { join } from 'node:path';
 import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const SHA = /^[a-f0-9]{40}$/;
+
+function assertCleanSource(sha) {
+  if (git(['rev-parse', 'HEAD']).toLowerCase() !== sha) throw new Error('Source HEAD changed during candidate qualification');
+  if (git(['status', '--porcelain', '--untracked-files=no'])) throw new Error('Tracked source changed during candidate qualification');
+}
 const REQUIRED_REAL_SURFACES = Object.freeze([
   { id: 'browser_ui', command: ['python3', 'scripts/qualify-browser-ui.py'], source: 'scripts/qualify-browser-ui.py' },
   { id: 'sqlite_sustained', command: ['node', 'scripts/qualify-sqlite-production.js'], source: 'scripts/qualify-sqlite-production.js' },
@@ -61,7 +67,13 @@ function runCheck(check, root) {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     shell: process.platform === 'win32' && tool === 'npm',
-    env: { ...process.env, SPOOL_COMMIT_SHA: root.sha, EXPECTED_SHA: root.sha }
+    env: {
+      ...process.env,
+      SPOOL_COMMIT_SHA: root.sha,
+      EXPECTED_SHA: root.sha,
+      SPOOL_BENCHMARK_OUTPUT_DIR: join(root.evidence, 'benchmarks'),
+      SPOOL_PACKAGE_EVIDENCE_DIR: join(root.evidence, 'packages')
+    }
   });
   const output = (result.stdout || '') + '\n' + (result.stderr || '');
   const log = join(root.evidence, outputName(check.id) + '.log');
@@ -71,7 +83,36 @@ function runCheck(check, root) {
   if (check.id === 'full_suite' && (!counters || counters.fail !== 0 || counters.tests === 0)) reason ||= 'suite_counts_missing_or_failed';
   if (check.id === 'required_sqlite_suite' &&
       (!counters || counters.fail !== 0 || counters.skipped !== 0 || counters.tests === 0)) reason ||= 'required_sqlite_skip_or_failure';
+  // Qualifying a drifting source tree invalidates the exact-source evidence chain.
+  try { assertCleanSource(root.sha); }
+  catch (error) { reason ||= 'source_drift: ' + error.message; }
   let attested = null;
+  if (check.id === 'package') {
+    const tag = (result.stdout || '').lastIndexOf('"installedSameRetainedArtifact"');
+    if (tag < 0) reason ||= 'package_identity_not_reported';
+    else {
+      try {
+        const payload = JSON.parse((result.stdout || '').slice((result.stdout || '').lastIndexOf('{')));
+        if (payload.installedSameRetainedArtifact !== true ||
+            payload.retainedAfterVerification !== true ||
+            payload.releaseCommit !== root.sha ||
+            !/^[a-f0-9]{64}$/.test(payload.tarballSha256) ||
+            typeof payload.tarballPath !== 'string') {
+          reason ||= 'package_identity_incomplete';
+        } else {
+          const retainedPath = resolve(payload.tarballPath);
+          const trustedRoot = resolve(root.evidence, 'packages');
+          if (!retainedPath.startsWith(trustedRoot + sep) ||
+              !existsSync(retainedPath) ||
+              sha256(readFileSync(retainedPath)) !== payload.tarballSha256) {
+            reason ||= 'retained_package_digest_mismatch';
+          }
+        }
+      } catch {
+        reason ||= 'package_identity_invalid';
+      }
+    }
+  }
   if (check.realSurface) {
     const markers = (result.stdout || '').split(/\r?\n/).filter(line => line.startsWith('SPOOL_EVIDENCE_JSON='));
     if (markers.length !== 1) reason ||= 'mandatory_evidence_marker_missing_or_duplicated';
@@ -103,9 +144,7 @@ export function candidatePreflight() {
   const expected = process.env.SPOOL_COMMIT_SHA || current;
   if (!SHA.test(expected) || expected !== current) throw new Error('SPOOL_COMMIT_SHA does not match checked-out HEAD');
   // Ignore untracked cache/build artifacts, not edits to tracked source.
-  if (git(['status', '--porcelain', '--untracked-files=no'])) {
-    throw new Error('release qualification requires a clean tracked source checkout');
-  }
+  assertCleanSource(current);
   const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
   if (!version) throw new Error('package.json version missing');
   return Object.freeze({ sha: current, version });
@@ -122,6 +161,8 @@ export function validateBoundEvidence(value, sha, id, expectedLogSha256 = null) 
 export function qualify() {
   const identity = candidatePreflight();
   const evidence = join(process.cwd(), 'release', 'bounded-qualification', identity.sha);
+  // The journal remains untracked and can be copied outside the checkout at any time.
+  // Benchmark and packed-package products are confined to this SHA-bound evidence path.
   mkdirSync(evidence, { recursive: true });
   const root = { ...identity, evidence };
   const entries = [];
