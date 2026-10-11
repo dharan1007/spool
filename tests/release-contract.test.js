@@ -1,30 +1,52 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
+import { qualificationPlan, validateBoundEvidence } from '../scripts/qualify-bounded-release.js';
 
-const artifacts = ['.github/workflows/ci.yml', 'SECURITY.md', 'docs/DEMO_SCRIPT.md', 'scripts/browser-smoke.py'];
-
-test('release includes CI, security policy, evaluator demo script, and browser smoke harness', async () => {
+test('release contracts require local qualification and security documentation without GitHub Actions', async () => {
+  const artifacts = [
+    'SECURITY.md', 'docs/DEMO_SCRIPT.md', 'scripts/browser-smoke.py',
+    'scripts/qualify-bounded-release.js', 'scripts/release-gate.js',
+    'scripts/verify-deployed-release.js', 'scripts/reproducible-build-evidence.js'
+  ];
   for (const file of artifacts) {
-    const info = await stat(new URL(`../${file}`, import.meta.url));
-    assert.ok(info.isFile() && info.size > 100, `${file} missing or too small`);
+    const info = await stat(new URL('../' + file, import.meta.url));
+    assert.ok(info.isFile() && info.size > 100, file + ': missing release component');
   }
-  const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /node-version:\s*22/);
-  assert.match(workflow, /npm run check/);
-  assert.match(workflow, /browser-smoke\.py/);
-  assert.match(workflow, /SPOOL_SERVE_DIR:\s*dist/);
+  const { commands, requiredRealSurfaces, actionsFree } = qualificationPlan();
+  assert.equal(actionsFree, true);
+  assert.ok(commands.length >= 8, 'release gate must execute broad required checks');
+  assert.deepEqual(commands.find(c => c.id === 'full_suite')?.command, ['npm', 'test']);
+  assert.ok(commands.some(c => c.id === 'required_sqlite_suite'));
+  for (const id of ['build', 'benchmark', 'static', 'model', 'package', 'release_chain']) {
+    assert.ok(commands.some(c => c.id === id), id + ' must run on the same release SHA');
+  }
+  assert.deepEqual(requiredRealSurfaces.map(c => c.id), ['browser_ui', 'sqlite_sustained', 'production_denial']);
+  assert.ok(!commands.some(c => c.command.join(' ').includes('github')), 'qualification must not invoke GitHub Actions');
 });
 
-test('production smoke cryptographically verifies deployed artifact bytes before browser smoke', async () => {
-  const workflow = await readFile(new URL('../.github/workflows/production-smoke.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /scripts\/verify-deployed-release\.js/);
-  assert.match(workflow, /EXPECTED_SHA:/);
-  assert.match(workflow, /SPOOL_URL:/);
-  assert.match(workflow, /Run production browser smoke/);
-  assert.ok(
-    workflow.indexOf('verify-deployed-release.js') < workflow.indexOf('Run production browser smoke'),
-    'artifact verification must execute before browser smoke'
-  );
-  assert.doesNotMatch(workflow, /urllib\.request|json\.load\(response\)/, 'commit-only inline verifier must be removed');
+test('mandatory proof cannot be supplied by a status flag or evidence from a different commit', () => {
+  const sha = 'a'.repeat(40);
+  const value = { surface: 'browser_ui', status: 'PASS', commitSha: sha, actualExecution: true, assertions: 10 };
+  assert.doesNotThrow(() => validateBoundEvidence(value, sha, 'browser_ui'));
+  for (const override of [
+    { status: 'NOT_EXECUTED' }, { actualExecution: false }, { assertions: 0 },
+    { commitSha: 'b'.repeat(40) }, { surface: 'sqlite_sustained' }
+  ]) {
+    assert.throws(() => validateBoundEvidence({ ...value, ...override }, sha, 'browser_ui'));
+  }
+});
+
+test('deployed release verifier checks actual artifact digests, not a commit-only success marker', async () => {
+  const verifier = await readFile(new URL('../scripts/verify-deployed-release.js', import.meta.url), 'utf8');
+  assert.match(verifier, /sha256/);
+  assert.match(verifier, /artifactRoot/);
+  assert.match(verifier, /MAX_ARTIFACTS/);
+  assert.match(verifier, /redirect: 'error'/);
+  assert.match(verifier, /UNSAFE_ARTIFACT_PATH/);
+  const gate = await readFile(new URL('../scripts/qualify-bounded-release.js', import.meta.url), 'utf8');
+  assert.match(gate, /require.*clean tracked source checkout/);
+  assert.match(gate, /required_sqlite_skip_or_failure/);
+  assert.match(gate, /NOT_EXECUTED/);
+  assert.doesNotMatch(gate, /deploy --prod|gh release create|workflow_dispatch/);
 });
