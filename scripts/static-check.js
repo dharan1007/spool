@@ -8,7 +8,7 @@ const required = [
   'src/runtime/browser-worker-runtime.js', 'src/worker/migration.worker.js',
   'README.md', 'LICENSE', 'docs/THREAT_MODEL.md', 'docs/WEBMCP.md',
   'benchmarks/run.js', 'vercel.json', 'package-lock.json', 'SECURITY.md',
-  'docs/DEMO_SCRIPT.md', '.github/workflows/ci.yml'
+  'docs/DEMO_SCRIPT.md', 'scripts/qualify-bounded-release.js', 'scripts/release-gate.js', 'scripts/verify-deployed-release.js'
 ];
 const failures = [];
 for (const file of required) {
