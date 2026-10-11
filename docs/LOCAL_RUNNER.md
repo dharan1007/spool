@@ -1,6 +1,6 @@
 # SPOOL Local Runner
 
-The Local Runner is the production target-mutation surface for SPOOL Gate B. It runs on the machine that owns the source CSV and SQLite database. Source rows, target credentials, durable snapshots, and database contents are not uploaded to the hosted Browser Studio.
+The Local Runner is SPOOL Gate B's intended customer-local target-mutation surface. **Qualification status, 11 October 2026:** `sqlite.target` remains **EXPERIMENTAL** in the authoritative capability matrix; the current candidate is **NOT RELEASE-AUTHORIZED** until strict load, crash, permission and exact-SHA gates pass. It runs on the machine that owns the source CSV and SQLite database. Source rows, target credentials, durable snapshots, and database contents are not uploaded to the hosted Browser Studio.
 
 ## Requirements
 
@@ -17,7 +17,7 @@ Browser Studio intentionally limits selected files to **50 MiB**. The Local Runn
 
 Before planning, SPOOL copies the source incrementally into a customer-local durable snapshot while computing its SHA-256 content digest. The snapshot identity binds the canonical original path, exact byte count, and content digest. On POSIX systems the snapshot file is owner-only; its generated filename is cross-platform safe and is not part of the semantic approval/receipt identity.
 
-`inspect`, `dry-run`, and execution stream rows from that snapshot. Schema inference keeps only a bounded sample; validation keeps bounded violation samples; execution keeps the current target batch and bounded evidence. This makes memory usage primarily a function of parser state, sample limits, and batch size instead of source-file size. The release gate includes a source larger than the 50 MiB Browser Studio limit executed with V8 `--max-old-space-size=48` and exact target/receipt verification.
+`inspect`, `dry-run`, and execution stream rows from that snapshot. Schema inference keeps only a bounded sample; validation keeps bounded violation samples; execution keeps the current target batch and bounded evidence. This makes memory usage primarily a function of parser state, sample limits, and batch size instead of source-file size. An earlier isolated test demonstrated a source larger than the 50 MiB Browser Studio boundary under V8 `--max-old-space-size=48` with exact target/receipt verification. That is a *V8 old-space setting*, not measured peak RSS or proof that 256 MiB sources are supported on all customer hardware.
 
 An approved run also revalidates the original source against the approved snapshot **before any target write lease is acquired**. If the approved source is changed, replaced, or missing, execution stops with `SOURCE_CHANGED` and target mutation does not begin.
 
@@ -30,6 +30,8 @@ git clone https://github.com/dharan1007/spool.git
 cd spool
 npm ci
 npm run check
+# To assess release authorization (may report BLOCKED until all required gates exist):
+node scripts/qualify-bounded-release.js
 ```
 
 For a released checkout, bind receipts to the exact commit:
