@@ -16,7 +16,7 @@ Status: **NOT RELEASE-AUTHORIZED**. Baseline main: `9acaf3de3a5d922c18a639dd3f5a
 5. **P0 Browser durability:** IndexedDB quota/failure, reload, interrupted Worker, pause/resume, revision replay, no COMPLETE after failed persistence, no mixed source/output identity, CSP and no raw-row exfiltration.
 6. **P0 SQLite correctness:** live preflight, triggered/virtual-table refusal, schema drift, INSERT only, positive source revalidation, approval signature/principal/expiry, atomic rows+ledger, conflicting evidence, SIGKILL at every persistence boundary, stale fencing, locked SQLite, WAL/disk capacity, exact row-and-ledger receipt.
 7. **P0 Performance envelope:** constrained-memory streaming of >50 MiB CSV, real SQLite sustained load through the 256 MiB ceiling, browser CSV/XLSX peak-memory/latency measurements on actual supported devices, disk headroom preflight. Revise limits if not proved.
-8. **P0 Actions-free release pipeline:** pin source SHA; `npm ci --ignore-scripts`, full Node suite (explicit PASS/FAIL/SKIP/TODO), required SQLite tests, dependency audit, static security, build, benchmarks, model check, packed installed CLI smoke, real Chrome built-artifact smoke, artifact-root parity, signature check where configured. A missing executable, database, browser or signing key cannot be treated as success for a required gate.
+8. **P0 Actions-free release pipeline:** pin source SHA; `npm ci` (native SQLite driver installation required), full Node suite (explicit PASS/FAIL/SKIP/TODO), required SQLite tests, dependency audit, static security, build, benchmarks, model check, packed installed CLI smoke, real Chrome built-artifact smoke, artifact-root parity, signature check where configured. A missing executable, database, browser or signing key cannot be treated as success for a required gate.
 9. **P0 Exact deployment attestation:** deployed `release.json` SHA equals independently qualified build SHA; verify headers/route boot/CSP/export and browser smoke against live HTTPS. No deployment or rollback promotion solely on Vercel READY.
 10. **P0 Public truth:** reconcile README, ROADMAP, docs/CAPABILITIES.md, docs/LIMITS.md, website and release notes with the machine-readable capability matrix. SQLite target is currently EXPERIMENTAL in the matrix; do not call it production without sustained-load qualification.
 11. **P1 Operational product:** plain-language errors and next actions, reliable CLI install and PowerShell commands, source retention/backup/restore and recovery guide, incident/rollback instructions, support boundaries, secure secret handling.
@@ -35,7 +35,7 @@ Status: **NOT RELEASE-AUTHORIZED**. Baseline main: `9acaf3de3a5d922c18a639dd3f5a
 git status --porcelain
 git rev-parse HEAD
 node --version && npm --version
-npm ci --ignore-scripts
+npm ci
 npm test
 npm run build
 npm run benchmark
@@ -50,3 +50,10 @@ For Browser CSV, Browser XLSX, Local SQLite, optional WebMCP, excluded remote ta
 
 ## Agent budget instructions
 One pass, no fresh architecture brainstorm, no speculative features, no CI-bypassing test deletion, no placeholders, no fake results, no direct changes to main. Use existing code/tests first. Preserve unfinished industrial branch. If blocked, stop after reviewed commits and produce exact remaining tasks and commands.
+
+## Current candidate and executable evidence protocol (11 October continuation)
+- Windows checkpoint B was `e518d1cd67991962e7263bcb1e49043cbc39c684`, still BLOCKED. It passed final static build/Chrome smoke, **not** the full production contract.
+- Draft PR #91 now contains local-release contract repairs, exact UI timer review, `scripts/qualify-bounded-release.js`, publication gating, and public maturity corrections. None of these later changes are qualified by the earlier B results.
+- Run `node scripts/qualify-bounded-release.js --plan` to inspect the executable mandatory jobs. The runner blocks on any failure or missing browser, SQLite or connector-denial runner, required SQLite skip, dirty Git tracked files, unsigned provenance, mismatched commit or absent machine-readable evidence.
+- Each mandatory surface executable must emit **exactly one** line `SPOOL_EVIDENCE_JSON={"surface":"browser_ui","status":"PASS","commitSha":"<CURRENT_FULL_SHA>","actualExecution":true,"assertions":1}` with the corresponding surface ID (`browser_ui`, `sqlite_sustained`, `production_denial`) and its real assertion count. Emit that line **only after actual execution succeeds**. The outer runner itself captures stdout/stderr, hashes it, verifies the emitted result against HEAD, and preserves the attested JSON; do not forge or hand-write these results.
+- The complete gate is **candidate-only**. It does not deploy or authorize release to an untested site. Staged/live HTTPS artifact identity, Chromium and rollback checks are separate required release-promotion gates.
