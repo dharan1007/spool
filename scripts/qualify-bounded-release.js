@@ -62,6 +62,15 @@ function runCheck(check, root) {
   if (check.id === 'full_suite' && (!counters || counters.fail !== 0 || counters.tests === 0)) reason ||= 'suite_counts_missing_or_failed';
   if (check.id === 'required_sqlite_suite' &&
       (!counters || counters.fail !== 0 || counters.skipped !== 0 || counters.tests === 0)) reason ||= 'required_sqlite_skip_or_failure';
+  let attested = null;
+  if (check.realSurface) {
+    const markers = (result.stdout || '').split(/\r?\n/).filter(line => line.startsWith('SPOOL_EVIDENCE_JSON='));
+    if (markers.length !== 1) reason ||= 'mandatory_evidence_marker_missing_or_duplicated';
+    else {
+      try { attested = JSON.parse(markers[0].slice('SPOOL_EVIDENCE_JSON='.length)); }
+      catch { reason ||= 'malformed_mandatory_evidence'; }
+    }
+  }
   return {
     id: check.id,
     command: check.command,
@@ -69,6 +78,7 @@ function runCheck(check, root) {
     reason,
     exit: result.status,
     testCounts: counters,
+    attested,
     logSha256: sha256(Buffer.from(output, 'utf8')),
     log
   };
@@ -137,13 +147,14 @@ export function qualify() {
         persist();
         throw new Error(surface.id + ': required executable gate is not implemented');
       }
-      const item = runCheck(surface, root);
+      const item = runCheck({ ...surface, realSurface: true }, root);
       entries.push(item);
       persist();
       if (item.status !== 'PASS') throw new Error(surface.id + ': real qualification failed');
       const evidencePath = join(evidence, surface.id + '.json');
-      if (!existsSync(evidencePath)) throw new Error(surface.id + ': machine-readable evidence missing');
-      validateBoundEvidence(JSON.parse(readFileSync(evidencePath, 'utf8')), root.sha, surface.id, item.logSha256);
+      const boundEvidence = { ...item.attested, logSha256: item.logSha256 };
+      validateBoundEvidence(boundEvidence, root.sha, surface.id, item.logSha256);
+      writeFileSync(evidencePath, JSON.stringify(boundEvidence, null, 2) + '\n', 'utf8');
     }
     const privateKey = process.env.SPOOL_RELEASE_PRIVATE_KEY?.trim();
     const publicKey = process.env.SPOOL_RELEASE_PUBLIC_KEY?.trim() || 'keys/release-public.key';
