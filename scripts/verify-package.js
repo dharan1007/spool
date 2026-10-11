@@ -1,7 +1,8 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile, copyFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 
@@ -31,18 +32,25 @@ function parseJson(text, label) {
 async function main() {
   const root = await mkdtemp(join(tmpdir(), 'spool-package-verify-'));
   try {
-    const packDir = join(root, 'pack');
+    const evidenceDestination = process.env.SPOOL_PACKAGE_EVIDENCE_DIR?.trim();
+    const checkout = resolve('.');
+    const packDir = evidenceDestination ? resolve(evidenceDestination) : join(root, 'pack');
+    if (evidenceDestination && (packDir === checkout || packDir.startsWith(checkout + sep))) {
+      throw new Error('SPOOL_PACKAGE_EVIDENCE_DIR must be outside the tracked checkout');
+    }
     const prefix = join(root, 'prefix');
     const sourceRoot = join(root, 'source');
     const targetRoot = join(root, 'target');
-    await Promise.all([mkdir(packDir), mkdir(prefix), mkdir(sourceRoot), mkdir(targetRoot)]);
+    await Promise.all([mkdir(packDir, { recursive: true }), mkdir(prefix), mkdir(sourceRoot), mkdir(targetRoot)]);
 
     const packed = run(npm, ['pack', '--json', '--pack-destination', packDir], { cwd: resolve('.') });
     const packInfo = parseJson(packed.stdout, 'npm pack');
     if (!Array.isArray(packInfo) || packInfo.length !== 1 || !packInfo[0]?.filename) throw new Error('npm pack returned an unexpected result');
     const tarball = join(packDir, packInfo[0].filename);
     if (!existsSync(tarball)) throw new Error(`Packed artifact missing: ${tarball}`);
+    const tarballSha256 = createHash('sha256').update(await readFile(tarball)).digest('hex');
 
+    // The exact retained tarball (not a later repack) is what gets installed.
     run(npm, ['install', '--global', '--prefix', prefix, tarball]);
     const spool = process.platform === 'win32' ? join(prefix, 'spool.cmd') : join(prefix, 'bin', 'spool');
     if (!existsSync(spool)) throw new Error(`Installed spool binary missing: ${spool}`);
@@ -96,7 +104,9 @@ async function main() {
     verifyDb.close();
     if (rowCount !== 3 || ledgerCount !== 3) throw new Error(`Installed target evidence changed: rows=${rowCount} ledger=${ledgerCount}`);
 
-    process.stdout.write(`${JSON.stringify({ status: 'PASS', tarball: packInfo[0].filename, installedBinary: spool, sourceRows: 5, writtenRows: 3, rejectedRows: 2, ledgerEntries: 3, releaseCommit: RELEASE_SHA }, null, 2)}\n`);
+    const retainedSha256 = createHash('sha256').update(await readFile(tarball)).digest('hex');
+    if (retainedSha256 !== tarballSha256) throw new Error('Tested package tarball changed after installation');
+    process.stdout.write(`${JSON.stringify({ status: 'PASS', tarball: packInfo[0].filename, tarballPath: tarball, tarballSha256, retainedAfterVerification: Boolean(evidenceDestination), installedSameRetainedArtifact: Boolean(evidenceDestination), installedBinary: spool, sourceRows: 5, writtenRows: 3, rejectedRows: 2, ledgerEntries: 3, releaseCommit: RELEASE_SHA }, null, 2)}\n`);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
