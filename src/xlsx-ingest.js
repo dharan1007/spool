@@ -149,6 +149,11 @@ function columnIndex(reference) {
 function excelSerialToIso(raw, date1904, includeTime) {
   const serial = Number(raw);
   if (!Number.isFinite(serial)) return String(raw ?? '');
+  // Excel's 1900 date system contains a fictitious 1900-02-29 (serial 60).
+  // Mapping it to an actual date would silently corrupt the source meaning.
+  if (!date1904 && Math.floor(serial) === 60) {
+    throw new Error('XLSX date serial 60 represents Excel\'s nonexistent 1900 leap day.');
+  }
   const epoch = Date.UTC(date1904 ? 1904 : 1899, date1904 ? 0 : 11, date1904 ? 1 : 31);
   const adjusted = !date1904 && serial >= 60 ? serial - 1 : serial;
   const millis = epoch + adjusted * 86_400_000;
@@ -207,12 +212,21 @@ function worksheetMatrix(sheetXml, sharedStrings, styles, date1904) {
     if (!sawFirstContent) leadingBlankRows += rowIndex - nextRowIndex;
     nextRowIndex = rowIndex + 1;
     const row = [];
+    const occupiedColumns = new Set();
     let fallbackColumn = 0;
     for (const cellMatch of rowMatch[1].matchAll(/<c\b[^>]*>[\s\S]*?<\/c>|<c\b[^>]*\/>/gi)) {
       const opening = cellMatch[0].match(/^<c\b[^>]*\/?>/i)?.[0] ?? '<c>';
       const attrs = readAttributes(opening);
+      if (attrs.r !== undefined) {
+        const ref = /^([A-Za-z]+)([1-9]\\d*)$/.exec(attrs.r);
+        if (!ref || !Number.isSafeInteger(Number(ref[2])) || Number(ref[2]) !== rowIndex + 1) {
+          throw new Error('XLSX cell reference does not match its worksheet row.');
+        }
+      }
       const index = columnIndex(attrs.r) ?? fallbackColumn;
       if (index >= MAX_COLUMNS) throw new Error(`XLSX exceeds the Browser Studio limit of ${MAX_COLUMNS} columns.`);
+      if (occupiedColumns.has(index)) throw new Error('XLSX worksheet contains duplicate cell coordinates.');
+      occupiedColumns.add(index);
       fallbackColumn = index + 1;
       row[index] = cellValue(cellMatch[0], sharedStrings, styles, date1904);
     }
