@@ -156,7 +156,7 @@ def main():
         target = base_url + '/studio/original'
     else:
         serve_dir = resolve_serve_dir()
-        server = subprocess.Popen(['python3', '-m', 'http.server', str(HTTP_PORT), '--directory', serve_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        server = subprocess.Popen([sys.executable, os.path.join(ROOT, 'scripts', 'spa-server.py'), '--port', str(HTTP_PORT), '--directory', serve_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         base_url = f'http://127.0.0.1:{HTTP_PORT}'
         target = base_url + '/'
 
@@ -179,7 +179,7 @@ def main():
 
         product_checks = [
             ('/', 'Prepare a dataset', 'Write to SQLite'),
-            ('/how-it-works', 'Seven pages', 'Test without changes'),
+            ('/how-it-works', 'The interface follows the actual data lifecycle.', 'Test without changes'),
             ('/local-runner', f'npm install -g github:dharan1007/spool#{RELEASE_TAG}', 'spool receipt'),
             ('/examples', '5 source records', '3 valid'),
             ('/security', "connect-src 'none'", 'STALE_FENCE'),
@@ -192,6 +192,8 @@ def main():
             text = cdp.eval('document.body.innerText')
             assert needle_a in text, f'{route} missing {needle_a!r}'
             assert needle_b in text, f'{route} missing {needle_b!r}'
+            if route == '/how-it-works':
+                assert cdp.eval('document.querySelectorAll(".redesign-stage-list > article").length') == 7, 'workflow must document all seven stages'
             assert 'Run Autopilot' not in text, f'{route} still exposes legacy Autopilot as a primary user action'
             assert 'Migration Preflight' not in text, f'{route} still exposes paid Hobby-hosted migration copy'
             assert 'Local-first migration demo' not in cdp.eval('document.title')
@@ -215,7 +217,7 @@ def main():
 
         # Blocked transformation case: normalized source-name collision must never
         # become a dead-end or silently execute.
-        collision_csv = 'Customer ID,customer-id\\na,b\\nc,d'
+        collision_csv = 'Customer ID,customer-id\na,b\nc,d'
         cdp.eval('window.__spoolTest.loadCsv(' + json.dumps(collision_csv) + ', "collision.csv")')
         wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "SOURCE_READY"'), label='collision fixture load')
         cdp.call('Page.navigate', {'url': base_url + '/studio/inspect'})
@@ -230,8 +232,9 @@ def main():
         assert cdp.eval('document.body.innerText.includes("Review problem columns")')
         assert cdp.eval('window.__spoolTest.state().job.phase') == 'SOURCE_READY'
         assert cdp.eval('window.__spoolTest.state().output.length') == 0
-        cdp.eval('window.__spoolTest.invoke("start_new_migration", {})')
-        wait_for(lambda: cdp.eval('window.__spoolTest.state().job.phase === "EMPTY"'), label='collision fixture cleanup')
+        reset = cdp.eval('window.__spoolTest.invoke("start_new_migration", {})')
+        assert reset['ok'] is False, 'terminal-only reset must be refused during source authoring'
+        assert cdp.eval('window.__spoolTest.state().job.phase') == 'SOURCE_READY'
 
         # Successful 25k explicit seven-stage run. This deliberately avoids the
         # kernel run_autopilot shortcut and clicks the visible user actions.
@@ -315,7 +318,7 @@ def main():
             'valid': state['job']['validRows'],
             'invalid': state['job']['invalidRows'],
             'phase': state['job']['phase'],
-            'mission': state['mission']['status'],
+            'mission': state['mission']['status'] if state['mission'] is not None else None,
             'tools': tools,
             'recovery': 'PASS',
             'explicitStudioWorkflow': 'PASS',
