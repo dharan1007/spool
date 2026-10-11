@@ -92,9 +92,10 @@ export function candidatePreflight() {
   return Object.freeze({ sha: current, version });
 }
 
-export function validateBoundEvidence(value, sha, id) {
+export function validateBoundEvidence(value, sha, id, expectedLogSha256 = null) {
   if (!value || value.status !== 'PASS' || value.commitSha !== sha || value.surface !== id ||
-      value.actualExecution !== true || !Number.isInteger(value.assertions) || value.assertions < 1) {
+      value.actualExecution !== true || !Number.isInteger(value.assertions) || value.assertions < 1 ||
+      (expectedLogSha256 !== null && value.logSha256 !== expectedLogSha256)) {
     throw new Error(id + ': mandatory executed qualification evidence is missing or not bound to this commit');
   }
 }
@@ -110,7 +111,7 @@ export function qualify() {
     const passing = entries.every(e => e.status === 'PASS');
     const report = {
       schemaVersion: 1, commitSha: root.sha, packageVersion: root.version,
-      status: passing && entries.length === CHECKS.length + REQUIRED_REAL_SURFACES.length + 1 ? 'PASS' : 'BLOCKED',
+      status: passing && entries.length === CHECKS.length + REQUIRED_REAL_SURFACES.length + 2 ? 'PASS' : 'BLOCKED',
       entries
     };
     writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
@@ -142,8 +143,17 @@ export function qualify() {
       if (item.status !== 'PASS') throw new Error(surface.id + ': real qualification failed');
       const evidencePath = join(evidence, surface.id + '.json');
       if (!existsSync(evidencePath)) throw new Error(surface.id + ': machine-readable evidence missing');
-      validateBoundEvidence(JSON.parse(readFileSync(evidencePath, 'utf8')), root.sha, surface.id);
+      validateBoundEvidence(JSON.parse(readFileSync(evidencePath, 'utf8')), root.sha, surface.id, item.logSha256);
     }
+    const privateKey = process.env.SPOOL_RELEASE_PRIVATE_KEY?.trim();
+    const publicKey = process.env.SPOOL_RELEASE_PUBLIC_KEY?.trim() || 'keys/release-public.key';
+    const signedEvidence = join(process.cwd(), 'release', 'parity-evidence.json');
+    if (!privateKey || !existsSync(privateKey) || !existsSync(publicKey) || !existsSync(signedEvidence)) {
+      entries.push({ id: 'signed_provenance', status: 'NOT_EXECUTED', reason: 'release_keys_or_parity_evidence_missing' });
+      persist();
+      throw new Error('Ed25519 release signature, keys or parity evidence missing');
+    }
+    entries.push({ id: 'signed_provenance', status: 'PASS', verifiedBy: 'scripts/release-gate.js' });
   } catch (error) {
     persist();
     process.stderr.write('SPOOL production candidate BLOCKED: ' + error.message + '\nEvidence: ' + reportPath + '\n');
