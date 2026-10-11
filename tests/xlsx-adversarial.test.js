@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deflateRawSync } from 'node:zlib';
+import { crc32, deflateRawSync } from 'node:zlib';
 import { xlsxEntriesToCsv } from '../src/xlsx-ingest.js';
 import { unzipZip } from '../src/zip-reader.js';
 
@@ -56,7 +56,7 @@ function zip(items) {
     lh.writeUInt32LE(0x04034b50, 0);
     lh.writeUInt16LE(20, 4);
     lh.writeUInt16LE(8, 8);
-    lh.writeUInt32LE(0, 14); // CRC mismatches are tested separately.
+    lh.writeUInt32LE(crc32(data), 14);
     lh.writeUInt32LE(compressed.length, 18);
     lh.writeUInt32LE(declared, 22);
     lh.writeUInt16LE(name.length, 26);
@@ -67,7 +67,7 @@ function zip(items) {
     ch.writeUInt16LE(20, 4);
     ch.writeUInt16LE(20, 6);
     ch.writeUInt16LE(8, 10);
-    ch.writeUInt32LE(0, 16);
+    ch.writeUInt32LE(crc32(data), 16);
     ch.writeUInt32LE(compressed.length, 20);
     ch.writeUInt32LE(declared, 24);
     ch.writeUInt16LE(name.length, 28);
