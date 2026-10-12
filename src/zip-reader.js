@@ -1,4 +1,4 @@
-
+import { yieldBrowserTurn } from './runtime/cooperative-yield.js';
 const EOCD = 0x06054b50;
 const CENTRAL = 0x02014b50;
 const LOCAL = 0x04034b50;
@@ -35,9 +35,13 @@ function crcTable() {
 }
 const CRC_TABLE = crcTable();
 
-function crc32(bytes) {
+async function crc32(bytes) {
   let crc = 0xffffffff;
-  for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  for (let start = 0; start < bytes.length; start += 1024 * 1024) {
+    const end = Math.min(bytes.length, start + 1024 * 1024);
+    for (let index = start; index < end; index++) crc = CRC_TABLE[(crc ^ bytes[index]) & 0xff] ^ (crc >>> 8);
+    if (end < bytes.length) await yieldBrowserTurn();
+  }
   return (crc ^ 0xffffffff) >>> 0;
 }
 
@@ -161,7 +165,7 @@ export async function unzipZip(input) {
       ? new Uint8Array(compressed)
       : await inflateRaw(compressed, Math.min(uncompressedSize, remaining));
     if (output.byteLength !== uncompressedSize) throw new Error('XLSX ZIP entry size check failed.');
-    if (crc32(output) !== expectedCrc) throw new Error('XLSX ZIP entry integrity check failed.');
+    if (await crc32(output) !== expectedCrc) throw new Error('XLSX ZIP entry integrity check failed.');
     expanded += output.byteLength;
     entries[name] = output;
   }

@@ -18,9 +18,11 @@ import threading
 import time
 import traceback
 import zipfile
+import struct
 from pathlib import Path
 
 import psutil
+import openpyxl
 
 # The existing CDP implementation is named browser-smoke.py (hyphenated).
 # Python cannot import that filename using an ordinary 'from browser_smoke'.
@@ -196,7 +198,8 @@ def upload(cdp, file_path, expected_rows=None, should_reject=False, timeout=180)
             "file input failed to create SOURCE_READY workspace")
 
 
-def workflow(cdp, expected_csv, download_dir):
+def workflow(cdp, expected_csv, download_dir, expected_json=None):
+    expected_json = expected_json or [{'id': 1, 'name': 'Ada'}, {'id': 2, 'name': 'Lin'}]
     click(cdp, '[data-flow-route="/studio/understand"]', "/studio/understand")
     click(cdp, '[data-flow-route="/studio/transform"]', "/studio/transform")
     click(cdp, '[data-flow-outcome="clean_standardize"]')
@@ -244,9 +247,7 @@ def workflow(cdp, expected_csv, download_dir):
             require(raw == expected_csv, "downloaded CSV bytes do not match independent expected bytes")
         else:
             rows = json.loads(raw)
-            require(isinstance(rows, list) and len(rows) == 2 and
-                    [str(row.get("id")) for row in rows] == ["1", "2"] and
-                    [row.get("name") for row in rows] == ["Ada", "Lin"],
+            require(rows == expected_json,
                     "actual downloaded JSON records are incorrect")
     reload_ui(cdp)
     ui_wait(cdp, 'Boolean(window.__spoolTest) && window.__spoolTest.state().job.phase === "COMPLETE"',
@@ -258,11 +259,22 @@ def workflow(cdp, expected_csv, download_dir):
     ui_wait(cdp, 'window.__spoolTest.state().job.phase === "EMPTY"', "fresh source after completion")
 
 
+MAIN_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+PACKAGE_REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
+
+
+def package_metadata(z, sheets):
+    overrides = ''.join('<Override PartName="/xl/worksheets/sheet' + str(number) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' for number in sheets)
+    z.writestr('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' + overrides + '</Types>')
+    z.writestr('_rels/.rels', '<Relationships xmlns="' + PACKAGE_REL_NS + '"><Relationship Id="rId1" Type="' + REL_NS + '/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+
+
 def simple_xlsx(path, hidden=False):
-    workbook = ('<workbook><sheets>'
+    workbook = ('<workbook xmlns="' + MAIN_NS + '" xmlns:r="' + REL_NS + '"><sheets>'
         + ('<sheet name="Hidden" state="hidden" r:id="rId2"/>' if hidden else '')
         + '<sheet name="People" r:id="rId1"/></sheets></workbook>')
-    sheet = ('<worksheet><sheetData>'
+    sheet = ('<worksheet xmlns="' + MAIN_NS + '"><sheetData>'
         '<row r="1"><c r="A1" t="inlineStr"><is><t>id</t></is></c>'
         '<c r="B1" t="inlineStr"><is><t>name</t></is></c></row>'
         '<row r="2"><c r="A2" t="inlineStr"><is><t>1</t></is></c>'
@@ -271,15 +283,16 @@ def simple_xlsx(path, hidden=False):
         '<c r="B3" t="inlineStr"><is><t>Lin</t></is></c></row>'
         '</sheetData></worksheet>')
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=False) as z:
+        package_metadata(z, [1, 2] if hidden else [1])
         z.writestr("xl/workbook.xml", workbook)
-        z.writestr("xl/_rels/workbook.xml.rels", '<Relationships>'
-            '<Relationship Id="rId1" Target="worksheets/sheet1.xml"/>'
-            '<Relationship Id="rId2" Target="worksheets/sheet2.xml"/>'
+        z.writestr("xl/_rels/workbook.xml.rels", '<Relationships xmlns="' + PACKAGE_REL_NS + '">'
+            '<Relationship Id="rId1" Type="' + REL_NS + '/worksheet" Target="worksheets/sheet1.xml"/>'
+            + ('<Relationship Id="rId2" Type="' + REL_NS + '/worksheet" Target="worksheets/sheet2.xml"/>' if hidden else '') +
             '</Relationships>')
         z.writestr("xl/worksheets/sheet1.xml", sheet)
         if hidden:
             z.writestr("xl/worksheets/sheet2.xml",
-                       '<worksheet><sheetData><row r="1"><c t="inlineStr"><is><t>secret</t></is></c></row></sheetData></worksheet>')
+                       '<worksheet xmlns="' + MAIN_NS + '"><sheetData><row r="1"><c t="inlineStr"><is><t>secret</t></is></c></row></sheetData></worksheet>')
 
 
 def adversarial_ui_fixtures(temp, template):
@@ -306,6 +319,29 @@ def adversarial_ui_fixtures(temp, template):
         path = temp / (name + '.xlsx')
         with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED, allowZip64=False) as z:
             for part, raw in parts.items(): z.writestr(part, raw)
+        fixtures.append((name, path))
+    for name in ['wrong_crc', 'duplicate_zip_entry', 'actual_size_overrun']:
+        path = temp / (name + '.xlsx')
+        with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED, allowZip64=False) as z:
+            for part, raw in original.items(): z.writestr(part, raw)
+            if name == 'duplicate_zip_entry': z.writestr('xl/workbook.xml', original['xl/workbook.xml'])
+            if name == 'actual_size_overrun': z.writestr('large.xml', b'A' * (2 * MiB))
+        if name != 'duplicate_zip_entry':
+            with zipfile.ZipFile(path) as z:
+                item = z.getinfo('large.xml' if name == 'actual_size_overrun' else 'xl/workbook.xml')
+            raw = bytearray(path.read_bytes())
+            central = raw.find(b'PK\x01\x02')
+            while raw[central + 46:central + 46 + struct.unpack_from('<H', raw, central + 28)[0]] != item.filename.encode('utf-8'):
+                length, extra, comment = struct.unpack_from('<HHH', raw, central + 28)
+                central += 46 + length + extra + comment
+            if name == 'wrong_crc':
+                wrong = item.CRC ^ 1
+                struct.pack_into('<I', raw, item.header_offset + 14, wrong)
+                struct.pack_into('<I', raw, central + 16, wrong)
+            else:
+                struct.pack_into('<I', raw, item.header_offset + 22, 8)
+                struct.pack_into('<I', raw, central + 24, 8)
+            path.write_bytes(raw)
         fixtures.append((name, path))
     for name, raw in {
         'duplicate_csv_header': b'id,id\n1,2\n', 'empty_csv_header': b'id,\n1,Ada\n',
@@ -380,6 +416,10 @@ def main():
         small_csv.write_bytes(b"id,name\n1,Ada\n2,Lin\n")
         xlsx = temp / "people.xlsx"
         simple_xlsx(xlsx, hidden=True)
+        independent = openpyxl.load_workbook(xlsx, read_only=True, data_only=True)
+        require(next(sheet.title for sheet in independent if sheet.sheet_state == 'visible') == 'People', 'Independent reader disagrees with first visible worksheet')
+        require(list(independent['People'].values) == [('id', 'name'), ('1', 'Ada'), ('2', 'Lin')], 'Independent reader disagrees with positive XLSX corpus')
+        independent.close()
         malformed = temp / "corrupt.xlsx"
         malformed.write_bytes(b"not a ZIP workbook")
         oversized = temp / "oversized.csv"
@@ -435,8 +475,28 @@ def main():
                 "first visible XLSX sheet was not accepted")
         workflow(cdp, b"id,name\r\n1,Ada\r\n2,Lin", temp / "downloads")
 
+        cached = temp / 'cached-formula.xlsx'
+        with zipfile.ZipFile(xlsx) as z:
+            parts = {name: z.read(name) for name in z.namelist()}
+        parts['xl/worksheets/sheet1.xml'] = parts['xl/worksheets/sheet1.xml'].replace(
+            b'<c r="B2" t="inlineStr"><is><t>Ada</t></is></c>',
+            b'<c r="B2" t="str"><f>CONCAT("WRONG","WRONG")</f><v>Ada</v></c>')
+        with zipfile.ZipFile(cached, 'w', compression=zipfile.ZIP_DEFLATED, allowZip64=False) as z:
+            for name, raw in parts.items(): z.writestr(name, raw)
+        independent = openpyxl.load_workbook(cached, read_only=True, data_only=True)
+        require(list(independent['People'].values)[1][1] == 'Ada', 'Independent reader disagrees with saved cached formula result')
+        independent.close()
+        upload(cdp, cached, expected_rows=2)
+        require('cached values only' in cdp.eval('document.body.innerText'), 'Cached-only formula limitation is not visible after import')
+        workflow(cdp, b'id,name\r\n1,Ada\r\n2,Lin', temp / 'downloads')
+
         upload(cdp, small_csv, expected_rows=2)
         workflow(cdp, b"id,name\r\n1,Ada\r\n2,Lin", temp / "downloads")
+        injection = temp / 'formula-text.csv'
+        injection.write_bytes(b'id,name\n1,=1+1\n2,@name\n')
+        upload(cdp, injection, expected_rows=2)
+        workflow(cdp, b"id,name\r\n1,'=1+1\r\n2,'@name", temp / 'downloads',
+                 [{'id': 1, 'name': '=1+1'}, {'id': 2, 'name': '@name'}])
 
         upload(cdp, malformed, should_reject=True)
         require(cdp.eval('window.__spoolTest.viewState().job.phase') == "EMPTY",
@@ -448,7 +508,15 @@ def main():
             upload(cdp, path, should_reject=True, timeout=35)
             require(cdp.eval('window.__spoolTest.viewState().source?.fingerprint || null') == before,
                     case + ': rejected source changed durable identity')
-            measurements['adversarialUiCases'].append({'case': case, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+            message = cdp.eval('document.querySelector(".flow-notice.danger")?.innerText || ""')
+            expected = {'sparse_row': 'row index', 'duplicate_cell': 'duplicate cell', 'mismatched_cell': 'cell reference',
+                'invalid_boolean': 'boolean', 'invalid_iso_date': 'date', 'missing_shared_string': 'shared-string',
+                'formula_without_cache': 'cached', 'error_cell': 'error cell', 'serial_60': 'serial 60',
+                'wrong_crc': 'integrity', 'duplicate_zip_entry': 'duplicate', 'actual_size_overrun': 'decompression exceeds',
+                'duplicate_csv_header': 'unique', 'empty_csv_header': 'empty', 'unsafe_csv_header': '__proto__',
+                'wrong_csv_width': 'columns', 'unterminated_csv': 'quoted', 'invalid_utf8_csv': 'utf-8'}[case]
+            require(expected in message.lower(), case + ': refusal did not identify the expected malformed input: ' + message)
+            measurements['adversarialUiCases'].append({'case': case, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'observedError': message})
         oversized_csv = temp / "max.csv"
         size_start = time.monotonic()
         rows = csv_near_limit(oversized_csv)
@@ -474,6 +542,11 @@ def main():
         # absent that measurement, this test MUST NOT authorize release.
         large_xlsx = temp / "max.xlsx"
         generated_xlsx = build_large_xlsx(large_xlsx)
+        independent = openpyxl.load_workbook(large_xlsx, read_only=True, data_only=True)
+        require(next(sheet.title for sheet in independent if sheet.sheet_state == 'visible') == 'Data', 'Independent large-workbook sheet selection differs')
+        require(sum(1 for _ in independent['Data'].values) - 1 == generated_xlsx['visibleRows'], 'Independent reader found a different large-workbook row count')
+        independent.close()
+        measurements['independentXlsxReader'] = 'openpyxl ' + openpyxl.__version__
         open_ui(cdp, base)
         import_started = time.monotonic()
         upload(cdp, large_xlsx, expected_rows=generated_xlsx['visibleRows'], timeout=300)
@@ -589,12 +662,13 @@ def build_large_xlsx(path):
     for _ in range(4):
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6,
                              allowZip64=False) as z:
-            z.writestr("xl/workbook.xml", '<workbook><sheets><sheet name="Archive" state="hidden" r:id="rId2"/><sheet name="Data" r:id="rId1"/></sheets></workbook>')
+            package_metadata(z, [1, 2])
+            z.writestr("xl/workbook.xml", '<workbook xmlns="' + MAIN_NS + '" xmlns:r="' + REL_NS + '"><sheets><sheet name="Archive" state="hidden" r:id="rId2"/><sheet name="Data" r:id="rId1"/></sheets></workbook>')
             z.writestr("xl/_rels/workbook.xml.rels",
-                       '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>')
+                       '<Relationships xmlns="' + PACKAGE_REL_NS + '"><Relationship Id="rId1" Type="' + REL_NS + '/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="' + REL_NS + '/worksheet" Target="worksheets/sheet2.xml"/></Relationships>')
             for sheet_number in [1, 2]:
               with z.open('xl/worksheets/sheet' + str(sheet_number) + '.xml', 'w') as stream:
-                stream.write(b'<worksheet><sheetData>')
+                stream.write(('<worksheet xmlns="' + MAIN_NS + '"><sheetData>').encode('ascii'))
                 stream.write(b'<row r="1"><c r="A1" t="inlineStr"><is><t>id</t></is></c>'
                              b'<c r="B1" t="inlineStr"><is><t>payload</t></is></c></row>')
                 for i in range(2, rows + 2):

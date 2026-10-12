@@ -239,7 +239,7 @@ function inspectPage(state) {
   const schemaRows = source.schema.map(field => ['<code>' + esc(field.name) + '</code>', '<span class="flow-type">' + esc(field.type) + '</span>',
     field.nullable ? '<span class="flow-badge warn">Nullable</span>' : '<span class="flow-badge good">Observed non-null</span>']);
   return intro(1, 'RAW INSPECTION', 'Inspect what is actually inside the dataset.',
-    'This page is observational. It shows source shape, raw inferred types and real sample records before an output contract is proposed.') +
+    'This page is observational. It shows source shape, raw inferred types and real sample records before an output contract is proposed. XLSX formulas use saved cached values only, which may be stale; SPOOL does not recalculate them.') +
     metrics([
       ['Rows', num(sourceRows(source)), 'Parsed source records'],
       ['Columns', num(source.headers.length), 'Unique source fields'],

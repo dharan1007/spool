@@ -1,4 +1,5 @@
 import { fail } from './errors.js';
+import { yieldBrowserTurn } from '../runtime/cooperative-yield.js';
 
 export const DEFAULT_BROWSER_CSV_LIMIT_BYTES = 50 * 1024 * 1024;
 const UNSAFE_HEADERS = new Set(['__proto__', 'prototype', 'constructor']);
@@ -99,8 +100,7 @@ export async function parseCsvAsync(text, options = {}) {
   const steps = parseCsvSteps(text, options);
   let step = steps.next();
   while (!step.done) {
-    if (globalThis.scheduler?.yield) await globalThis.scheduler.yield();
-    else await new Promise(resolve => globalThis.setTimeout(resolve, 0));
+    await yieldBrowserTurn();
     step = steps.next();
   }
   return step.value;

@@ -113,6 +113,16 @@ test('ZIP validates actual inflated bytes and CRC for a valid entry', async () =
   assert.deepEqual(Buffer.from(result['xl/workbook.xml']), data);
 });
 
+test('ZIP rejects a wrong checksum even when local and central CRC metadata agree', async () => {
+  const data = Buffer.alloc(3 * 1024 * 1024, 65);
+  const corrupt = zip([{ name: 'xl/workbook.xml', data }]);
+  const central = corrupt.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  const wrong = (crc32(data) ^ 1) >>> 0;
+  corrupt.writeUInt32LE(wrong, 14);
+  corrupt.writeUInt32LE(wrong, central + 16);
+  await assert.rejects(unzipZip(corrupt), /integrity/i);
+});
+
 test('ZIP rejects corrupted central CRC and local CRC/size metadata', async () => {
   const original = zip([{ name: 'xl/workbook.xml', data: 'content' }]);
   const central = original.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));

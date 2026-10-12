@@ -21,7 +21,7 @@ const PATTERNS = Object.freeze([
 
 const ALLOWLIST = Object.freeze([
   { pattern: 'sleep-sync', file: 'src/app.js', justification: 'Browser toast/object-URL timers; UI scheduling, never evidence synchronization.' },
-  { pattern: 'sleep-sync', file: 'src/core/csv.js', signature: 'else await new Promise(resolve => globalThis.setTimeout(resolve, 0));', justification: 'Cooperatively yields large browser source parsing to the event loop; shared deterministic scanner validates every byte and no result publishes before full parsing/durable commit.' },
+  { pattern: 'sleep-sync', file: 'src/runtime/cooperative-yield.js', signature: 'else await new Promise(resolve => globalThis.setTimeout(resolve, 0));', justification: 'Cooperatively yields bounded CSV scanning and exact ZIP checksums to browser events; data, CRC and durable completion are verified independently of elapsed waiting.' },
   { pattern: 'sleep-sync', file: 'src/site-redesign.js', signature: 'var poll = window.setInterval(function () {', justification: 'Temporary browser bootstrap poll until the SPA API exists; bounded and not used for migration proof.' },
   { pattern: 'sleep-sync', file: 'src/site-redesign.js', signature: 'window.setTimeout(function () { window.clearInterval(poll); }, 15000);', justification: 'Hard stop for the bootstrap UI polling timer; never synchronization of transaction evidence.' },
   { pattern: 'sleep-sync', file: 'src/studio-flow.js', signature: 'if (should && !poll) poll = window.setInterval(schedule, 400);', justification: 'Refreshes only the running-process progress view from canonical state; not run completion evidence.' },
