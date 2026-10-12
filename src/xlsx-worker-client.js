@@ -35,7 +35,8 @@ export function xlsxFileToCsvInWorker(file, {
       worker.onmessage = null;
       worker.onerror = null;
       worker.onmessageerror = null;
-      worker.terminate();
+      // A failing browser Worker teardown must not strand the caller's promise.
+      try { worker.terminate(); } catch {}
       if (error) reject(error);
       else resolve(result);
     };
