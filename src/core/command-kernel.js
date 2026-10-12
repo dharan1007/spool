@@ -201,13 +201,22 @@ export class CommandKernel {
     await this.runtime.abort();
     this.runEpoch += 1;
     await this.whenRuntimeIdle();
+    const previous = this.workspace;
     const job = transition(createJob(), PHASES.SOURCE_READY, { sourceFingerprint: fingerprint, totalRows: rows.length });
     this.workspace = {
       ...freshWorkspace(),
       job,
       source: { fileName, fingerprint, headers, rows, schema: inferSchema(rows), bytes: new TextEncoder().encode(text).byteLength }
     };
-    await this.persist();
+    try { await this.persist(); }
+    catch (error) {
+      this.workspace = previous;
+      if ([PHASES.RUNNING, PHASES.REPLAYING].includes(previous.job.phase)) {
+        previous.job = { ...previous.job, phase: PHASES.PAUSED_RECOVERED };
+      }
+      this.emit();
+      throw error;
+    }
     return this.envelope({ fileName, rows: rows.length, fields: headers.length, fingerprint });
   }
 

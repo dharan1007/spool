@@ -120,9 +120,10 @@ export class IndexedDbWorkspaceStore {
   }
 
   async save(workspace) {
+    let tx = null;
     try {
       const db = await this.db();
-      const tx = db.transaction(['meta', 'sourceChunks', 'outputChunks'], 'readwrite');
+      tx = db.transaction(['meta', 'sourceChunks', 'outputChunks'], 'readwrite');
       const metaStore = tx.objectStore('meta');
       const sourceStore = tx.objectStore('sourceChunks');
       const outputStore = tx.objectStore('outputChunks');
@@ -141,10 +142,10 @@ export class IndexedDbWorkspaceStore {
       const outputRewound = workspace.output.length < this.cache.outputLength;
       if (outputIdentityChanged || outputRewound) {
         outputStore.clear();
-        this.cache.outputLength = 0;
       }
-      if (workspace.output.length > this.cache.outputLength) {
-        const start = this.cache.outputLength;
+      const storedLength = outputIdentityChanged || outputRewound ? 0 : this.cache.outputLength;
+      if (workspace.output.length > storedLength) {
+        const start = storedLength;
         const added = workspace.output.slice(start);
         for (let offset = 0; offset < added.length; offset += CHUNK_SIZE) {
           const rows = added.slice(offset, offset + CHUNK_SIZE);
@@ -164,6 +165,12 @@ export class IndexedDbWorkspaceStore {
 
       this.cache = { fingerprint, outputJobId: workspace.job.jobId, outputRevision: workspace.outputRevision, outputLength: workspace.output.length };
     } catch (error) {
+      if (tx) {
+        try { tx.abort(); }
+        catch (abortError) {
+          if (abortError?.name !== 'InvalidStateError') fail('STORAGE_WRITE_FAILED', 'Failed workspace transaction could not be aborted');
+        }
+      }
       if (error instanceof SpoolError || error instanceof WorkspaceLockedError) throw error;
       markWorkspaceStorageFailure(workspace);
       fail('STORAGE_WRITE_FAILED', 'Browser workspace could not be persisted durably', { causeName: error?.name ?? 'Error' });

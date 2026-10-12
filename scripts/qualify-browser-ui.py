@@ -6,6 +6,7 @@ Requires Chrome/Chromium, websocket-client and psutil. See browser-smoke.py for
 the existing shared CDP protocol and browser discovery.
 """
 import hashlib
+import base64
 import importlib.util
 import json
 import os
@@ -69,6 +70,11 @@ class ProcessSampler:
         self.stop_event = threading.Event()
         self.peak_rss = 0
         self.samples = 0
+        self.heap_peak = 0
+        self.heap_samples = 0
+        self.heap_cdp = None
+        self.records = []
+        self.measurement_errors = []
         self.thread = threading.Thread(target=self.sample, daemon=True)
 
     def sample(self):
@@ -83,8 +89,17 @@ class ProcessSampler:
                         continue
                 self.peak_rss = max(self.peak_rss, rss)
                 self.samples += 1
+                if self.heap_cdp:
+                    fields = {x['name']: x['value'] for x in self.heap_cdp.call('Performance.getMetrics').get('metrics', [])}
+                    heap = fields.get('JSHeapUsedSize', 0)
+                    if heap > 0:
+                        self.heap_peak = max(self.heap_peak, int(heap))
+                        self.heap_samples += 1
+                        self.records.append({'monotonicSeconds': time.monotonic(), 'treeRssBytes': rss, 'mainPageHeapBytes': int(heap)})
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
+            except Exception as measurement_error:
+                self.measurement_errors.append(repr(measurement_error))
             self.stop_event.wait(.12)
 
     def start(self):
@@ -94,6 +109,11 @@ class ProcessSampler:
         self.stop_event.set()
         self.thread.join(timeout=10)
         require(self.samples > 0, "Chrome process memory sampler did not execute")
+
+    def attach_heap(self, ws_url):
+        connection = CDP(ws_url)
+        connection.call('Performance.enable')
+        self.heap_cdp = connection
 
 
 def ui_wait(cdp, expr, label, timeout=35):
@@ -272,6 +292,10 @@ def main():
     server = chrome = profile = log_handle = cdp = sampler = None
     browser_log = None
     measurements = {}
+    evidence = Path(os.environ.get('SPOOL_QUALIFICATION_EVIDENCE_ROOT', str(ROOT.parent / 'evidence'))) / 'browser-attempts' / sha / str(time.time_ns())
+    require(ROOT not in evidence.resolve().parents, 'Browser evidence must remain outside the checkout')
+    evidence.mkdir(parents=True)
+    passed = False
     try:
         (temp / "downloads").mkdir()
         small_csv = temp / "people.csv"
@@ -295,6 +319,7 @@ def main():
         pages = get_json("http://127.0.0.1:" + str(CDP_PORT) + "/json")
         page = next(p for p in pages if p.get("type") == "page")
         cdp = CDP(page["webSocketDebuggerUrl"])
+        sampler.attach_heap(page["webSocketDebuggerUrl"])
         for domain in ["Runtime", "Page", "Network", "Performance", "Log"]:
             cdp.call(domain + ".enable")
         base = "http://127.0.0.1:8876"
@@ -393,10 +418,14 @@ def main():
         sampler.stop()
         measurements["chromePeakTreeRssBytes"] = sampler.peak_rss
         measurements["chromeRssSamples"] = sampler.samples
+        measurements['observedPeakMainPageHeapBytes'] = sampler.heap_peak
+        measurements['mainPageHeapSamples'] = sampler.heap_samples
+        require(sampler.heap_samples > 0, 'Continuous Chrome heap sampler did not execute')
+        require(not sampler.measurement_errors, 'Chrome resource measurement failed: ' + repr(sampler.measurement_errors[:2]))
         require(measurements["chromePeakTreeRssBytes"] <
                 int(os.environ.get("SPOOL_BROWSER_MAX_TREE_RSS_MIB", "4096")) * MiB,
                 "Chrome process-tree RSS exceeded the measured release budget")
-        require(max(measurements["heapAfterCsvBytes"], measurements["heapAfterZipBombBytes"],
+        require(max(sampler.heap_peak, measurements["heapAfterCsvBytes"], measurements["heapAfterZipBombBytes"],
                     measurements["heapAfterXlsxBytes"]) <
                 int(os.environ.get("SPOOL_BROWSER_MAX_HEAP_MIB", "2500")) * MiB,
                 "Chrome JS heap exceeded the measured release budget")
@@ -405,6 +434,7 @@ def main():
                 "maximum-source Studio import exceeded bounded elapsed-time budget")
         exceptions = [e for e in cdp.events if e.get("method") == "Runtime.exceptionThrown"]
         require(not exceptions, "real Chrome logged runtime exceptions: " + repr(exceptions[:2]))
+        passed = True
         print(json.dumps({"qualification": "browser_ui", "measurements": measurements,
                           "assertions": assertions}), flush=True)
         print("SPOOL_EVIDENCE_JSON=" + json.dumps({
@@ -415,16 +445,29 @@ def main():
     finally:
         if sampler and sampler.thread.is_alive():
             sampler.stop()
+        if sampler:
+            measurements.update({'chromePeakTreeRssBytes': sampler.peak_rss, 'chromeRssSamples': sampler.samples,
+                                 'observedPeakMainPageHeapBytes': sampler.heap_peak, 'mainPageHeapSamples': sampler.heap_samples})
+            (evidence / 'resource-samples.json').write_text(json.dumps(sampler.records), encoding='utf8')
+            if sampler.heap_cdp:
+                sampler.heap_cdp.close()
+        if cdp:
+            (evidence / 'cdp-events.json').write_text(json.dumps(cdp.events), encoding='utf8')
+            try:
+                shot = cdp.call('Page.captureScreenshot', {'format': 'png'})
+                (evidence / 'last-page.png').write_bytes(base64.b64decode(shot['data']))
+            except Exception as capture_error:
+                (evidence / 'screenshot-error.txt').write_text(repr(capture_error), encoding='utf8')
+        (evidence / 'attempt.json').write_text(json.dumps({'commitSha': sha, 'status': 'PASS' if passed else 'BLOCKED',
+                                                       'assertionsAttempted': assertions, 'measurements': measurements}, indent=2), encoding='utf8')
+        print('BROWSER_ATTEMPT_EVIDENCE=' + str(evidence), flush=True)
         if cdp:
             cdp.close()
         stop_process(chrome)
         if log_handle:
             log_handle.close()
         if browser_log:
-            try:
-                os.unlink(browser_log)
-            except OSError:
-                pass
+            shutil.copyfile(browser_log, evidence / 'chrome.log')
         stop_process(server)
         if profile:
             shutil.rmtree(profile, ignore_errors=True)

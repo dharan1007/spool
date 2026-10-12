@@ -549,18 +549,20 @@ function toast(message, tone = 'neutral') {
 }
 
 async function loadText(text, fileName) {
-  if (isBusy) return;
+  if (isBusy) return kernel.errorEnvelope(new Error('A source load is already in progress'));
   if ([PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(latestState?.job?.phase)
     && !window.confirm('Replace the source? This will stop the active migration and discard its current output.')) return;
   isBusy = true;
   render();
   try {
     await new Promise(resolve => window.requestAnimationFrame(() => setTimeout(resolve, 0)));
-    await kernel.loadSourceText(text, fileName);
+    const loaded = await kernel.loadSourceText(text, fileName);
     selectedOutcome = 'database_ready';
     toast(`${fileName} is profiled locally.`, 'success');
+    return loaded;
   } catch (error) {
     toast(error?.message || String(error), 'danger');
+    return kernel.errorEnvelope(error);
   } finally {
     isBusy = false;
     render();

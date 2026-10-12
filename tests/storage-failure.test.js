@@ -5,6 +5,30 @@ import { CommandKernel } from '../src/core/command-kernel.js';
 import { createJob, transition, PHASES } from '../src/core/state-machine.js';
 import { fail } from '../src/core/errors.js';
 
+test('failed source persistence restores the previous durable workspace and never announces the rejected source', async () => {
+  let refuse = false;
+  let durable = null;
+  const emitted = [];
+  const store = { load: async () => durable, save: async workspace => {
+    if (refuse) fail('STORAGE_WRITE_FAILED', 'quota write failed');
+    durable = structuredClone(workspace);
+  } };
+  const kernel = new CommandKernel({ store, runtime: { abort: async () => {} }, onStateChange: state => emitted.push(state) });
+  await kernel.initialize();
+  refuse = true;
+  await assert.rejects(kernel.loadSourceText('id,name\n1,Rejected\n', 'rejected.csv'), { code: 'STORAGE_WRITE_FAILED' });
+  assert.equal(kernel.snapshot().job.phase, PHASES.EMPTY);
+  assert.equal(kernel.snapshot().source, null);
+  refuse = false;
+  await kernel.loadSourceText('id,name\n1,Ada\n', 'approved.csv');
+  const prior = kernel.snapshot();
+  refuse = true;
+  await assert.rejects(kernel.loadSourceText('id,name\n2,Rejected\n', 'replacement.csv'), { code: 'STORAGE_WRITE_FAILED' });
+  assert.deepEqual(kernel.snapshot(), prior);
+  assert.equal(durable.source.fileName, 'approved.csv');
+  assert.equal(emitted.some(state => state.source?.fileName === 'replacement.csv' || state.source?.fileName === 'rejected.csv'), false);
+});
+
 test('browser storage preflight fails before execution when quota headroom is insufficient', async () => {
   const store = new IndexedDbWorkspaceStore({
     storageManager: { estimate: async () => ({ usage: 90, quota: 100 }) },
