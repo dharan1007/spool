@@ -96,8 +96,8 @@ class ProcessSampler:
                 self.peak_rss = max(self.peak_rss, rss)
                 self.samples += 1
                 if self.heap_cdp:
-                    before_url = self.heap_cdp.eval('location.href')
                     started = time.monotonic()
+                    before_url = self.heap_cdp.eval('location.href')
                     fields = {x['name']: x['value'] for x in self.heap_cdp.call('Performance.getMetrics').get('metrics', [])}
                     observation = self.heap_cdp.eval('({url:location.href,frames:window.__qualifierFrames || null})')
                     frames = observation['frames']
@@ -167,6 +167,10 @@ def reload_ui(cdp):
 
 
 def click(cdp, selector, route=None):
+    # A restored durable phase can become observable before the route finishes
+    # rendering. Wait for the real control; never substitute a kernel call.
+    ui_wait(cdp, "Boolean(document.querySelector(" + json.dumps(selector) + "))",
+            "rendered UI control " + selector)
     require(bool(cdp.eval("Boolean(document.querySelector(" + json.dumps(selector) + "))")),
             "missing real UI control: " + selector)
     cdp.eval("document.querySelector(" + json.dumps(selector) + ").click()")
