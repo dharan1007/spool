@@ -43,6 +43,17 @@ test('same owner may renew without changing its fencing token', async () => {
   });
 });
 
+test('release preserves fence history so stale tokens cannot reappear on reacquisition', async () => {
+  await withStore(async store => {
+    const first = store.acquire({ resource: 'sqlite:release-history', owner: 'runner-a', ttlMs: 100, nowMs: 1000 });
+    assert.equal(store.release(first), true);
+    const next = store.acquire({ resource: first.resource, owner: 'runner-b', ttlMs: 100, nowMs: 1001 });
+    assert.ok(next.fencingToken > first.fencingToken);
+    assert.throws(() => store.assertFence({ resource: first.resource, fencingToken: first.fencingToken, nowMs: 1002 }), /STALE_FENCE/);
+    assert.equal(store.release(first), false, 'old owner cannot release the new lease');
+  });
+});
+
 test('SQLite production mutation checks the durable fence inside its write transaction', async () => {
   await withStore(async (store, path) => {
     const db = new Database(path);

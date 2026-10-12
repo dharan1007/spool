@@ -98,7 +98,9 @@ export class LeaseStore {
     requireText('resource', resource);
     requireText('owner', owner);
     if (!Number.isSafeInteger(fencingToken) || fencingToken < 1) fail('INVALID_LEASE_INPUT', 'fencingToken must be a positive safe integer');
-    const result = this.db.prepare('DELETE FROM spool_execution_leases WHERE resource = ? AND owner = ? AND fencing_token = ?')
+    // Keep the monotonically increasing counter after release. Deleting this
+    // row would permit an old token to become valid again (ABA) on acquisition.
+    const result = this.db.prepare('UPDATE spool_execution_leases SET expires_at_ms = 0 WHERE resource = ? AND owner = ? AND fencing_token = ? AND expires_at_ms != 0')
       .run(resource, owner, fencingToken);
     return Number(result.changes) === 1;
   }
@@ -107,7 +109,7 @@ export class LeaseStore {
     this.#open();
     requireText('resource', resource);
     const row = this.db.prepare('SELECT resource, owner, expires_at_ms, fencing_token FROM spool_execution_leases WHERE resource = ?').get(resource);
-    return row ? frozen(row) : null;
+    return row && Number(row.expires_at_ms) !== 0 ? frozen(row) : null;
   }
 
   close() {
