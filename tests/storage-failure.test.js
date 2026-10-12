@@ -21,6 +21,23 @@ test('a newer source selection supersedes cooperative parsing before any old sou
   assert.equal(durable.source.rows[0].name, 'Latest');
 });
 
+test('Studio reads bounded real samples while counts and full-source nullability stay exact', async () => {
+  const store = { load: async () => null, preflight: async () => ({ supported: true }), save: async () => {} };
+  const kernel = new CommandKernel({ store, runtime: { start: async () => {}, abort: async () => {} } });
+  await kernel.initialize();
+  await kernel.loadSourceText('id,name\n' + Array.from({ length: 1500 }, (_, i) => `${i + 1},${i === 1499 ? '' : 'Person'}\n`).join(''));
+  const view = kernel.studioSnapshot();
+  assert.equal(view.source.rowCount, 1500);
+  assert.equal(view.source.rows.length, 1000);
+  assert.equal(kernel.snapshot().source.rows.length, 1500, 'canonical source must retain all records');
+  const planned = kernel.previewSourcePlan('database_ready');
+  assert.equal(planned.fingerprint, view.source.fingerprint);
+  assert.equal(planned.plan.targetSchema.find(field => field.name === 'name').nullable, true,
+    'nullability after the UI sample must still affect the canonical plan');
+  planned.plan.targetSchema[0].name = 'tampered';
+  assert.equal(kernel.previewSourcePlan('database_ready').plan.targetSchema[0].name, 'id');
+});
+
 test('public checkpoint and output remain at committed state while progress persistence is pending', async () => {
   let hold = false;
   let release;

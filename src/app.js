@@ -712,6 +712,8 @@ async function boot() {
   window.__spoolTest = Object.freeze({
     state: () => kernel.snapshot(),
     viewState: () => kernel.viewSnapshot(),
+    studioState: () => kernel.studioSnapshot(),
+    previewSourcePlan: outcome => kernel.previewSourcePlan(outcome),
     tools: () => toolNamesForPhase(kernel.snapshot().job.phase),
     invoke: (name, args = {}) => kernel.invoke(name, args),
     navigate,

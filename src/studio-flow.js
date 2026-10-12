@@ -53,8 +53,10 @@ function stateFor(path) {
   const app = api();
   if (!app) return null;
   if ((path === '/studio/process' || path === '/studio/validate') && app.viewState) return app.viewState();
+  if (app.studioState) return app.studioState();
   return app.state();
 }
+function sourceRows(source) { return source.rowCount ?? source.rows.length; }
 function jsonRead(storage, key, fallback) {
   try { const value = storage.getItem(key); return value ? JSON.parse(value) : fallback; }
   catch { return fallback; }
@@ -119,6 +121,10 @@ function savedPlan(state) {
 }
 function planFor(state, selected) {
   if (!state || !state.source || !Array.isArray(state.source.schema) || !Array.isArray(state.source.rows)) return null;
+  if (api().previewSourcePlan) {
+    const bound = api().previewSourcePlan(selected || outcome());
+    return bound.fingerprint === state.source.fingerprint ? bound.plan : null;
+  }
   return planAutopilot({ sourceSchema: state.source.schema, rows: state.source.rows, outcome: selected || outcome() });
 }
 function cell(value) {
@@ -154,7 +160,7 @@ function stepStatus(state, index, current) {
 }
 function navigate(path, replace) {
   if (!PATHS.has(path)) return;
-  const state = api() && api().state ? api().state() : null;
+  const state = api() ? stateFor(flowPath()) : null;
   const targetIndex = indexFor(path);
   if (state && state.source) markProgress(state, targetIndex);
   if (replace) window.history.replaceState({}, '', path);
@@ -203,14 +209,14 @@ function originalPage(state) {
   if (source) {
     details = '<dl class="flow-facts"><div><dt>Original format</dt><dd>' + esc(meta.format) + '</dd></div>' +
       (meta.worksheet ? '<div><dt>Worksheet</dt><dd>' + esc(meta.worksheet) + (meta.worksheetCount ? ' · ' + num(meta.worksheetCount) + ' sheets' : '') + '</dd></div>' : '') +
-      '<div><dt>Original size</dt><dd>' + size(meta.originalBytes) + '</dd></div><div><dt>Rows loaded</dt><dd>' + num(source.rows.length) +
+      '<div><dt>Original size</dt><dd>' + size(meta.originalBytes) + '</dd></div><div><dt>Rows loaded</dt><dd>' + num(sourceRows(source)) +
       '</dd></div><div><dt>Columns</dt><dd>' + num(source.headers.length) + '</dd></div><div class="wide"><dt>Source fingerprint</dt><dd><code>' +
       esc(source.fingerprint) + '</code></dd></div></dl>' +
       (meta.warnings.length ? '<div class="flow-warning-list">' + meta.warnings.map(w => '<span>' + esc(w) + '</span>').join('') + '</div>' : '');
     const sample = source.rows.slice(0, 6);
     const rows = sample.map((row, i) => ['<strong>' + num(i + 1) + '</strong>'].concat(source.headers.slice(0, 7).map(header => cell(row[header]))));
     preview = '<section class="flow-section"><div class="flow-section-head"><div><span class="flow-kicker">UNMODIFIED PREVIEW</span><h2>Parsed source records</h2>' +
-      '<p>No transformation has been prepared or applied.</p></div><span>' + num(source.rows.length) + ' total rows</span></div>' +
+      '<p>No transformation has been prepared or applied.</p></div><span>' + num(sourceRows(source)) + ' total rows</span></div>' +
       dataTable(['Row'].concat(source.headers.slice(0, 7)), rows) + '</section>' +
       '<div class="flow-page-actions"><span>Source loaded and fingerprinted.</span><a class="flow-button primary" href="/studio/inspect" data-flow-route="/studio/inspect">Continue to Inspect the data →</a></div>';
   }
@@ -235,13 +241,13 @@ function inspectPage(state) {
   return intro(1, 'RAW INSPECTION', 'Inspect what is actually inside the dataset.',
     'This page is observational. It shows source shape, raw inferred types and real sample records before an output contract is proposed.') +
     metrics([
-      ['Rows', num(source.rows.length), 'Parsed source records'],
+      ['Rows', num(sourceRows(source)), 'Parsed source records'],
       ['Columns', num(source.headers.length), 'Unique source fields'],
       ['Source size', size(source.bytes), 'Normalized local representation'],
       ['Phase', esc(state.job.phase), 'No output processing yet']
     ]) +
     '<section class="flow-section"><div class="flow-section-head"><div><span class="flow-kicker">RAW RECORDS</span><h2>Source sample</h2><p>Up to the first 20 parsed records.</p></div><span>' +
-    num(Math.min(20, source.rows.length)) + ' shown</span></div>' + dataTable(['Row'].concat(source.headers), sampleRows) + '</section>' +
+    num(Math.min(20, sourceRows(source))) + ' shown</span></div>' + dataTable(['Row'].concat(source.headers), sampleRows) + '</section>' +
     '<section class="flow-section"><div class="flow-section-head"><div><span class="flow-kicker">INITIAL SCHEMA</span><h2>What the source parser sees</h2><p>These are observations, not final output types.</p></div></div>' +
     dataTable(['Column', 'Observed type', 'Nullability'], schemaRows) + '</section>' +
     actions('<a class="flow-button ghost" href="/studio/original" data-flow-route="/studio/original">← Original file</a>',
@@ -310,7 +316,7 @@ function understandPage(state) {
       ['Columns understood', num(columns.length), 'Every source field accounted for'],
       ['Columns with signals', num(issueColumns), 'Blank, padded or format mismatch'],
       ['Observed issue signals', num(signals), 'Signals can overlap'],
-      ['Analysis sample', num(Math.min(1000, state.source.rows.length)), 'Rows used for bounded evidence']
+      ['Analysis sample', num(Math.min(1000, sourceRows(state.source))), 'Rows used for bounded evidence']
     ]) +
     '<section class="flow-section"><div class="flow-section-head"><div><span class="flow-kicker">FIELD-BY-FIELD PROFILE</span><h2>Meaning, format and problem evidence</h2><p>Input evidence is kept separate from the transformation contract.</p></div></div>' +
     dataTable(['Source column', 'Likely format', 'Cardinality', 'Max length', 'Problem signals'], rows) + '</section>' +
@@ -569,7 +575,7 @@ function setNotice(tone, title, message) {
 }
 async function upload(file) {
   if (!file || busyAction) return;
-  const current = api() && api().state ? api().state() : null;
+  const current = api() ? stateFor(flowPath()) : null;
   if (current && [PHASES.RUNNING, PHASES.REPLAYING, PHASES.PAUSED, PHASES.PAUSED_RECOVERED].includes(current.job.phase)) {
     return setNotice('danger', 'Source replacement locked', 'Finish or abort the active processing run before loading a different source.');
   }
@@ -602,7 +608,7 @@ async function upload(file) {
       if (xlsx && loaded?.error?.code === 'SOURCE_TOO_LARGE') throw new Error('The first visible worksheet exceeds the 50 MiB normalized CSV limit. Export a smaller worksheet before importing it.');
       throw new Error(loaded?.error?.message || 'SPOOL refused to replace the active source.');
     }
-    const state = api().state();
+    const state = stateFor(flowPath());
     if (!state || !state.source) throw new Error('SPOOL did not create a source workspace.');
     jsonWrite(localStorage, metaKey(state.source.fingerprint), meta);
     notice = null;
@@ -612,7 +618,7 @@ async function upload(file) {
   }
 }
 async function approve() {
-  const state = api().state();
+  const state = stateFor(flowPath());
   if (!state || !state.source || state.job.phase !== PHASES.SOURCE_READY) return setNotice('danger', 'Transformation unavailable', 'Return to a source-ready workspace first.');
   const selected = outcome();
   const plan = planFor(state, selected);
@@ -624,11 +630,11 @@ async function approve() {
   if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
   response = await api().invoke('validate_mapping', {});
   if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
-  setNotice('success', 'Transformation approved', 'Mapping revision ' + num(api().state().mappingRevision) + ' is ready for a non-committing test.');
+  setNotice('success', 'Transformation approved', 'Mapping revision ' + num(stateFor(flowPath()).mappingRevision) + ' is ready for a non-committing test.');
   navigate('/studio/test');
 }
 async function preview() {
-  const state = api().state();
+  const state = stateFor(flowPath());
   if (!state || state.job.phase !== PHASES.MAPPING_VALID) return setNotice('danger', 'Dry test unavailable', 'Validate the transformation first.');
   const response = await api().invoke('preview_migration', { limit: 100 });
   if (!response.ok) return setNotice('danger', response.error.code, response.error.message);
@@ -638,7 +644,7 @@ async function preview() {
   schedule();
 }
 async function startProcess() {
-  const state = api().state();
+  const state = stateFor(flowPath());
   if (!previewState(state)) return setNotice('danger', 'Dry test required', 'Run the non-committing test for this mapping revision first.');
   const assessment = previewAssessment(state);
   if (assessment.status === 'BLOCK') return setNotice('danger', 'Dry test failed', 'Processing requires at least ' + Math.round(DRY_RUN_MIN_ACCEPTANCE * 100) + '% sample acceptance. Revise the transformation first.');
@@ -662,7 +668,7 @@ async function action(name) {
   if (name === 'load-demo') {
     const loaded = await api().loadDemo();
     if (loaded && loaded.ok === false) return setNotice('danger', loaded.code || 'LOAD_BLOCKED', loaded.message || 'Could not load demo source.');
-    const state = api().state();
+    const state = stateFor(flowPath());
     if (state && state.source) jsonWrite(localStorage, metaKey(state.source.fingerprint), {
       format: 'CSV', originalName: state.source.fileName, originalBytes: state.source.bytes, worksheet: null, worksheetCount: null, warnings: []
     });
@@ -695,7 +701,7 @@ async function action(name) {
     return navigate('/studio/original');
   }
   if (name === 'new-source') {
-    const state = api().state();
+    const state = stateFor(flowPath());
     if (state && [PHASES.COMPLETE, PHASES.FAILED, PHASES.ABORTED].includes(state.job.phase)) {
       const response = await api().invoke('start_new_migration', {});
       if (!response.ok) return setNotice('danger', response.error.code, response.error.message);

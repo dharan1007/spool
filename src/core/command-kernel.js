@@ -141,6 +141,23 @@ export class CommandKernel {
 
   snapshot() { return clone(this.readableWorkspace()); }
 
+  studioSnapshot() {
+    const workspace = this.readableWorkspace();
+    const source = workspace.source;
+    return clone({ ...workspace, source: source ? { ...source, rowCount: source.rows.length,
+      rows: source.rows.slice(0, 1000) } : null, output: workspace.output.slice(0, 12) });
+  }
+
+  previewSourcePlan(outcome) {
+    const source = this.readableWorkspace().source;
+    if (!source) fail('EMPTY_SOURCE', 'Load a source before planning');
+    this.studioPlanCache ??= new WeakMap();
+    let plans = this.studioPlanCache.get(source);
+    if (!plans) { plans = new Map(); this.studioPlanCache.set(source, plans); }
+    if (!plans.has(outcome)) plans.set(outcome, planAutopilot({ sourceSchema: source.schema, rows: source.rows, outcome }));
+    return clone({ fingerprint: source.fingerprint, plan: plans.get(outcome) });
+  }
+
   // Rendering never needs the whole source or completed output. Keep the
   // canonical full snapshot for tests/clients and emit a bounded UI view.
   viewSnapshot() {
