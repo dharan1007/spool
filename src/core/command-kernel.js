@@ -104,6 +104,9 @@ export class CommandKernel {
     this.engine = new MigrationEngine({ sampleLimit: 10 });
     this.runEpoch = 0;
     this.runtimeEventChain = Promise.resolve();
+    this.persistenceInFlight = 0;
+    this.publishedWorkspace = { ...this.workspace };
+    this.publishedOutputLength = 0;
   }
 
   async initialize() {
@@ -131,12 +134,17 @@ export class CommandKernel {
     return this.snapshot();
   }
 
-  snapshot() { return clone(this.workspace); }
+  readableWorkspace() {
+    if (!this.persistenceInFlight) return this.workspace;
+    return { ...this.publishedWorkspace, output: this.publishedWorkspace.output.slice(0, this.publishedOutputLength) };
+  }
+
+  snapshot() { return clone(this.readableWorkspace()); }
 
   // Rendering never needs the whole source or completed output. Keep the
   // canonical full snapshot for tests/clients and emit a bounded UI view.
   viewSnapshot() {
-    const workspace = this.workspace;
+    const workspace = this.readableWorkspace();
     const source = workspace.source;
     const sourceView = source ? {
       fileName: source.fileName,
@@ -158,11 +166,17 @@ export class CommandKernel {
     });
   }
 
-  emit() { this.onStateChange(this.snapshotMode === 'ui' ? this.viewSnapshot() : this.snapshot()); }
+  emit() {
+    this.publishedWorkspace = { ...this.workspace, job: { ...this.workspace.job }, mission: this.workspace.mission ? clone(this.workspace.mission) : null };
+    this.publishedOutputLength = this.workspace.output.length;
+    this.onStateChange(this.snapshotMode === 'ui' ? this.viewSnapshot() : this.snapshot());
+  }
 
   async persist() {
     this.workspace.updatedAt = new Date().toISOString();
-    await this.store.save(this.workspace);
+    this.persistenceInFlight += 1;
+    try { await this.store.save(this.workspace); }
+    finally { this.persistenceInFlight -= 1; }
     this.emit();
   }
 
@@ -185,11 +199,12 @@ export class CommandKernel {
 
   errorEnvelope(error) {
     const normalized = error instanceof SpoolError ? error : new SpoolError('INTERNAL_ERROR', error?.message || String(error));
+    const visible = this.readableWorkspace();
     return {
       ok: false,
       error: { code: normalized.code, message: normalized.message.replace(`${normalized.code}: `, ''), details: normalized.details },
-      state: { phase: this.workspace.job.phase, jobId: this.workspace.job.jobId, revision: this.workspace.mappingRevision },
-      nextValidActions: toolNamesForPhase(this.workspace.job.phase)
+      state: { phase: visible.job.phase, jobId: visible.job.jobId, revision: visible.mappingRevision },
+      nextValidActions: this.persistenceInFlight ? [] : toolNamesForPhase(visible.job.phase)
     };
   }
 
@@ -222,6 +237,7 @@ export class CommandKernel {
 
   async invoke(name, args = {}) {
     try {
+      if (this.persistenceInFlight) fail('WORKSPACE_WRITE_PENDING', 'Wait for the current durable workspace write before issuing another command');
       if (!this.allowed(name)) fail('INVALID_PHASE', `${name} is unavailable while workspace is ${this.workspace.job.phase}`);
       const fn = this[`cmd_${name}`];
       if (typeof fn !== 'function') fail('UNKNOWN_COMMAND', `No command implementation for ${name}`);

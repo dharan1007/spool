@@ -5,6 +5,39 @@ import { CommandKernel } from '../src/core/command-kernel.js';
 import { createJob, transition, PHASES } from '../src/core/state-machine.js';
 import { fail } from '../src/core/errors.js';
 
+test('public checkpoint and output remain at committed state while progress persistence is pending', async () => {
+  let hold = false;
+  let release;
+  const store = { load: async () => null, preflight: async () => ({ supported: true }), save: async () => {
+    if (hold) await new Promise(resolve => { release = resolve; });
+  } };
+  const kernel = new CommandKernel({ store, runtime: { start: async () => {}, abort: async () => {} } });
+  await kernel.initialize();
+  await kernel.loadSourceText('id\n1\n');
+  await kernel.invoke('define_target_schema', { fields: [{ name: 'id', type: 'integer', nullable: false }] });
+  await kernel.invoke('set_mapping', { mapping: [{ target: 'id', expr: { op: 'cast_number', value: { op: 'field', name: 'id' } } }] });
+  await kernel.invoke('validate_mapping');
+  assert.equal((await kernel.invoke('start_migration')).ok, true);
+  hold = true;
+  const pending = kernel.applyProgress({ processedRows: 1, validRows: 1, invalidRows: 0, outputChunk: [{ id: 1 }], violations: [] }, kernel.runEpoch);
+  assert.equal(kernel.viewSnapshot().job.checkpoint, 0);
+  assert.equal(kernel.snapshot().output.length, 0);
+  assert.equal((await kernel.invoke('export_csv')).error.code, 'WORKSPACE_WRITE_PENDING');
+  release();
+  await pending;
+  assert.equal(kernel.viewSnapshot().job.checkpoint, 1);
+  assert.equal(kernel.snapshot().output.length, 1);
+  const completing = kernel.applyComplete({}, kernel.runEpoch);
+  assert.equal(kernel.snapshot().job.phase, PHASES.RUNNING);
+  const refused = await kernel.invoke('export_csv');
+  assert.equal(refused.ok, false);
+  assert.equal(refused.state.phase, PHASES.RUNNING);
+  assert.deepEqual(refused.nextValidActions, []);
+  release();
+  await completing;
+  assert.equal(kernel.snapshot().job.phase, PHASES.COMPLETE);
+});
+
 test('failed source persistence restores the previous durable workspace and never announces the rejected source', async () => {
   let refuse = false;
   let durable = null;
