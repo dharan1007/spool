@@ -77,6 +77,13 @@ test('worker timeout is bounded and calls terminate exactly once', async () => {
   assert.equal(sample.terminationCount, 1);
 });
 
+test('Worker teardown exception cannot strand an already completed import', async () => {
+  const sample = fixture({ onTerminate() { throw new Error('Chrome worker already disposed'); } });
+  const actual = await xlsxFileToCsvInWorker(goodFile, sample);
+  assert.deepEqual(actual, result);
+  assert.equal(sample.terminationCount, 1);
+});
+
 test('file-size and configuration rejections happen before worker creation', async () => {
   let created = 0;
   const options = { createWorker() { created += 1; return fixture().worker; } };
