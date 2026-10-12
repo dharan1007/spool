@@ -102,6 +102,7 @@ export function parseDeterministicDate(value) {
   if (isoDate) return utcDate(Number(isoDate[1]), Number(isoDate[2]), Number(isoDate[3]), original);
 
   if (ISO_INSTANT.test(text)) {
+    parseDeterministicLocalDateTime(text.replace(/(?:Z|[+-]\d{2}:?\d{2})$/, ''));
     const timestamp = Date.parse(text);
     if (Number.isNaN(timestamp)) fail('INVALID_DATE', `Invalid date ${original}`);
     return new Date(timestamp).toISOString();

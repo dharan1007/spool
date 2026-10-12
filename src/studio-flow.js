@@ -589,7 +589,12 @@ async function upload(file) {
       meta = { format: 'XLSX', originalName: file.name, originalBytes: file.size, worksheet: converted.sheetName,
         worksheetCount: converted.sheetNames.length, warnings: converted.warnings, loadedAt: new Date().toISOString() };
     } else {
-      text = await file.text();
+      const bytes = await file.arrayBuffer();
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+      catch (error) {
+        if (!(error instanceof TypeError)) throw error;
+        throw new Error('CSV must contain valid UTF-8 text. Export it as UTF-8 before importing.');
+      }
       meta = { format: 'CSV', originalName: file.name, originalBytes: file.size, worksheet: null, worksheetCount: null, warnings: [], loadedAt: new Date().toISOString() };
     }
     const loaded = await api().loadCsv(text, file.name);

@@ -156,3 +156,44 @@ test('XLSX refuses Excel 1900 serial 60 rather than inventing a date', () => {
   };
   assert.throws(() => xlsxEntriesToCsv(input), /serial 60|nonexistent.*leap/i);
 });
+
+test('XLSX refuses invalid shared-string and boolean cell semantics', () => {
+  for (const xml of ['<c r="A2" t="s"><v>99</v></c>', '<c r="A2" t="s"><v>0junk</v></c>',
+    '<c r="A2" t="b"><v>garbage</v></c>']) {
+    const input = entries(workbookRows([inlineRow('1', 'Value'), '<row r="2">' + xml + '</row>']));
+    input['xl/sharedStrings.xml'] = enc.encode('<sst><si><t>Known</t></si></sst>');
+    assert.throws(() => xlsxEntriesToCsv(input), /shared.string|boolean/i);
+  }
+});
+
+test('XLSX rejects invalid ISO calendar dates instead of rolling them forward', () => {
+  for (const value of ['2023-02-30', '2023-02-30T00:00:00Z', '03/04/2026']) {
+    assert.throws(() => xlsxEntriesToCsv(entries(workbookRows([inlineRow('1', 'Date'),
+      '<row r="2"><c r="A2" t="d"><v>' + value + '</v></c></row>']))), /date|calendar|ISO/i);
+  }
+});
+
+test('XLSX formulas require cached values and explicitly disclose cached-only semantics', () => {
+  const base = formula => entries(workbookRows([inlineRow('1', 'Value'), '<row r="2"><c r="A2">' + formula + '</c></row>']));
+  assert.throws(() => xlsxEntriesToCsv(base('<f>1+1</f>')), /formula.*cached|cached.*formula/i);
+  const result = xlsxEntriesToCsv(base('<f>999+999</f><v>2</v>'));
+  assert.equal(result.csv, 'Value\n2\n', 'formula must never execute');
+  assert.match(result.warnings.join(' '), /cached.*not.*recalculat|not.*recalculat.*cached/i);
+});
+
+test('XLSX rejects invalid UTF-8 XML bytes rather than fabricating replacement characters', () => {
+  const input = entries(workbookRows([inlineRow('1', 'Value'), inlineRow('2', 'placeholder')]));
+  const sheet = Buffer.from(input['xl/worksheets/sheet1.xml']);
+  const index = sheet.indexOf('placeholder');
+  sheet[index] = 0xc3; sheet[index + 1] = 0x28;
+  input['xl/worksheets/sheet1.xml'] = sheet;
+  assert.throws(() => xlsxEntriesToCsv(input), /UTF|encod|valid/i);
+});
+
+test('XLSX rejects decreasing cell positions and undefined styles', () => {
+  assert.throws(() => xlsxEntriesToCsv(entries(workbookRows([
+    '<row r="1"><c r="B1" t="inlineStr"><is><t>B</t></is></c><c r="A1" t="inlineStr"><is><t>A</t></is></c></row>',
+    inlineRow('2', 'value')]))), /cell.*order|cell.*increasing/i);
+  assert.throws(() => xlsxEntriesToCsv(entries(workbookRows([inlineRow('1', 'Value'),
+    '<row r="2"><c r="A2" s="99"><v>1</v></c></row>']))), /style/i);
+});

@@ -32,6 +32,7 @@ test('date corpus accepts explicit ISO and English textual dates but rejects num
   assert.equal(spoolCode(() => evaluateExpr(parseDate('date'), { date: '03/04/2026' })), 'AMBIGUOUS_DATE_FORMAT');
   assert.equal(spoolCode(() => evaluateExpr(parseDate('date'), { date: '04/03/2026' })), 'AMBIGUOUS_DATE_FORMAT');
   assert.equal(spoolCode(() => evaluateExpr(parseDate('date'), { date: '2026-02-30' })), 'INVALID_DATE');
+  assert.equal(spoolCode(() => evaluateExpr(parseDate('date'), { date: '2026-02-30T00:00:00Z' })), 'INVALID_LOCAL_DATETIME');
 });
 
 test('target date validation does not reintroduce environment-dependent Date.parse behavior', () => {

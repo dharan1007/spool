@@ -13,6 +13,7 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 
 - UTF-8 CSV only; malformed encodings and unterminated quotes fail before any target mutation.
 - Local Runner default source ceiling 256 MiB (`maxSourceBytes`); Browser Studio input boundary 50 MiB. XLSX also requires its first visible worksheet's normalized UTF-8 CSV to fit the 50 MiB parser boundary, and total expanded ZIP entries must fit 256 MiB. A compressed workbook below 50 MiB can still be refused if its selected worksheet normalizes above that limit.
+- CSV and worksheet XML must use valid UTF-8. XLSX refuses invalid cell coordinates, missing shared-string/style references, invalid boolean/date values and error cells. Formula cells require saved cached values; SPOOL never recalculates them and displays a warning that cached values may be stale. Recalculate and save the workbook in its spreadsheet application before importing.
 - Sources must contain at least one data row; paths stay under the configured allow-root (traversal/symlink/junction contained).
 
 ## SQLite target

@@ -1,3 +1,5 @@
+import { parseDeterministicDate, parseDeterministicLocalDateTime } from './core/deterministic-date.js';
+
 const MAX_WORKBOOK_BYTES = 50 * 1024 * 1024;
 const MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024;
 const MAX_ROWS = 1_000_001;
@@ -31,8 +33,8 @@ function readAttributes(tag) {
 
 function textFromEntry(value) {
   if (typeof value === 'string') return value;
-  if (value instanceof Uint8Array) return new TextDecoder('utf-8', { fatal: false }).decode(value);
-  if (value instanceof ArrayBuffer) return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(value));
+  if (value instanceof Uint8Array) return new TextDecoder('utf-8', { fatal: true }).decode(value);
+  if (value instanceof ArrayBuffer) return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(value));
   throw new Error('XLSX archive entry has an unsupported representation.');
 }
 
@@ -167,21 +169,39 @@ function cellValue(cellXml, sharedStrings, styles, date1904) {
   const opening = cellXml.match(/^<c\b[^>]*>/i)?.[0] ?? '<c>';
   const attrs = readAttributes(opening);
   const type = attrs.t ?? '';
+  if (!['', 'n', 'inlineStr', 's', 'b', 'str', 'e', 'd'].includes(type)) throw new Error('XLSX cell has an unsupported type.');
+  if (attrs.s !== undefined && (!/^\d+$/.test(attrs.s) || !Number.isSafeInteger(Number(attrs.s)) || Number(attrs.s) >= styles.length)) {
+    throw new Error('XLSX cell refers to an undefined or invalid style.');
+  }
   const styleIndex = Number.parseInt(attrs.s ?? '-1', 10);
   const style = Number.isInteger(styleIndex) && styleIndex >= 0 ? styles[styleIndex] : null;
   const rawValue = decodeXml(cellXml.match(/<v\b[^>]*>([\s\S]*?)<\/v>/i)?.[1] ?? '');
+  if (/<f\b/i.test(cellXml) && !/<v\b[^>]*>[\s\S]+?<\/v>/i.test(cellXml)) {
+    throw new Error('XLSX formula has no cached value. Recalculate and save the workbook before importing.');
+  }
 
   if (type === 'inlineStr') {
     return [...cellXml.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/gi)].map(match => decodeXml(match[1])).join('');
   }
-  if (type === 's') return sharedStrings[Number.parseInt(rawValue || '0', 10)] ?? '';
-  if (type === 'b') return rawValue === '1' ? 'TRUE' : 'FALSE';
-  if (type === 'str') return rawValue;
-  if (type === 'e') return rawValue ? `#${rawValue}` : '#ERROR';
-  if (type === 'd') {
-    const date = new Date(rawValue);
-    return Number.isNaN(date.valueOf()) ? rawValue : date.toISOString().replace(/\.000Z$/, 'Z');
+  if (type === 's') {
+    const index = Number(rawValue);
+    if (!/^\d+$/.test(rawValue) || !Number.isSafeInteger(index) || index >= sharedStrings.length) {
+      throw new Error('XLSX shared-string cell refers to an invalid or missing index.');
+    }
+    return sharedStrings[index];
   }
+  if (type === 'b') {
+    if (rawValue !== '0' && rawValue !== '1') throw new Error('XLSX boolean cell must contain 0 or 1.');
+    return rawValue === '1' ? 'TRUE' : 'FALSE';
+  }
+  if (type === 'str') return rawValue;
+  if (type === 'e') throw new Error('XLSX contains an error cell. Correct the workbook before importing.');
+  if (type === 'd') {
+    if (!/^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(rawValue)) throw new Error('XLSX date cell must contain an explicit ISO date.');
+    if (/T/.test(rawValue) && !/(?:Z|[+-]\d{2}:?\d{2})$/.test(rawValue)) return parseDeterministicLocalDateTime(rawValue);
+    return parseDeterministicDate(rawValue).replace(/\.000Z$/, 'Z');
+  }
+  if (rawValue !== '' && !Number.isFinite(Number(rawValue))) throw new Error('XLSX numeric cell has an invalid value.');
   if (style?.isDate && rawValue !== '') return excelSerialToIso(rawValue, date1904, style.hasTime);
   return rawValue;
 }
@@ -226,6 +246,7 @@ function worksheetMatrix(sheetXml, sharedStrings, styles, date1904) {
       const index = columnIndex(attrs.r) ?? fallbackColumn;
       if (index >= MAX_COLUMNS) throw new Error(`XLSX exceeds the Browser Studio limit of ${MAX_COLUMNS} columns.`);
       if (occupiedColumns.has(index)) throw new Error('XLSX worksheet contains duplicate cell coordinates.');
+      if (index < fallbackColumn) throw new Error('XLSX cell positions must be in increasing order.');
       occupiedColumns.add(index);
       fallbackColumn = index + 1;
       row[index] = cellValue(cellMatch[0], sharedStrings, styles, date1904);
@@ -302,6 +323,8 @@ export function xlsxEntriesToCsv(entries) {
   const styles = parseStyles(optionalXml(entries, 'xl/styles.xml'));
   const { matrix, leadingBlankRows } = worksheetMatrix(requiredXml(entries, sheetPath), sharedStrings, styles, workbook.date1904);
   const converted = matrixToCsv(matrix, leadingBlankRows);
+  const formulaCount = [...requiredXml(entries, sheetPath).matchAll(/<f\b/gi)].length;
+  if (formulaCount) converted.warnings.push(`${formulaCount} formula cell(s) use cached values only; formulas are not recalculated by SPOOL and cached values may be stale.`);
   return {
     ...converted,
     sheetName: visibleSheet.name,

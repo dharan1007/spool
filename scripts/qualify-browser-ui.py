@@ -74,6 +74,8 @@ class ProcessSampler:
         self.heap_peak = 0
         self.heap_samples = 0
         self.heap_cdp = None
+        self.max_frame_gap_ms = 0
+        self.max_response_ms = 0
         self.records = []
         self.measurement_errors = []
         self.thread = threading.Thread(target=self.sample, daemon=True)
@@ -91,12 +93,18 @@ class ProcessSampler:
                 self.peak_rss = max(self.peak_rss, rss)
                 self.samples += 1
                 if self.heap_cdp:
+                    started = time.monotonic()
                     fields = {x['name']: x['value'] for x in self.heap_cdp.call('Performance.getMetrics').get('metrics', [])}
+                    frames = self.heap_cdp.eval('window.__qualifierFrames || null')
+                    self.max_response_ms = max(self.max_response_ms, (time.monotonic() - started) * 1000)
+                    if frames:
+                        self.max_frame_gap_ms = max(self.max_frame_gap_ms, frames['maxGapMs'])
                     heap = fields.get('JSHeapUsedSize', 0)
                     if heap > 0:
                         self.heap_peak = max(self.heap_peak, int(heap))
                         self.heap_samples += 1
-                        self.records.append({'monotonicSeconds': time.monotonic(), 'treeRssBytes': rss, 'mainPageHeapBytes': int(heap)})
+                        self.records.append({'monotonicSeconds': time.monotonic(), 'treeRssBytes': rss, 'mainPageHeapBytes': int(heap),
+                                             'maxFrameGapMs': self.max_frame_gap_ms, 'maxCdpResponseMs': self.max_response_ms})
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
             except Exception as measurement_error:
@@ -274,6 +282,40 @@ def simple_xlsx(path, hidden=False):
                        '<worksheet><sheetData><row r="1"><c t="inlineStr"><is><t>secret</t></is></c></row></sheetData></worksheet>')
 
 
+def adversarial_ui_fixtures(temp, template):
+    with zipfile.ZipFile(template) as z:
+        original = {name: z.read(name) for name in z.namelist()}
+    sheet = original['xl/worksheets/sheet1.xml'].decode('utf-8')
+    cases = {
+        'sparse_row': sheet.replace('<row r="2">', '<row r="999999999">'),
+        'duplicate_cell': sheet.replace('r="B2"', 'r="A2"'),
+        'mismatched_cell': sheet.replace('r="B2"', 'r="B3"'),
+        'invalid_boolean': sheet.replace('<c r="B2" t="inlineStr"><is><t>Ada</t></is></c>', '<c r="B2" t="b"><v>garbage</v></c>'),
+        'invalid_iso_date': sheet.replace('<c r="B2" t="inlineStr"><is><t>Ada</t></is></c>', '<c r="B2" t="d"><v>2023-02-30</v></c>'),
+        'missing_shared_string': sheet.replace('<c r="B2" t="inlineStr"><is><t>Ada</t></is></c>', '<c r="B2" t="s"><v>99</v></c>'),
+        'formula_without_cache': sheet.replace('<c r="B2" t="inlineStr"><is><t>Ada</t></is></c>', '<c r="B2"><f>1+1</f></c>'),
+        'error_cell': sheet.replace('<c r="B2" t="inlineStr"><is><t>Ada</t></is></c>', '<c r="B2" t="e"><v>#REF!</v></c>'),
+        'serial_60': sheet.replace('<c r="B2" t="inlineStr"><is><t>Ada</t></is></c>', '<c r="B2" s="0"><v>60</v></c>'),
+    }
+    fixtures = []
+    for name, xml in cases.items():
+        parts = dict(original)
+        parts['xl/worksheets/sheet1.xml'] = xml.encode('utf-8')
+        if name == 'serial_60':
+            parts['xl/styles.xml'] = b'<styleSheet><cellXfs><xf numFmtId="14"/></cellXfs></styleSheet>'
+        path = temp / (name + '.xlsx')
+        with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED, allowZip64=False) as z:
+            for part, raw in parts.items(): z.writestr(part, raw)
+        fixtures.append((name, path))
+    for name, raw in {
+        'duplicate_csv_header': b'id,id\n1,2\n', 'empty_csv_header': b'id,\n1,Ada\n',
+        'unsafe_csv_header': b'__proto__,name\n1,Ada\n', 'wrong_csv_width': b'id,name\n1,Ada,extra\n',
+        'unterminated_csv': b'id,name\n1,"Ada', 'invalid_utf8_csv': b'id,name\n1,\xc3(\n'
+    }.items():
+        path = temp / (name + '.csv'); path.write_bytes(raw); fixtures.append((name, path))
+    return fixtures
+
+
 def csv_near_limit(path):
     row = b'123,Ada-' + b'x' * 72 + b'\n'
     header = b'id,name\n'
@@ -358,6 +400,15 @@ def main():
         sampler.attach_heap(page["webSocketDebuggerUrl"])
         for domain in ["Runtime", "Page", "Network", "Performance", "Log"]:
             cdp.call(domain + ".enable")
+        cdp.call('Page.addScriptToEvaluateOnNewDocument', {'source': '''
+            window.__qualifierFrames = {last:performance.now(),maxGapMs:0,count:0};
+            function measureFrame(now) {
+                const m=window.__qualifierFrames;
+                m.maxGapMs=Math.max(m.maxGapMs,now-m.last); m.last=now; m.count++;
+                requestAnimationFrame(measureFrame);
+            }
+            requestAnimationFrame(measureFrame);
+        '''})
         base = "http://127.0.0.1:8876"
         open_ui(cdp, base)
         # Enforce the shipped privacy boundary against an actual blocked fetch.
@@ -390,6 +441,14 @@ def main():
         upload(cdp, malformed, should_reject=True)
         require(cdp.eval('window.__spoolTest.viewState().job.phase') == "EMPTY",
                 "malformed workbook mutated empty workspace")
+        measurements['adversarialUiCases'] = []
+        for case, path in adversarial_ui_fixtures(temp, xlsx):
+            open_ui(cdp, base)
+            before = cdp.eval('window.__spoolTest.viewState().source?.fingerprint || null')
+            upload(cdp, path, should_reject=True, timeout=35)
+            require(cdp.eval('window.__spoolTest.viewState().source?.fingerprint || null') == before,
+                    case + ': rejected source changed durable identity')
+            measurements['adversarialUiCases'].append({'case': case, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
         oversized_csv = temp / "max.csv"
         size_start = time.monotonic()
         rows = csv_near_limit(oversized_csv)
@@ -459,6 +518,8 @@ def main():
         measurements["chromeRssSamples"] = sampler.samples
         measurements['observedPeakMainPageHeapBytes'] = sampler.heap_peak
         measurements['mainPageHeapSamples'] = sampler.heap_samples
+        measurements['maxAnimationFrameGapMs'] = round(sampler.max_frame_gap_ms, 2)
+        measurements['maxMainPageCdpResponseMs'] = round(sampler.max_response_ms, 2)
         require(sampler.heap_samples > 0, 'Continuous Chrome heap sampler did not execute')
         require(not sampler.measurement_errors, 'Chrome resource measurement failed: ' + repr(sampler.measurement_errors[:2]))
         require(measurements["chromePeakTreeRssBytes"] <
@@ -471,6 +532,9 @@ def main():
         require(measurements["csv49MiBUploadSeconds"] <= 240 and
                 measurements["xlsxImportSeconds"] <= 300,
                 "maximum-source Studio import exceeded bounded elapsed-time budget")
+        require(sampler.max_frame_gap_ms <= 2000 and sampler.max_response_ms <= 2000,
+                'Studio main-thread responsiveness exceeded the two-second qualification budget: ' +
+                json.dumps({'frameGapMs': sampler.max_frame_gap_ms, 'responseMs': sampler.max_response_ms}))
         exceptions = [e for e in cdp.events if e.get("method") == "Runtime.exceptionThrown"]
         require(not exceptions, "real Chrome logged runtime exceptions: " + repr(exceptions[:2]))
         passed = True
@@ -486,7 +550,8 @@ def main():
             sampler.stop()
         if sampler:
             measurements.update({'chromePeakTreeRssBytes': sampler.peak_rss, 'chromeRssSamples': sampler.samples,
-                                 'observedPeakMainPageHeapBytes': sampler.heap_peak, 'mainPageHeapSamples': sampler.heap_samples})
+                                 'observedPeakMainPageHeapBytes': sampler.heap_peak, 'mainPageHeapSamples': sampler.heap_samples,
+                                 'maxAnimationFrameGapMs': sampler.max_frame_gap_ms, 'maxMainPageCdpResponseMs': sampler.max_response_ms})
             (evidence / 'resource-samples.json').write_text(json.dumps(sampler.records), encoding='utf8')
             if sampler.heap_cdp:
                 sampler.heap_cdp.close()
