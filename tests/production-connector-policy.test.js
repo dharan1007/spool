@@ -53,6 +53,10 @@ async function fixture(qualification = false) {
 evidenceTest('production denies every experimental target before discovery, approval or mutation', async () => {
   const f = await fixture();
   try {
+    a.throws(() => f.service.targetConnectors, denial);
+    a.throws(() => f.service.sourceCoordinator, denial);
+    await a.rejects(() => SpoolCommandService.create({ ...f.options, maxSourceBytes: 257 * 1024 * 1024 }), denial);
+    await a.rejects(() => SpoolCommandService.create({ ...f.options, release: { ...f.options.release, version: 'unmatched' } }), error => error.code === 'RELEASE_IDENTITY_REQUIRED');
     for (const connector of ['sqlite', 'postgres', 'mysql', 'mssql', 'unknown']) {
       const request = structuredClone(f.request); request.planInput.targetRef.connector = connector;
       request.qualification = { allowExperimental: true }; request.planInput.targetRef.assurance = 'C4';

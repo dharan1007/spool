@@ -9,7 +9,7 @@ import { fail, SpoolError } from '../core/errors.js';
 export const PRODUCTION_POLICY = Object.freeze({
   version: 1, release: '1.1.1',
   matrixSha256: '5b12f928e456b03fa1397aeb3540aab346ae58684dde229e2af3f0002eb8fca3',
-  target: 'sqlite', source: 'filesystem'
+  target: 'sqlite', source: 'filesystem', maxSourceBytes: 256 * 1024 * 1024
 });
 const instances = new WeakSet();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -51,7 +51,7 @@ function validateQualification(value, paths) {
   return root;
 }
 
-export function createExecutionPolicy({ qualification = null, sourceRoot, targetRoot, statePath, snapshotRoot } = {}) {
+export function createExecutionPolicy({ qualification = null, sourceRoot, targetRoot, statePath, snapshotRoot, maxSourceBytes = PRODUCTION_POLICY.maxSourceBytes } = {}) {
   verifyProductionPolicy();
   const paths = [sourceRoot, targetRoot, statePath, snapshotRoot];
   let root = null;
@@ -62,6 +62,7 @@ export function createExecutionPolicy({ qualification = null, sourceRoot, target
       fail('QUALIFICATION_ROOT_INVALID', 'Disposable qualification marker or paths cannot be validated');
     }
   }
+  if (!root && maxSourceBytes > PRODUCTION_POLICY.maxSourceBytes) fail('PRODUCTION_CAPABILITY_DENIED', 'Production source ceiling exceeds the bounded release policy');
   const policy = Object.freeze({
     mode: root ? 'DISPOSABLE_QUALIFICATION' : 'PRODUCTION',
     assert(operation, input = null) {
@@ -87,6 +88,7 @@ export function createExecutionPolicy({ qualification = null, sourceRoot, target
           input?.sourceRef?.connector !== PRODUCTION_POLICY.source || input?.writeStrategy?.mode !== 'insert' || input?.writeStrategy?.bulk === true) {
         fail('PRODUCTION_CAPABILITY_DENIED', 'This target or operation is not independently qualified for the bounded production release', { operation, target: target ?? null, maturity: targetStatus ?? 'UNKNOWN' });
       }
+      if (!Number.isSafeInteger(input.writeStrategy.batchSize) || input.writeStrategy.batchSize < 1 || input.writeStrategy.batchSize > 10_000) fail('PRODUCTION_CAPABILITY_DENIED', 'Production batch size exceeds the bounded release policy');
     }
   });
   instances.add(policy);

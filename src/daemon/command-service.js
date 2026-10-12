@@ -38,7 +38,7 @@ import { CredentialBroker } from './credential-broker.js';
 import { createDurableSourceCoordinator } from './durable-source.js';
 import { migrationRequestSemanticId } from './request-semantics.js';
 import { RunStore } from './run-store.js';
-import { createExecutionPolicy, assertExecutionPolicy } from '../platform/production-policy.js';
+import { createExecutionPolicy, assertExecutionPolicy, PRODUCTION_POLICY } from '../platform/production-policy.js';
 import {
   MIGRATION_STATES,
   isAllowedTransition,
@@ -159,6 +159,8 @@ function toStateTransitionEvidence({ planId, sourceStateId, targetContractId, fe
 
 export class SpoolCommandService {
   #executionPolicy;
+  #sourceCoordinator;
+  #targetConnectors;
   static async create(options = {}) {
     if (typeof options.sourceRoot !== 'string' || typeof options.targetRoot !== 'string') fail('INVALID_SERVICE_CONFIG', 'sourceRoot and targetRoot are required');
     if (typeof options.statePath !== 'string' || !options.statePath) fail('INVALID_SERVICE_CONFIG', 'statePath is required');
@@ -209,7 +211,7 @@ export class SpoolCommandService {
       approvalSigningKey: options.approvalSigningKey,
       maxSourceBytes,
       release: releaseIdentity(options.release ?? {
-        version: process.env.SPOOL_RELEASE_VERSION ?? '1.0.0',
+        version: process.env.SPOOL_RELEASE_VERSION ?? PRODUCTION_POLICY.release,
         commitSha: process.env.SPOOL_COMMIT_SHA
       })
     });
@@ -220,18 +222,21 @@ export class SpoolCommandService {
     this.#executionPolicy = executionPolicy;
     authenticServices.add(this);
     this.sourcePolicy = sourcePolicy;
-    this.sourceCoordinator = sourceCoordinator;
-    this.targetConnectors = targetConnectors;
+    this.#sourceCoordinator = sourceCoordinator;
+    this.#targetConnectors = targetConnectors;
     this.snapshotRoot = snapshotRoot;
     this.approvalSigningKey = approvalSigningKey;
     this.maxSourceBytes = maxSourceBytes;
     this.release = release;
+    if (executionPolicy.mode === 'PRODUCTION' && release?.version !== PRODUCTION_POLICY.release) fail('RELEASE_IDENTITY_REQUIRED', 'Production service release version must match the shipped capability policy');
     this.runs = new RunStore({ path: statePath });
     this.closed = false;
   }
 
   #open() { if (this.closed) fail('COMMAND_SERVICE_CLOSED', 'Command service is closed'); }
   get executionMode() { return this.#executionPolicy.mode; }
+  get sourceCoordinator() { this.#executionPolicy.assert('engineering'); return this.#sourceCoordinator; }
+  get targetConnectors() { this.#executionPolicy.assert('engineering'); return this.#targetConnectors; }
   assertCommandPolicy(command, input = null) {
     if (['status', 'verify', 'receipt', 'repair-evidence', 'repair-receipt', 'cutover'].includes(command)) return;
     this.#executionPolicy.assert(command.includes('repair') ? 'repair' : command.includes('cutover') ? 'cutover' : command, input);
@@ -250,7 +255,7 @@ export class SpoolCommandService {
     const connector = targetRef?.connector;
     if (typeof connector !== 'string' || !connector) fail('INVALID_TARGET_REF', 'targetRef.connector is required');
     try {
-      return await this.targetConnectors.open(connector, 'target', undefined, undefined, { minimumAssurance: 'C4' });
+      return await this.#targetConnectors.open(connector, 'target', undefined, undefined, { minimumAssurance: 'C4' });
     } catch (error) {
       if (error?.code === 'CONNECTOR_NOT_REGISTERED') fail('UNSUPPORTED_TARGET_CONNECTOR', `Unsupported target connector ${connector}`);
       throw error;
@@ -262,7 +267,7 @@ export class SpoolCommandService {
     this.#executionPolicy.assert('inspect', request.planInput);
     let input = structuredClone(request.planInput);
     const targetRuntime = await this.#openTargetRuntime(input.targetRef, input);
-    const source = await this.sourceCoordinator.prepare(input.sourceRef, {
+    const source = await this.#sourceCoordinator.prepare(input.sourceRef, {
       snapshotDir: this.#migrationSnapshotDir(request.migrationId),
       expectedSourceSnapshotId
     });
