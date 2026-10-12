@@ -3,7 +3,7 @@ import { fail } from './errors.js';
 export const DEFAULT_BROWSER_CSV_LIMIT_BYTES = 50 * 1024 * 1024;
 const UNSAFE_HEADERS = new Set(['__proto__', 'prototype', 'constructor']);
 
-export function parseCsv(text, options = {}) {
+function* parseCsvSteps(text, options = {}) {
   const {
     maxCellLength = 1024 * 1024,
     maxRows = 1_000_000,
@@ -19,6 +19,7 @@ export function parseCsv(text, options = {}) {
   let cell = [];
   let quoted = false;
   let i = 0;
+  let nextYield = 65536;
   const pushCell = () => {
     if (cell.length > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
     row.push(cell.join(''));
@@ -33,6 +34,7 @@ export function parseCsv(text, options = {}) {
   };
 
   while (i < text.length) {
+    if (i >= nextYield) { yield; nextYield = i + 65536; }
     const ch = text[i];
     if (quoted) {
       if (ch === '"') {
@@ -72,15 +74,36 @@ export function parseCsv(text, options = {}) {
   });
   if (new Set(headers).size !== headers.length) fail('DUPLICATE_HEADER', 'CSV headers must be unique');
 
-  const objects = rows.map((cells, rowIndex) => {
+  const objects = [];
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    if (rowIndex && rowIndex % 1000 === 0) yield;
+    const cells = rows[rowIndex];
     if (cells.length !== headers.length) {
       fail('COLUMN_COUNT_MISMATCH', `Row ${rowIndex + 2} has ${cells.length} columns; expected ${headers.length}`);
     }
     const out = Object.create(null);
     headers.forEach((header, index) => { out[header] = cells[index]; });
-    return out;
-  });
+    objects.push(out);
+  }
   return { headers, rows: objects };
+}
+
+export function parseCsv(text, options = {}) {
+  const steps = parseCsvSteps(text, options);
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+export async function parseCsvAsync(text, options = {}) {
+  const steps = parseCsvSteps(text, options);
+  let step = steps.next();
+  while (!step.done) {
+    if (globalThis.scheduler?.yield) await globalThis.scheduler.yield();
+    else await new Promise(resolve => globalThis.setTimeout(resolve, 0));
+    step = steps.next();
+  }
+  return step.value;
 }
 
 const PLAIN_SIGNED_NUMBER = /^[+-]?(?:(?:\d+\.?\d*)|(?:\.\d+))(?:[eE][+-]?\d+)?$/;

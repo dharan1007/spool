@@ -1,4 +1,4 @@
-import { parseCsv, toCsv } from './csv.js';
+import { parseCsvAsync, toCsv } from './csv.js';
 import { inferSchema, fingerprintText, validateOutputRow, validateTargetSchema } from './schema.js';
 import { compileMapping, evaluateExpr } from './transforms.js';
 import { MigrationEngine } from './migration.js';
@@ -131,7 +131,7 @@ export class CommandKernel {
         catch (error) { await this.failCurrentRun(error); }
       }
     } else this.emit();
-    return this.snapshot();
+    return this.snapshotMode === 'ui' ? this.viewSnapshot() : this.snapshot();
   }
 
   readableWorkspace() {
@@ -209,13 +209,18 @@ export class CommandKernel {
   }
 
   async loadSourceText(text, fileName = 'source.csv') {
-    const { headers, rows } = parseCsv(text);
+    if (this.persistenceInFlight) fail('WORKSPACE_WRITE_PENDING', 'Wait for the current durable write before replacing the source.');
+    const epoch = this.sourceLoadEpoch = (this.sourceLoadEpoch ?? 0) + 1;
+    const { headers, rows } = await parseCsvAsync(text);
+    if (epoch !== this.sourceLoadEpoch) fail('SOURCE_LOAD_SUPERSEDED', 'A newer file selection replaced this pending source load.');
     if (!headers.length) fail('EMPTY_SOURCE', 'Source CSV has no headers');
     if (!rows.length) fail('EMPTY_SOURCE_ROWS', 'Source CSV must contain at least one data row');
     const fingerprint = await fingerprintText(text);
+    if (epoch !== this.sourceLoadEpoch) fail('SOURCE_LOAD_SUPERSEDED', 'A newer file selection replaced this pending source load.');
     await this.runtime.abort();
     this.runEpoch += 1;
     await this.whenRuntimeIdle();
+    if (epoch !== this.sourceLoadEpoch) fail('SOURCE_LOAD_SUPERSEDED', 'A newer file selection replaced this pending source load.');
     const previous = this.workspace;
     const job = transition(createJob(), PHASES.SOURCE_READY, { sourceFingerprint: fingerprint, totalRows: rows.length });
     this.workspace = {

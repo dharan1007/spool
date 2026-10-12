@@ -5,6 +5,22 @@ import { CommandKernel } from '../src/core/command-kernel.js';
 import { createJob, transition, PHASES } from '../src/core/state-machine.js';
 import { fail } from '../src/core/errors.js';
 
+test('a newer source selection supersedes cooperative parsing before any old source publishes', async () => {
+  let durable = null;
+  const store = { load: async () => null, preflight: async () => ({ supported: true }), save: async workspace => { durable = structuredClone(workspace); } };
+  const kernel = new CommandKernel({ store, runtime: { start: async () => {}, abort: async () => {} } });
+  await kernel.initialize();
+  const older = kernel.loadSourceText('id,name\n' + '1,Earlier\n'.repeat(10000), 'earlier.csv');
+  const newer = kernel.loadSourceText('id,name\n2,Latest\n', 'latest.csv');
+  const results = await Promise.allSettled([older, newer]);
+  assert.equal(results[0].status, 'rejected');
+  assert.equal(results[0].reason.code, 'SOURCE_LOAD_SUPERSEDED');
+  assert.equal(results[1].status, 'fulfilled');
+  assert.equal(kernel.snapshot().source.fileName, 'latest.csv');
+  assert.equal(durable.source.fileName, 'latest.csv');
+  assert.equal(durable.source.rows[0].name, 'Latest');
+});
+
 test('public checkpoint and output remain at committed state while progress persistence is pending', async () => {
   let hold = false;
   let release;

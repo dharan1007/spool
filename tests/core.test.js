@@ -2,7 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createJob, transition, PHASES } from '../src/core/state-machine.js';
 import { inferSchema, fingerprintText } from '../src/core/schema.js';
-import { parseCsv } from '../src/core/csv.js';
+import { parseCsv, parseCsvAsync } from '../src/core/csv.js';
+
+test('cooperative CSV parsing yields without changing quoted fields, rows or rejection rules', async () => {
+  const text = 'id,note\r\n' + Array.from({ length: 3000 }, (_, i) => `${i},"quoted, ${'x'.repeat(32)}"\r\n`).join('');
+  let yielded = false;
+  const turn = new Promise(resolve => setTimeout(() => { yielded = true; resolve(); }, 0));
+  const result = await parseCsvAsync(text);
+  assert.equal(yielded, true, 'large parsing must allow a real event-loop turn');
+  await turn;
+  assert.deepEqual(result, parseCsv(text));
+  await assert.rejects(parseCsvAsync('id,note\n1,"unterminated'), error => error.code === 'UNCLOSED_QUOTE');
+});
 
 test('job starts EMPTY and rejects illegal transition', () => {
   const job = createJob('job_1');
