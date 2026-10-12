@@ -12,7 +12,7 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 ## filesystem source
 
 - UTF-8 CSV only; malformed encodings and unterminated quotes fail before any target mutation.
-- Local Runner default source ceiling 256 MiB (`maxSourceBytes`); Browser Studio input boundary 50 MiB.
+- Local Runner default source ceiling 256 MiB (`maxSourceBytes`); Browser Studio input boundary 50 MiB. XLSX also requires its first visible worksheet's normalized UTF-8 CSV to fit the 50 MiB parser boundary, and total expanded ZIP entries must fit 256 MiB. A compressed workbook below 50 MiB can still be refused if its selected worksheet normalizes above that limit.
 - Sources must contain at least one data row; paths stay under the configured allow-root (traversal/symlink/junction contained).
 
 ## SQLite target

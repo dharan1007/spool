@@ -593,7 +593,10 @@ async function upload(file) {
       meta = { format: 'CSV', originalName: file.name, originalBytes: file.size, worksheet: null, worksheetCount: null, warnings: [], loadedAt: new Date().toISOString() };
     }
     const loaded = await api().loadCsv(text, file.name);
-    if (!loaded || loaded.ok !== true) throw new Error(loaded?.error?.message || 'SPOOL refused to replace the active source.');
+    if (!loaded || loaded.ok !== true) {
+      if (xlsx && loaded?.error?.code === 'SOURCE_TOO_LARGE') throw new Error('The first visible worksheet exceeds the 50 MiB normalized CSV limit. Export a smaller worksheet before importing it.');
+      throw new Error(loaded?.error?.message || 'SPOOL refused to replace the active source.');
+    }
     const state = api().state();
     if (!state || !state.source) throw new Error('SPOOL did not create a source workspace.');
     jsonWrite(localStorage, metaKey(state.source.fingerprint), meta);

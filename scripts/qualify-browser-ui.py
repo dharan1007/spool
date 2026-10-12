@@ -414,13 +414,15 @@ def main():
         # A real near-limit compressed XLSX workload is mandatory as well;
         # absent that measurement, this test MUST NOT authorize release.
         large_xlsx = temp / "max.xlsx"
-        build_large_xlsx(large_xlsx)
+        generated_xlsx = build_large_xlsx(large_xlsx)
         open_ui(cdp, base)
         import_started = time.monotonic()
-        upload(cdp, large_xlsx, timeout=300)
+        upload(cdp, large_xlsx, expected_rows=generated_xlsx['visibleRows'], timeout=300)
         measurements["xlsxImportSeconds"] = round(time.monotonic() - import_started, 2)
         measurements["xlsxBytes"] = large_xlsx.stat().st_size
         measurements["xlsxRows"] = cdp.eval("window.__spoolTest.viewState().source.rows.length")
+        measurements['xlsxExpandedBytes'] = generated_xlsx['expandedBytes']
+        measurements['xlsxWorksheetCount'] = 2
         measurements["heapAfterXlsxBytes"] = chrome_heap_bytes(cdp)
 
         # Explicit manual run and browser termination/reload prove checkpoint
@@ -511,15 +513,21 @@ def main():
 
 
 def build_large_xlsx(path):
-    """Fit actual compressed 48–50 MiB workload without silent smaller samples."""
-    rows = 178_000
+    """Two real data sheets, 48–50 MiB compressed; first-visible CSV <=50 MiB.
+
+    The previous single-sheet hex corpus normalized above the CSV parser's
+    independent 50 MiB limit. This workbook exercises the full archive limit
+    with two equally sized actual worksheets; only Data is visible/imported.
+    """
+    rows = 89_000
     for _ in range(4):
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6,
                              allowZip64=False) as z:
-            z.writestr("xl/workbook.xml", '<workbook><sheets><sheet name="Data" r:id="rId1"/></sheets></workbook>')
+            z.writestr("xl/workbook.xml", '<workbook><sheets><sheet name="Archive" state="hidden" r:id="rId2"/><sheet name="Data" r:id="rId1"/></sheets></workbook>')
             z.writestr("xl/_rels/workbook.xml.rels",
-                       '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>')
-            with z.open("xl/worksheets/sheet1.xml", "w") as stream:
+                       '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>')
+            for sheet_number in [1, 2]:
+              with z.open('xl/worksheets/sheet' + str(sheet_number) + '.xml', 'w') as stream:
                 stream.write(b'<worksheet><sheetData>')
                 stream.write(b'<row r="1"><c r="A1" t="inlineStr"><is><t>id</t></is></c>'
                              b'<c r="B1" t="inlineStr"><is><t>payload</t></is></c></row>')
@@ -534,7 +542,12 @@ def build_large_xlsx(path):
                 stream.write(b'</sheetData></worksheet>')
         total = path.stat().st_size
         if 48 * MiB <= total <= MAX_INPUT:
-            return
+            with zipfile.ZipFile(path) as archive:
+                expanded = sum(entry.file_size for entry in archive.infolist())
+            require(expanded <= 256 * MiB, 'accepted workbook exceeds expanded boundary')
+            normalized_bound = len(b'id,payload\n') + rows * (len(str(rows)) + 448 + 2)
+            require(normalized_bound <= MAX_INPUT, 'visible worksheet exceeds normalized CSV boundary')
+            return {'visibleRows': rows, 'expandedBytes': expanded}
         rows = max(1, round(rows * (49 * MiB) / max(1, total)))
         require(rows <= 1_000_000, "XLSX compressed-boundary generator exceeded row cap")
     raise AssertionError("Unable to generate genuine 48–50 MiB compressed XLSX workbook")
