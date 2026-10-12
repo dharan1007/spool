@@ -121,12 +121,20 @@ def ui_wait(cdp, expr, label, timeout=35):
     return wait_for(lambda: cdp.eval(expr), timeout=timeout, label=label)
 
 
+def wait_route(cdp, route, timeout=35):
+    expected = json.dumps(route)
+    ui_wait(cdp, 'location.pathname === ' + expected +
+            ' && document.querySelector(".flow-step.current")?.getAttribute("data-flow-route") === ' + expected,
+            'rendered Studio route ' + route, timeout=timeout)
+
+
 def open_ui(cdp, base_url, route="/studio/original"):
     cdp.eval('window.__qualifierNavigationMarker = true')
     cdp.call("Page.navigate", {"url": base_url + route})
     ui_wait(cdp, 'typeof window.__qualifierNavigationMarker === "undefined" && document.readyState === "complete"', "new page ready")
     ui_wait(cdp, 'Boolean(window.__spoolTest) && Boolean(document.querySelector("[data-spool-flow-root]"))',
             "Studio document and kernel")
+    wait_route(cdp, route)
     require(cdp.eval("location.pathname") == route, "wrong Studio route")
 
 
@@ -141,7 +149,7 @@ def click(cdp, selector, route=None):
             "missing real UI control: " + selector)
     cdp.eval("document.querySelector(" + json.dumps(selector) + ").click()")
     if route:
-        ui_wait(cdp, "location.pathname === " + json.dumps(route), "UI route " + route)
+        wait_route(cdp, route)
 
 
 def upload(cdp, file_path, expected_rows=None, should_reject=False, timeout=180):
@@ -172,7 +180,7 @@ def upload(cdp, file_path, expected_rows=None, should_reject=False, timeout=180)
         require(cdp.eval("location.pathname") == "/studio/original",
                 "rejected file unexpectedly navigated into processing")
         return
-    ui_wait(cdp, 'location.pathname === "/studio/inspect"', "real file upload", timeout=timeout)
+    wait_route(cdp, '/studio/inspect', timeout=timeout)
     if expected_rows is not None:
         require(cdp.eval("window.__spoolTest.viewState().source.rows.length") == expected_rows,
                 "real uploaded row count did not match source fixture")
