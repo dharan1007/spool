@@ -1,6 +1,8 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { fail, toErrorEnvelope } from '../core/errors.js';
+import { isCommandService } from './command-service.js';
+import { createExecutionPolicy } from '../platform/production-policy.js';
 
 const COMMANDS = new Set([
   'inspect', 'plan', 'dry-run', 'approve', 'run', 'status', 'verify', 'receipt',
@@ -88,13 +90,19 @@ function transportError(error) {
   });
 }
 
-export function createSpoolDaemon({ service, token, host = '127.0.0.1', allowedOrigins = [], maxBodyBytes = 1024 * 1024 } = {}) {
+export function createSpoolDaemon({ service, token, host = '127.0.0.1', allowedOrigins = [], maxBodyBytes = 1024 * 1024, qualification = null } = {}) {
   if (!service || typeof service !== 'object') fail('INVALID_DAEMON_CONFIG', 'service is required');
   if (typeof token !== 'string' || token.length < 32) fail('INVALID_DAEMON_CONFIG', 'daemon bearer token must be at least 32 bytes');
   if (!['127.0.0.1', '::1'].includes(host)) fail('INVALID_DAEMON_CONFIG', 'spoold binds only to a loopback IP');
   if (!Array.isArray(allowedOrigins) || allowedOrigins.some(value => typeof value !== 'string')) fail('INVALID_DAEMON_CONFIG', 'allowedOrigins must be a string array');
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1024 || maxBodyBytes > 16 * 1024 * 1024) fail('INVALID_DAEMON_CONFIG', 'maxBodyBytes must be 1 KiB to 16 MiB');
   const originSet = new Set(allowedOrigins);
+  let transportPolicy = null;
+  if (!isCommandService(service)) {
+    if (!qualification) fail('POLICY_INTEGRITY_FAILED', 'Production daemon requires an authentic policy-guarded command service');
+    const root = qualification.root;
+    transportPolicy = createExecutionPolicy({ qualification, sourceRoot: root, targetRoot: root, statePath: root, snapshotRoot: root });
+  }
   let listeningPort = null;
 
   const server = http.createServer(async (request, response) => {
@@ -117,8 +125,11 @@ export function createSpoolDaemon({ service, token, host = '127.0.0.1', allowedO
         return;
       }
       const body = await readJsonBody(request, maxBodyBytes);
+      if (!COMMANDS.has(body.command)) fail('INVALID_COMMAND', 'Unsupported command');
+      if (isCommandService(service)) service.assertCommandPolicy(body.command, body.request?.planInput);
+      else transportPolicy.assert(body.command, body.request?.planInput);
       const result = await dispatch(service, body);
-      json(response, 200, { ok: true, result });
+      json(response, 200, { ok: true, result, executionMode: transportPolicy || service.executionMode === 'DISPOSABLE_QUALIFICATION' ? 'DISPOSABLE_QUALIFICATION_NOT_RELEASE_AUTHORIZED' : 'PRODUCTION' });
     } catch (error) {
       const publicError = transportError(error);
       const status = publicError.code === 'REQUEST_TOO_LARGE' ? 413 : publicError.code === 'INVALID_JSON' || publicError.code === 'INVALID_COMMAND' ? 400 : publicError.code === 'INTERNAL_ERROR' ? 500 : 422;

@@ -1,3 +1,4 @@
+import { markDisposableQualification } from '../src/platform/disposable-qualification.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
@@ -20,6 +21,7 @@ test('canonical CRM export runs through the production CSV-to-SQLite path with d
   targetDb.close();
   const request = JSON.parse(await readFile('examples/crm-export/request.json', 'utf8'));
   const service = await SpoolCommandService.create({
+    qualification: await markDisposableQualification(dir),
     sourceRoot,
     targetRoot,
     statePath: join(targetRoot, 'spool-state.db'),

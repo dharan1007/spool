@@ -4,6 +4,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SpoolCommandService, migrationRequestSemanticId } from '../src/daemon/command-service.js';
+import { createExecutionPolicy } from '../src/platform/production-policy.js';
+import { markDisposableQualification } from '../src/platform/disposable-qualification.js';
 
 const PLAN_ID = `sha256:${'1'.repeat(64)}`;
 const SNAPSHOT_ID = `sha256:${'2'.repeat(64)}`;
@@ -11,6 +13,7 @@ const SNAPSHOT_ID = `sha256:${'2'.repeat(64)}`;
 async function makeService(t, counters) {
   const root = await mkdtemp(join(tmpdir(), 'spool-complete-terminal-'));
   const service = new SpoolCommandService({
+    executionPolicy: createExecutionPolicy({ qualification: await markDisposableQualification(root), sourceRoot: root, targetRoot: root, statePath: root, snapshotRoot: root }),
     sourcePolicy: Object.freeze({}),
     sourceCoordinator: Object.freeze({ async prepare() { counters.source += 1; throw Object.assign(new Error('unexpected source access'), { code: 'SOURCE_SHOULD_NOT_BE_TOUCHED' }); } }),
     targetConnectors: Object.freeze({ async open() { counters.target += 1; throw Object.assign(new Error('unexpected target access'), { code: 'TARGET_SHOULD_NOT_BE_TOUCHED' }); } }),

@@ -1,3 +1,4 @@
+import { markDisposableQualification } from '../../src/platform/disposable-qualification.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -101,6 +102,7 @@ async function fixture() {
   const snapshotDir = join(dir, 'snapshots');
   await mkdir(sourceRoot); await mkdir(targetRoot);
   const options = {
+    qualification: await markDisposableQualification(dir),
     sourceRoot,
     targetRoot,
     snapshotDir,

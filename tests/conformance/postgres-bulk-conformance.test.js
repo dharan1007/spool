@@ -1,3 +1,4 @@
+import { markDisposableQualification } from '../../src/platform/disposable-qualification.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
@@ -214,6 +215,7 @@ test('bulk service migration completes with exact content proof and bulk approva
   await mkdir(sourceRoot);
   await mkdir(targetRoot);
   const service = await SpoolCommandService.create({
+    qualification: await markDisposableQualification(dir),
     sourceRoot, targetRoot, snapshotDir: join(dir, 'snapshots'),
     statePath: join(targetRoot, 'spool-state.db'),
     approvalSigningKey: '0123456789abcdef0123456789abcdef',

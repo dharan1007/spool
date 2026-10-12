@@ -1,5 +1,29 @@
 # SPOOL Local Runner
 
+## Current candidate execution policy
+
+The bounded release candidate defaults to production mode. It refuses SQLite,
+PostgreSQL, MySQL and SQL Server target discovery, approval and execution while
+their target capabilities are EXPERIMENTAL. C4 runtime assurance does not grant
+production permission. Status and existing verified receipt access remain
+available. The historical v1.1.1 release is not qualification of this candidate.
+
+Engineering fixtures must opt in explicitly using a unique marked disposable
+scratch directory and its run UUID. The CLI requires both
+`--qualification-root DIR` and `--qualification-run UUID`. The service API
+requires `{ qualification: { allowExperimental: true, root, runId } }`.
+`markDisposableQualification(root)` creates the run-bound marker only beneath
+the local temporary directory; all source, target, snapshot and state paths
+must remain inside that root. Remote conformance endpoints must be literal
+loopback addresses. Neither request fields nor environment names enable this
+mode. CLI/daemon responses label it `DISPOSABLE_QUALIFICATION_NOT_RELEASE_AUTHORIZED`.
+Use synthetic fixtures only; this mode is not authorization for customer work.
+
+The package contains the capability register. Its exact SHA-256 and release
+version must match the shipped policy; missing, changed or stale policy fails
+closed. Policy checks repeat before connector opening, approval, leases and
+batch writes. Repair, CDC and cutover are excluded from production scope.
+
 The Local Runner is SPOOL Gate B's intended customer-local target-mutation surface. **Qualification status, 11 October 2026:** `sqlite.target` remains **EXPERIMENTAL** in the authoritative capability matrix; the current candidate is **NOT RELEASE-AUTHORIZED** until strict load, crash, permission and exact-SHA gates pass. It runs on the machine that owns the source CSV and SQLite database. Source rows, target credentials, durable snapshots, and database contents are not uploaded to the hosted Browser Studio.
 
 ## Requirements

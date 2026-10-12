@@ -1,3 +1,4 @@
+import { markDisposableQualification } from '../../src/platform/disposable-qualification.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -108,6 +109,7 @@ test('CSV-to-PostgreSQL command service is approval-bound, verified, replay-safe
   const sourcePath = join(sourceRoot, 'customers.csv');
   await writeFile(sourcePath, 'id,name\n1, Ada \n2,Lin\nbad,Rejected\n');
   const service = await SpoolCommandService.create({
+    qualification: await markDisposableQualification(dir),
     sourceRoot,
     targetRoot,
     statePath: join(targetRoot, 'spool-state.db'),

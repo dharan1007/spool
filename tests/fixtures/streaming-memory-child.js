@@ -1,3 +1,4 @@
+import { markDisposableQualification } from '../../src/platform/disposable-qualification.js';
 import { createWriteStream } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { once } from 'node:events';
@@ -77,6 +78,7 @@ try {
   db.close();
 
   service = await SpoolCommandService.create({
+    qualification: await markDisposableQualification(dir),
     sourceRoot,
     targetRoot,
     statePath: join(targetRoot, 'spool-state.db'),

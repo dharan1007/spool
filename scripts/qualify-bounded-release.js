@@ -116,7 +116,8 @@ function runCheck(check, root) {
     }
   }
   if (check.realSurface) {
-    const markers = (result.stdout || '').split(/\r?\n/).filter(line => line.startsWith('SPOOL_EVIDENCE_JSON='));
+    if (check.id === 'production_denial' && (!counters || counters.tests < 1 || counters.fail !== 0 || counters.skipped !== 0 || counters.cancelled !== 0 || counters.todo !== 0)) reason ||= 'production_denial_execution_counts_missing_or_failed';
+    const markers = (result.stdout || '').split(/\r?\n/).map(line => line.replace(/^# /, '')).filter(line => line.startsWith('SPOOL_EVIDENCE_JSON='));
     if (markers.length !== 1) reason ||= 'mandatory_evidence_marker_missing_or_duplicated';
     else {
       try { attested = JSON.parse(markers[0].slice('SPOOL_EVIDENCE_JSON='.length)); }

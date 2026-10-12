@@ -38,6 +38,7 @@ import { CredentialBroker } from './credential-broker.js';
 import { createDurableSourceCoordinator } from './durable-source.js';
 import { migrationRequestSemanticId } from './request-semantics.js';
 import { RunStore } from './run-store.js';
+import { createExecutionPolicy, assertExecutionPolicy } from '../platform/production-policy.js';
 import {
   MIGRATION_STATES,
   isAllowedTransition,
@@ -51,6 +52,8 @@ export { migrationRequestSemanticId } from './request-semantics.js';
 const MIGRATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const DEFAULT_MAX_SOURCE_BYTES = 256 * 1024 * 1024;
 const INFERENCE_SAMPLE_SIZE = 1000;
+const authenticServices = new WeakSet();
+export function isCommandService(service) { return authenticServices.has(service); }
 
 function requireRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) fail('INVALID_MIGRATION_REQUEST', 'Migration request must be an object');
@@ -155,6 +158,7 @@ function toStateTransitionEvidence({ planId, sourceStateId, targetContractId, fe
 }
 
 export class SpoolCommandService {
+  #executionPolicy;
   static async create(options = {}) {
     if (typeof options.sourceRoot !== 'string' || typeof options.targetRoot !== 'string') fail('INVALID_SERVICE_CONFIG', 'sourceRoot and targetRoot are required');
     if (typeof options.statePath !== 'string' || !options.statePath) fail('INVALID_SERVICE_CONFIG', 'statePath is required');
@@ -165,6 +169,7 @@ export class SpoolCommandService {
     if (!Number.isSafeInteger(maxSourceBytes) || maxSourceBytes <= 0) fail('INVALID_SERVICE_CONFIG', 'maxSourceBytes must be a positive safe integer');
 
     const snapshotRoot = resolve(options.snapshotDir ?? `${options.statePath}.snapshots`);
+    const executionPolicy = createExecutionPolicy({ ...options, snapshotRoot });
     const sourcePolicy = await createPathPolicy(options.sourceRoot);
     const credentialBroker = options.credentialBroker ?? new CredentialBroker();
     if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_SERVICE_CONFIG', 'credentialBroker.withSecret() is required');
@@ -195,6 +200,7 @@ export class SpoolCommandService {
     targetConnectors.register(MSSQL_TARGET_DESCRIPTOR, async () => mssqlTargetRuntime);
 
     return new SpoolCommandService({
+      executionPolicy,
       sourcePolicy,
       sourceCoordinator,
       targetConnectors,
@@ -209,7 +215,10 @@ export class SpoolCommandService {
     });
   }
 
-  constructor({ sourcePolicy, sourceCoordinator, targetConnectors, statePath, snapshotRoot, approvalSigningKey, maxSourceBytes, release }) {
+  constructor({ sourcePolicy, sourceCoordinator, targetConnectors, statePath, snapshotRoot, approvalSigningKey, maxSourceBytes, release, executionPolicy = createExecutionPolicy() }) {
+    assertExecutionPolicy(executionPolicy);
+    this.#executionPolicy = executionPolicy;
+    authenticServices.add(this);
     this.sourcePolicy = sourcePolicy;
     this.sourceCoordinator = sourceCoordinator;
     this.targetConnectors = targetConnectors;
@@ -222,6 +231,11 @@ export class SpoolCommandService {
   }
 
   #open() { if (this.closed) fail('COMMAND_SERVICE_CLOSED', 'Command service is closed'); }
+  get executionMode() { return this.#executionPolicy.mode; }
+  assertCommandPolicy(command, input = null) {
+    if (['status', 'verify', 'receipt', 'repair-evidence', 'repair-receipt', 'cutover'].includes(command)) return;
+    this.#executionPolicy.assert(command.includes('repair') ? 'repair' : command.includes('cutover') ? 'cutover' : command, input);
+  }
 
   #migrationSnapshotDir(migrationId) {
     return join(this.snapshotRoot, encodeURIComponent(migrationId));
@@ -231,7 +245,8 @@ export class SpoolCommandService {
     await rm(this.#migrationSnapshotDir(migrationId), { recursive: true, force: true });
   }
 
-  async #openTargetRuntime(targetRef) {
+  async #openTargetRuntime(targetRef, input) {
+    this.#executionPolicy.assert('inspect', input);
     const connector = targetRef?.connector;
     if (typeof connector !== 'string' || !connector) fail('INVALID_TARGET_REF', 'targetRef.connector is required');
     try {
@@ -244,8 +259,9 @@ export class SpoolCommandService {
 
   async #prepare(request, { expectedSourceSnapshotId = null } = {}) {
     this.#open(); requireRequest(request);
+    this.#executionPolicy.assert('inspect', request.planInput);
     let input = structuredClone(request.planInput);
-    const targetRuntime = await this.#openTargetRuntime(input.targetRef);
+    const targetRuntime = await this.#openTargetRuntime(input.targetRef, input);
     const source = await this.sourceCoordinator.prepare(input.sourceRef, {
       snapshotDir: this.#migrationSnapshotDir(request.migrationId),
       expectedSourceSnapshotId
@@ -265,6 +281,7 @@ export class SpoolCommandService {
   }
 
   async inspect(request) {
+    this.#executionPolicy.assert('inspect', request?.planInput);
     const prepared = await this.#prepare(request);
     return Object.freeze({
       migrationId: request.migrationId,
@@ -284,9 +301,10 @@ export class SpoolCommandService {
     });
   }
 
-  async plan(request) { return (await this.#prepare(request)).plan; }
+  async plan(request) { this.#executionPolicy.assert('plan', request?.planInput); return (await this.#prepare(request)).plan; }
 
   async dryRun(request) {
+    this.#executionPolicy.assert('dry-run', request?.planInput);
     const prepared = await this.#prepare(request);
     const accumulator = new MigrationEngine().createAccumulator(prepared.plan.mapping, prepared.plan.mappingRevision, prepared.plan.targetSchema);
     for await (const { rowIndex, row } of prepared.source.streamRows()) accumulator.process(row, rowIndex);
@@ -304,10 +322,12 @@ export class SpoolCommandService {
   }
 
   async approve(request, { expiresAt, nonce } = {}) {
+    this.#executionPolicy.assert('approve', request?.planInput);
     requireRequest(request); this.#requireCutoverOpen(request.migrationId);
     const prepared = await this.#prepare(request);
     if (typeof expiresAt !== 'string' || typeof nonce !== 'string') fail('INVALID_APPROVAL_REQUEST', 'expiresAt and nonce are required');
     const effects = await prepared.targetRuntime.approvalEffects(prepared.plan);
+    this.#executionPolicy.assert('approve', prepared.plan);
     const approval = createBoundApproval(
       approvalBinding(request, prepared.plan, prepared.snapshot, prepared.targetPreflight.targetContractId, effects, expiresAt, nonce),
       { signingKey: this.approvalSigningKey }
@@ -373,6 +393,7 @@ export class SpoolCommandService {
   runSyncGuard() { fail('ASYNC_COMMAND_ONLY', 'Production command execution is asynchronous'); }
 
   async run(request, { approval = null } = {}) {
+    this.#executionPolicy.assert('run', request?.planInput);
     this.#open(); requireRequest(request); this.#requireCutoverOpen(request.migrationId);
     // Durable state: ensure migration initialized and check frozen after CUTOVER_COMMITTED
     const durableBefore = this.#durableState(request.migrationId);
@@ -481,10 +502,11 @@ export class SpoolCommandService {
     }
 
     const startedAt = current?.startedAt ?? new Date().toISOString();
+    this.#executionPolicy.assert('run', plan);
     const targetExecution = await targetRuntime.createExecution({ migrationId: request.migrationId, targetRef: plan.targetRef });
     let lease;
     let ownsRunState = false;
-    const renewLease = async () => { lease = await targetExecution.renewLease(); return lease; };
+    const renewLease = async () => { this.#executionPolicy.assert('run', plan); lease = await targetExecution.renewLease(); return lease; };
 
     try {
       await renewLease();
@@ -508,6 +530,7 @@ export class SpoolCommandService {
       }
       this.runs.start({ migrationId: request.migrationId, planId: plan.planId, sourceSnapshotId: snapshot.snapshotId, targetIdentity, startedAt });
       ownsRunState = true;
+      this.#executionPolicy.assert('run', plan);
       const target = await targetExecution.openTarget();
       const checkpointStore = this.runs.checkpointStore(request.migrationId);
       const runner = new MigrationRunner({ target, checkpointStore });
@@ -540,6 +563,7 @@ export class SpoolCommandService {
           if (sourceRangeEnd <= resumeOffset) { batchRows = []; continue; }
           if (sourceRangeStart < resumeOffset) fail('CHECKPOINT_OFFSET_MISMATCH', 'Checkpoint falls inside a batch boundary');
           await renewLease();
+          this.#executionPolicy.assert('run', plan);
           await runner.runBatchAsync({
             migrationId: request.migrationId, planId: plan.planId, sourceSnapshotId: snapshot.snapshotId,
             mappingRevision: plan.mappingRevision, sourceRange: { start: sourceRangeStart, endExclusive: sourceRangeEnd },
@@ -783,6 +807,7 @@ export class SpoolCommandService {
   }
 
   async approveRepair(request, { repairPlanIds, expiresAt, nonce } = {}) {
+    this.#executionPolicy.assert('repair', request?.planInput);
     this.#open(); requireRequest(request); this.#requireCutoverOpen(request.migrationId);
     if (!Array.isArray(repairPlanIds) || repairPlanIds.length === 0) fail('INVALID_REPAIR_REQUEST', 'repairPlanIds must be a non-empty array');
     if (typeof expiresAt !== 'string' || typeof nonce !== 'string') fail('INVALID_REPAIR_REQUEST', 'expiresAt and nonce are required');
@@ -841,6 +866,7 @@ export class SpoolCommandService {
   }
 
   async runRepair(request, { repairApproval = null } = {}) {
+    this.#executionPolicy.assert('repair', request?.planInput);
     this.#open(); requireRequest(request); this.#requireCutoverOpen(request.migrationId);
     if (!repairApproval) fail('REPAIR_APPROVAL_REQUIRED', 'Repair execution requires a separately-authorized repair approval');
     const run = this.runs.get(request.migrationId);
@@ -1104,6 +1130,7 @@ export class SpoolCommandService {
   }
 
   async beginCutover(request, { receipt } = {}) {
+    this.#executionPolicy.assert('cutover', request?.planInput);
     this.#open(); requireRequest(request);
     if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) fail('INVALID_CUTOVER_REQUEST', 'Cutover arming requires the recorded migration or repair receipt');
     const run = this.runs.get(request.migrationId);
@@ -1167,6 +1194,7 @@ export class SpoolCommandService {
   }
 
   async commitCutover(request) {
+    this.#executionPolicy.assert('cutover', request?.planInput);
     this.#open(); requireRequest(request);
     const armed = this.runs.cutover(request.migrationId);
     if (!armed) fail('CUTOVER_NOT_ARMED', 'Cutover commit requires an armed cutover');
@@ -1281,6 +1309,7 @@ export class SpoolCommandService {
   }
 
   async abortCutover(migrationId, { reason } = {}) {
+    this.#executionPolicy.assert('cutover');
     this.#open();
     if (typeof migrationId !== 'string' || !migrationId) fail('INVALID_CUTOVER_REQUEST', 'migrationId is required');
     if (typeof reason !== 'string' || !reason.trim() || reason.length > 256) fail('INVALID_CUTOVER_REQUEST', 'abort reason must be a non-empty bounded string');
@@ -1306,8 +1335,8 @@ export class SpoolCommandService {
   migrationState(migrationId) { this.#open(); return this.#durableState(migrationId); }
   transitions(migrationId) { this.#open(); return this.runs.listTransitions(migrationId); }
   snapshotCdcBinding(migrationId) { this.#open(); return this.runs.getSnapshotCdcBinding(migrationId); }
-  async setSnapshotCdcBinding(migrationId, binding) { this.#open(); return this.runs.setSnapshotCdcBinding(migrationId, binding); }
-  async updateCdcProgress(migrationId, progress) { this.#open(); return this.runs.updateCdcProgress(migrationId, progress); }
+  async setSnapshotCdcBinding(migrationId, binding) { this.#executionPolicy.assert('cdc'); this.#open(); return this.runs.setSnapshotCdcBinding(migrationId, binding); }
+  async updateCdcProgress(migrationId, progress) { this.#executionPolicy.assert('cdc'); this.#open(); return this.runs.updateCdcProgress(migrationId, progress); }
 
   // Fresh-process restart helper: reconstructs state purely from durable records and decides recovery action
   restartDecision(migrationId) {

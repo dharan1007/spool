@@ -1,3 +1,4 @@
+import { markDisposableQualification } from '../../src/platform/disposable-qualification.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import mysql from 'mysql2/promise';
@@ -186,6 +187,7 @@ async function serviceFixture() {
   const sourcePath = join(sourceRoot, 'rows.csv');
   await writeFile(sourcePath, 'id,name\n1,Ada\n2,Lin\n3,Grace\n');
   const service = await SpoolCommandService.create({
+    qualification: await markDisposableQualification(dir),
     sourceRoot, targetRoot, snapshotDir: join(dir, 'snapshots'),
     statePath: join(targetRoot, 'spool-state.db'),
     approvalSigningKey: '0123456789abcdef0123456789abcdef',

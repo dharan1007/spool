@@ -5,6 +5,8 @@ import { join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
+import { markDisposableQualification } from '../src/platform/disposable-qualification.js';
+import { PRODUCTION_POLICY } from '../src/platform/production-policy.js';
 
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const RELEASE_SHA = process.env.SPOOL_COMMIT_SHA && /^[a-f0-9]{40}$/i.test(process.env.SPOOL_COMMIT_SHA)
@@ -31,6 +33,7 @@ function parseJson(text, label) {
 
 async function main() {
   const root = await mkdtemp(join(tmpdir(), 'spool-package-verify-'));
+  const qualification = await markDisposableQualification(root);
   try {
     const evidenceDestination = process.env.SPOOL_PACKAGE_EVIDENCE_DIR?.trim();
     const checkout = resolve('.');
@@ -71,13 +74,17 @@ async function main() {
     const approvalPath = join(root, 'approval.json');
     const resultPath = join(root, 'run-result.json');
     const receiptPath = join(root, 'receipt.json');
-    const common = ['--request', requestPath, '--source-root', sourceRoot, '--target-root', targetRoot, '--state', statePath];
+    const common = ['--request', requestPath, '--source-root', sourceRoot, '--target-root', targetRoot, '--state', statePath, '--qualification-root', qualification.root, '--qualification-run', qualification.runId];
     const env = {
       ...process.env,
       SPOOL_APPROVAL_KEY: APPROVAL_KEY,
       SPOOL_COMMIT_SHA: RELEASE_SHA,
-      SPOOL_RELEASE_VERSION: '1.0.0'
+      SPOOL_RELEASE_VERSION: JSON.parse(await readFile('package.json', 'utf8')).version
     };
+    const installedMatrix = join(prefix, 'node_modules', 'spool-webmcp', 'capabilities', 'matrix.json');
+    if (createHash('sha256').update(await readFile(installedMatrix)).digest('hex') !== PRODUCTION_POLICY.matrixSha256) throw new Error('Installed capability policy bytes differ from shipped pin');
+    const denial = spawnSync(spool, ['inspect', '--request', requestPath, '--source-root', sourceRoot, '--target-root', targetRoot, '--state', statePath], { env, encoding: 'utf8', shell: process.platform === 'win32' });
+    if (denial.status !== 1 || JSON.parse(denial.stderr).error?.code !== 'PRODUCTION_CAPABILITY_DENIED') throw new Error('Installed production CLI did not deny the unqualified target');
 
     const inspect = parseJson(run(spool, ['inspect', ...common], { env }).stdout, 'spool inspect').result;
     if (inspect.sourceRows !== 5 || inspect.targetPreflight?.status !== 'READY') throw new Error(`Installed inspect failed: ${JSON.stringify(inspect)}`);
@@ -97,6 +104,7 @@ async function main() {
       throw new Error(`Installed receipt counts changed: ${JSON.stringify(counts)}`);
     }
     if (receipt.record?.release?.commitSha !== RELEASE_SHA) throw new Error('Installed receipt is not bound to the expected release SHA');
+    if (receipt.record?.release?.version !== env.SPOOL_RELEASE_VERSION) throw new Error('Installed receipt version differs from the tested package');
 
     const verifyDb = new Database(targetPath, { readonly: true });
     const rowCount = Number(verifyDb.prepare('SELECT COUNT(*) AS count FROM customers').get().count);
@@ -104,9 +112,26 @@ async function main() {
     verifyDb.close();
     if (rowCount !== 3 || ledgerCount !== 3) throw new Error(`Installed target evidence changed: rows=${rowCount} ledger=${ledgerCount}`);
 
+    // Exercise the installed CLI with its actual packaged asset missing or
+    // changed; no alternate service implementation participates in this proof.
+    const matrixBytes = await readFile(installedMatrix);
+    const normalArgs = ['inspect', '--request', requestPath, '--source-root', sourceRoot, '--target-root', targetRoot, '--state', statePath];
+    try {
+      for (const replacement of ['{corrupt', matrixBytes.toString('utf8').replace('EXPERIMENTAL', 'PRODUCTION')]) {
+        await writeFile(installedMatrix, replacement);
+        const rejected = spawnSync(spool, normalArgs, { env, encoding: 'utf8', shell: process.platform === 'win32' });
+        if (rejected.status !== 1 || JSON.parse(rejected.stderr).error?.code !== 'POLICY_INTEGRITY_FAILED') throw new Error('Installed CLI accepted corrupt or changed capability policy');
+      }
+    } finally { await writeFile(installedMatrix, matrixBytes); }
+    await rm(installedMatrix);
+    try {
+      const missing = spawnSync(spool, normalArgs, { env, encoding: 'utf8', shell: process.platform === 'win32' });
+      if (missing.status !== 1 || JSON.parse(missing.stderr).error?.code !== 'POLICY_INTEGRITY_FAILED') throw new Error('Installed CLI accepted a missing capability policy');
+    } finally { await writeFile(installedMatrix, matrixBytes); }
+
     const retainedSha256 = createHash('sha256').update(await readFile(tarball)).digest('hex');
     if (retainedSha256 !== tarballSha256) throw new Error('Tested package tarball changed after installation');
-    process.stdout.write(`${JSON.stringify({ status: 'PASS', tarball: packInfo[0].filename, tarballPath: tarball, tarballSha256, retainedAfterVerification: Boolean(evidenceDestination), installedSameRetainedArtifact: Boolean(evidenceDestination), installedBinary: spool, sourceRows: 5, writtenRows: 3, rejectedRows: 2, ledgerEntries: 3, releaseCommit: RELEASE_SHA }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ status: 'PASS', executionMode: 'DISPOSABLE_QUALIFICATION_NOT_RELEASE_AUTHORIZED', productionDenial: 'PASS', packagedPolicySha256: PRODUCTION_POLICY.matrixSha256, tarball: packInfo[0].filename, tarballPath: tarball, tarballSha256, retainedAfterVerification: Boolean(evidenceDestination), installedSameRetainedArtifact: Boolean(evidenceDestination), installedBinary: spool, sourceRows: 5, writtenRows: 3, rejectedRows: 2, ledgerEntries: 3, releaseCommit: RELEASE_SHA }, null, 2)}\n`);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

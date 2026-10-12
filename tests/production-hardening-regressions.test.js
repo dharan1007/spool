@@ -1,3 +1,4 @@
+import { markDisposableQualification } from '../src/platform/disposable-qualification.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
@@ -135,6 +136,7 @@ test('local command service honors its configured source ceiling above the 50 Mi
   db.close();
 
   const service = await SpoolCommandService.create({
+    qualification: await markDisposableQualification(dir),
     sourceRoot,
     targetRoot,
     statePath: join(targetRoot, 'state.db'),

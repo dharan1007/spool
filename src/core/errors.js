@@ -1,4 +1,7 @@
 const CATALOG = Object.freeze({
+  PRODUCTION_CAPABILITY_DENIED: Object.freeze({ severity: 'security', retryable: false, nextActions: Object.freeze(['Use a release with independently qualified target evidence', 'Use marked disposable qualification only for synthetic engineering data']) }),
+  POLICY_INTEGRITY_FAILED: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Reinstall the exact verified release package', 'Do not bypass a missing or altered capability policy']) }),
+  QUALIFICATION_ROOT_INVALID: Object.freeze({ severity: 'security', retryable: false, nextActions: Object.freeze(['Use an explicitly marked disposable scratch root bound to this run', 'Keep source, target and state inside that root']) }),
   SOURCE_TOO_LARGE: Object.freeze({ severity: 'user_action', retryable: true, nextActions: Object.freeze(['Choose a smaller source', 'Use the local runner for larger bounded migrations']) }),
   STORAGE_CAPACITY_INSUFFICIENT: Object.freeze({ severity: 'user_action', retryable: true, nextActions: Object.freeze(['Free browser storage', 'Export or remove an old workspace', 'Use the local runner']) }),
   STORAGE_WRITE_FAILED: Object.freeze({ severity: 'environment', retryable: true, nextActions: Object.freeze(['Free browser storage and retry', 'Keep this tab open until the workspace is durable', 'Use the local runner if browser storage remains unavailable']) }),

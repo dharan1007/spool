@@ -1,3 +1,4 @@
+import { markDisposableQualification } from '../../src/platform/disposable-qualification.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
@@ -82,6 +83,7 @@ async function fixture() {
   const snapshotDir = join(dir, 'snapshots');
   await mkdir(sourceRoot); await mkdir(targetRoot);
   const options = {
+    qualification: await markDisposableQualification(dir),
     sourceRoot, targetRoot, snapshotDir, statePath: join(targetRoot, 'spool-state.db'),
     approvalSigningKey: '0123456789abcdef0123456789abcdef',
     release: { version: '1.2.0-test', commitSha: '1123456789abcdef0123456789abcdef01234567' }

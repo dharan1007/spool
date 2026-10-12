@@ -138,7 +138,7 @@ function benchmarks() {
 
 function localRunner() {
   return [
-    "<section class='redesign-page-hero redesign-product-hero'><div>", badge('LOCAL RUNNER · PRODUCTION TARGET WRITES'), "<h1>CSV → SQLite with explicit approval, recovery and proof.</h1><p>The Browser Studio prepares files. The Local Runner is the separate mutation path for an existing ordinary SQLite table on the customer-controlled machine, using bounded-memory streaming with a 256 MiB default source ceiling.</p>",
+    "<section class='redesign-page-hero redesign-product-hero'><div>", badge('LOCAL RUNNER · EXPERIMENTAL TARGET WRITES'), "<h1>CSV → SQLite with explicit approval, recovery and proof.</h1><p>The Browser Studio prepares files. The candidate Local Runner defaults to denying target execution until independent qualification passes. Marked disposable engineering runs exercise existing ordinary SQLite tables with bounded-memory streaming and a 256 MiB default source ceiling.</p>",
       buttonRow([external(REPO + '/releases/tag/' + RELEASE, 'Open ' + RELEASE + ' release →', 'redesign-button primary large'), route('/examples', 'See the verified CRM example', 'redesign-button secondary large')]), "</div>",
       "<aside class='redesign-runner-sequence'><span>1 · Snapshot source</span><span>2 · Inspect target</span><span>3 · Plan</span><span>4 · Dry-run</span><span>5 · target_write approval</span><span>6 · Execute with fencing</span><span>7 · Reconcile</span><strong>8 · Verify + receipt</strong></aside>",
     "</section>",

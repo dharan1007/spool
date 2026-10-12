@@ -10,7 +10,8 @@ function help() {
     name: 'spool',
     commands: COMMANDS,
     usage: 'spool <command> --request migration.json --source-root DIR --target-root DIR --state FILE [--approval FILE] [--expires ISO --nonce VALUE] [--out FILE]',
-    environment: ['SPOOL_APPROVAL_KEY (required, >=16 bytes)', 'SPOOL_COMMIT_SHA (optional when git checkout is available)', 'SPOOL_RELEASE_VERSION (optional)']
+    environment: ['SPOOL_APPROVAL_KEY (required, >=16 bytes)', 'SPOOL_COMMIT_SHA (optional when git checkout is available)', 'SPOOL_RELEASE_VERSION (optional)'],
+    qualification: 'Engineering only: --qualification-root DIR --qualification-run UUID; requires a preexisting marked disposable scratch root. No environment variable or request field enables this mode.'
   };
 }
 
@@ -94,6 +95,7 @@ async function main() {
   // machine-readable usage errors free from Node's experimental sqlite warning noise.
   const { SpoolCommandService } = await import('../daemon/command-service.js');
   const service = await SpoolCommandService.create({
+    qualification: flags['qualification-root'] || flags['qualification-run'] ? { allowExperimental: true, root: flags['qualification-root'], runId: flags['qualification-run'] } : null,
     sourceRoot: flags['source-root'],
     targetRoot: flags['target-root'],
     statePath: flags.state,
@@ -122,9 +124,9 @@ async function main() {
     }
     if (flags.out) {
       await writeFile(flags.out, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
-      process.stdout.write(`${JSON.stringify({ ok: true, out: flags.out })}\n`);
+      process.stdout.write(`${JSON.stringify({ ok: true, out: flags.out, executionMode: flags['qualification-root'] ? 'DISPOSABLE_QUALIFICATION_NOT_RELEASE_AUTHORIZED' : 'PRODUCTION' })}\n`);
     } else {
-      process.stdout.write(`${JSON.stringify({ ok: true, result }, null, 2)}\n`);
+      process.stdout.write(`${JSON.stringify({ ok: true, result, executionMode: flags['qualification-root'] ? 'DISPOSABLE_QUALIFICATION_NOT_RELEASE_AUTHORIZED' : 'PRODUCTION' }, null, 2)}\n`);
     }
   } finally { service.close(); }
 }

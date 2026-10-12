@@ -1,7 +1,17 @@
+import { markDisposableQualification } from '../src/platform/disposable-qualification.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createSpoolDaemon } from '../src/daemon/spoold.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+async function transportQualification(t) {
+  const root = await mkdtemp(join(tmpdir(), 'spool-transport-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return markDisposableQualification(root);
+}
 
 function request({ port, token, host = `127.0.0.1:${port}`, origin, body = {} }) {
   return new Promise((resolve, reject) => {
@@ -22,9 +32,9 @@ function request({ port, token, host = `127.0.0.1:${port}`, origin, body = {} })
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
 
-test('spoold requires bearer auth and rejects Host/Origin rebinding attempts', async () => {
+test('spoold requires bearer auth and rejects Host/Origin rebinding attempts', async t => {
   const service = { status: migrationId => ({ migrationId, status: 'COMPLETE' }) };
-  const daemon = createSpoolDaemon({ service, token: TOKEN, host: '127.0.0.1' });
+  const daemon = createSpoolDaemon({ service, token: TOKEN, host: '127.0.0.1', qualification: await transportQualification(t) });
   const address = await daemon.listen(0);
   try {
     assert.equal((await request({ port: address.port, body: { command: 'status', migrationId: 'm1' } })).status, 401);
@@ -36,10 +46,10 @@ test('spoold requires bearer auth and rejects Host/Origin rebinding attempts', a
   } finally { await daemon.close(); }
 });
 
-test('spoold converts unexpected internal failures to a stable non-sensitive envelope', async () => {
+test('spoold converts unexpected internal failures to a stable non-sensitive envelope', async t => {
   const secret = '/private/customer/secret.db';
   const service = { status: () => { throw new Error(`database exploded at ${secret}\nSTACK: internalImplementation`); } };
-  const daemon = createSpoolDaemon({ service, token: TOKEN, host: '127.0.0.1' });
+  const daemon = createSpoolDaemon({ service, token: TOKEN, host: '127.0.0.1', qualification: await transportQualification(t) });
   const address = await daemon.listen(0);
   try {
     const result = await request({ port: address.port, token: TOKEN, body: { command: 'status', migrationId: 'm1' } });
@@ -51,7 +61,7 @@ test('spoold converts unexpected internal failures to a stable non-sensitive env
   } finally { await daemon.close(); }
 });
 
-test('spoold routes repair and cutover commands to the service with caller options', async () => {
+test('spoold routes repair and cutover commands to the service with caller options', async t => {
   const seen = [];
   const service = new Proxy({}, {
     get: (target, method) => {
@@ -62,7 +72,7 @@ test('spoold routes repair and cutover commands to the service with caller optio
       };
     }
   });
-  const daemon = createSpoolDaemon({ service, token: TOKEN, host: '127.0.0.1' });
+  const daemon = createSpoolDaemon({ service, token: TOKEN, host: '127.0.0.1', qualification: await transportQualification(t) });
   const address = await daemon.listen(0);
   try {
     const cases = [
@@ -108,6 +118,7 @@ test('spoold drives cutover arming and commit against a real service', async () 
   db.exec('CREATE TABLE rows (id INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT;');
   db.close();
   const service = await SpoolCommandService.create({
+    qualification: await markDisposableQualification(dir),
     sourceRoot, targetRoot, snapshotDir: join(dir, 'snapshots'),
     statePath: join(targetRoot, 'spool-state.db'),
     approvalSigningKey: '0123456789abcdef0123456789abcdef',
