@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { generateKeyPairSync, createHash } from 'node:crypto';
 import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -59,4 +59,28 @@ test('candidate qualification binds the installed CLI to the exact retained pack
     await rm(evidence, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   }
+});
+
+test('candidate preflight rejects actual tracked-source drift and mismatched HEAD', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'spool-gate-source-'));
+  try {
+    const git = args => execFileSync('git', ['-c', 'core.hooksPath=', ...args], { cwd: root, encoding: 'utf8' }).trim();
+    git(['init', '--quiet']);
+    await writeFile(join(root, 'package.json'), '{"version":"1.1.1"}\n');
+    git(['add', 'package.json']);
+    git(['-c', 'user.name=Qualification test', '-c', 'user.email=qualification@example.invalid', 'commit', '--quiet', '-m', 'isolated qualification fixture']);
+    const sha = git(['rev-parse', 'HEAD']);
+    const moduleUrl = new URL('../scripts/qualify-bounded-release.js', import.meta.url).href;
+    const invoke = extra => spawnSync(process.execPath, ['--input-type=module', '-e', 'const {candidatePreflight}=await import(process.env.SPOOL_GATE_MODULE); console.log(JSON.stringify(candidatePreflight()));'], {
+      cwd: root, encoding: 'utf8', env: { ...process.env, SPOOL_GATE_MODULE: moduleUrl, SPOOL_COMMIT_SHA: sha, ...extra }
+    });
+    const clean = invoke({});
+    assert.equal(clean.status, 0, clean.stderr);
+    assert.equal(JSON.parse(clean.stdout).sha, sha);
+    assert.equal(invoke({ SPOOL_COMMIT_SHA: '0'.repeat(40) }).status, 1);
+    await writeFile(join(root, 'package.json'), '{"version":"changed"}\n');
+    const dirty = invoke({});
+    assert.equal(dirty.status, 1);
+    assert.match(dirty.stderr, /Tracked source changed/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -45,7 +45,8 @@ test('deployed release verifier checks actual artifact digests, not a commit-onl
   assert.match(verifier, /redirect: 'error'/);
   assert.match(verifier, /UNSAFE_ARTIFACT_PATH/);
   const gate = await readFile(new URL('../scripts/qualify-bounded-release.js', import.meta.url), 'utf8');
-  assert.match(gate, /require.*clean tracked source checkout/);
+  assert.match(gate, /assertCleanSource\(current\)/);
+  assert.match(gate, /Tracked source changed during candidate qualification/);
   assert.match(gate, /required_sqlite_skip_or_failure/);
   assert.match(gate, /NOT_EXECUTED/);
   assert.doesNotMatch(gate, /deploy --prod|gh release create|workflow_dispatch/);
