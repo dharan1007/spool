@@ -5,7 +5,13 @@ import { generateKeyPairSync, createHash } from 'node:crypto';
 import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { testCounters, validateSigningMaterial, assertInstalledPackageEvidence } from '../scripts/qualify-bounded-release.js';
+import { testCounters, validateSigningMaterial, assertInstalledPackageEvidence, qualificationPlan } from '../scripts/qualify-bounded-release.js';
+
+test('mandatory SQLite gate executes snapshot creation and privacy regressions without optional skips', () => {
+  const suite = qualificationPlan().commands.find(item => item.id === 'required_sqlite_suite');
+  assert.ok(suite.command.includes('tests/source-snapshot-streaming.test.js'));
+  assert.ok(suite.command.includes('tests/snapshot-permissions.test.js'));
+});
 
 test('qualification counters preserve real executed pass, failure and skip totals', async () => {
   const root = await mkdtemp(join(tmpdir(), 'spool-gate-counters-'));

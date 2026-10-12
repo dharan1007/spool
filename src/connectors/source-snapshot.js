@@ -1,8 +1,9 @@
-import { open, realpath, mkdir, rename, unlink, stat, chmod } from 'node:fs/promises';
+import { open, realpath, mkdir, rename, unlink, lstat } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fail } from '../core/errors.js';
 import { sha256Canonical } from '../platform/canonical-json.js';
+import { assertSnapshotParentsUnaliased, secureSnapshotPath, verifySnapshotPrivacy } from './snapshot-permissions.js';
 
 export const SOURCE_SNAPSHOT_ALGORITHM = 'spool-source-snapshot-v1';
 const COPY_CHUNK_BYTES = 64 * 1024;
@@ -120,7 +121,9 @@ export async function createDurableFileSnapshot(path, { snapshotDir, maxBytes } 
   validateMaxBytes(maxBytes);
 
   const resolvedPath = await realpath(path);
+  await assertSnapshotParentsUnaliased(snapshotDir);
   await mkdir(snapshotDir, { recursive: true, mode: 0o700 });
+  await secureSnapshotPath(snapshotDir, { directory: true });
   const tempPath = join(snapshotDir, `.snapshot-${process.pid}-${randomUUID()}.tmp`);
   const source = await open(resolvedPath, 'r');
   let destination = null;
@@ -132,6 +135,7 @@ export async function createDurableFileSnapshot(path, { snapshotDir, maxBytes } 
 
     destination = await open(tempPath, 'wx', 0o600);
     tempExists = true;
+    await secureSnapshotPath(tempPath);
     const digest = await hashHandle(source, { maxBytes, destination });
     await destination.sync();
     await destination.close();
@@ -146,7 +150,8 @@ export async function createDurableFileSnapshot(path, { snapshotDir, maxBytes } 
     const snapshotPath = durableSnapshotPath(snapshotDir, snapshot.snapshotId);
     let reused = false;
     try {
-      const existing = await stat(snapshotPath);
+      const existing = await lstat(snapshotPath);
+      await verifySnapshotPrivacy(snapshotPath);
       if (existing.isFile() && await snapshotFileMatches(snapshotPath, snapshot)) {
         reused = true;
         await unlink(tempPath);
@@ -161,7 +166,7 @@ export async function createDurableFileSnapshot(path, { snapshotDir, maxBytes } 
       await rename(tempPath, snapshotPath);
       tempExists = false;
     }
-    if (process.platform !== 'win32') await chmod(snapshotPath, 0o600);
+    await verifySnapshotPrivacy(snapshotPath);
     return Object.freeze({ snapshot, snapshotPath, reused });
   } finally {
     if (destination) await destination.close().catch(() => {});
@@ -176,7 +181,11 @@ export async function loadDurableFileSnapshot(originalPath, { snapshotDir, snaps
   validateMaxBytes(maxBytes);
   const snapshotPath = durableSnapshotPath(snapshotDir, snapshotId);
   let result;
-  try { result = await hashFile(snapshotPath, { maxBytes }); }
+  try {
+    await verifySnapshotPrivacy(snapshotDir, { directory: true });
+    await verifySnapshotPrivacy(snapshotPath);
+    result = await hashFile(snapshotPath, { maxBytes });
+  }
   catch (error) {
     if (error?.code === 'ENOENT') fail('SOURCE_SNAPSHOT_NOT_AVAILABLE', 'Approved durable source snapshot is not available for recovery');
     throw error;
