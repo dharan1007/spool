@@ -584,8 +584,8 @@ async function loadFile(file) {
     await new Promise(resolve => window.requestAnimationFrame(() => setTimeout(resolve, 0)));
     let text;
     if (isXlsx) {
-      const { xlsxFileToCsv } = await import('./xlsx-ingest.js');
-      const converted = await xlsxFileToCsv(file);
+      const { xlsxFileToCsvInWorker } = await import('./xlsx-worker-client.js');
+      const converted = await xlsxFileToCsvInWorker(file);
       text = converted.csv;
     } else text = await file.text();
     await kernel.loadSourceText(text, file.name);
