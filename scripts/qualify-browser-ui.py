@@ -78,6 +78,7 @@ class ProcessSampler:
         self.heap_cdp = None
         self.max_frame_gap_ms = 0
         self.max_response_ms = 0
+        self.max_bootstrap_response_ms = 0
         self.records = []
         self.measurement_errors = []
         self.thread = threading.Thread(target=self.sample, daemon=True)
@@ -95,10 +96,19 @@ class ProcessSampler:
                 self.peak_rss = max(self.peak_rss, rss)
                 self.samples += 1
                 if self.heap_cdp:
+                    before_url = self.heap_cdp.eval('location.href')
                     started = time.monotonic()
                     fields = {x['name']: x['value'] for x in self.heap_cdp.call('Performance.getMetrics').get('metrics', [])}
-                    frames = self.heap_cdp.eval('window.__qualifierFrames || null')
-                    self.max_response_ms = max(self.max_response_ms, (time.monotonic() - started) * 1000)
+                    observation = self.heap_cdp.eval('({url:location.href,frames:window.__qualifierFrames || null})')
+                    frames = observation['frames']
+                    response_ms = (time.monotonic() - started) * 1000
+                    # Attribute initial about:blank/CDP startup separately. Never
+                    # exclude SPOOL navigation, bootstrap, reload or recovery.
+                    applicable = any(url.startswith('http://127.0.0.1:8876/') for url in (before_url, observation['url']))
+                    if applicable:
+                        self.max_response_ms = max(self.max_response_ms, response_ms)
+                    else:
+                        self.max_bootstrap_response_ms = max(self.max_bootstrap_response_ms, response_ms)
                     if frames:
                         self.max_frame_gap_ms = max(self.max_frame_gap_ms, frames['maxGapMs'])
                     heap = fields.get('JSHeapUsedSize', 0)
@@ -106,7 +116,9 @@ class ProcessSampler:
                         self.heap_peak = max(self.heap_peak, int(heap))
                         self.heap_samples += 1
                         self.records.append({'monotonicSeconds': time.monotonic(), 'treeRssBytes': rss, 'mainPageHeapBytes': int(heap),
-                                             'maxFrameGapMs': self.max_frame_gap_ms, 'maxCdpResponseMs': self.max_response_ms})
+                                             'maxFrameGapMs': self.max_frame_gap_ms, 'maxCdpResponseMs': self.max_response_ms,
+                                             'responseMs': response_ms, 'urlBefore': before_url, 'urlAfter': observation['url'],
+                                             'applicationInteraction': applicable, 'bootstrapMaxResponseMs': self.max_bootstrap_response_ms})
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
             except Exception as measurement_error:
@@ -599,6 +611,7 @@ def main():
         measurements['mainPageHeapSamples'] = sampler.heap_samples
         measurements['maxAnimationFrameGapMs'] = round(sampler.max_frame_gap_ms, 2)
         measurements['maxMainPageCdpResponseMs'] = round(sampler.max_response_ms, 2)
+        measurements['chromeBootstrapMaxCdpResponseMs'] = round(sampler.max_bootstrap_response_ms, 2)
         require(sampler.heap_samples > 0, 'Continuous Chrome heap sampler did not execute')
         require(not sampler.measurement_errors, 'Chrome resource measurement failed: ' + repr(sampler.measurement_errors[:2]))
         require(measurements["chromePeakTreeRssBytes"] <
@@ -630,7 +643,8 @@ def main():
         if sampler:
             measurements.update({'chromePeakTreeRssBytes': sampler.peak_rss, 'chromeRssSamples': sampler.samples,
                                  'observedPeakMainPageHeapBytes': sampler.heap_peak, 'mainPageHeapSamples': sampler.heap_samples,
-                                 'maxAnimationFrameGapMs': sampler.max_frame_gap_ms, 'maxMainPageCdpResponseMs': sampler.max_response_ms})
+                                 'maxAnimationFrameGapMs': sampler.max_frame_gap_ms, 'maxMainPageCdpResponseMs': sampler.max_response_ms,
+                                 'chromeBootstrapMaxCdpResponseMs': sampler.max_bootstrap_response_ms})
             (evidence / 'resource-samples.json').write_text(json.dumps(sampler.records), encoding='utf8')
             if sampler.heap_cdp:
                 sampler.heap_cdp.close()
