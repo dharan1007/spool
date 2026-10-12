@@ -589,8 +589,8 @@ async function upload(file) {
     let meta;
     if (xlsx) {
       setNotice('neutral', 'Reading workbook locally', 'Opening the first visible worksheet. Formulas are not executed.');
-      const module = await import('./xlsx-ingest.js');
-      const converted = await module.xlsxFileToCsv(file);
+      const module = await import('./xlsx-worker-client.js');
+      const converted = await module.xlsxFileToCsvInWorker(file);
       text = converted.csv;
       meta = { format: 'XLSX', originalName: file.name, originalBytes: file.size, worksheet: converted.sheetName,
         worksheetCount: converted.sheetNames.length, warnings: converted.warnings, loadedAt: new Date().toISOString() };
