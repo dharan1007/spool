@@ -66,7 +66,7 @@ function artifactRootSha256(artifacts) {
 
 // Vercel can deploy without GitHub Actions quota. Enforce the browser
 // recovery regression and syntax gate inside the build itself.
-for (const path of ['src/app.js', 'src/studio-flow.js', 'src/site-content.js', 'src/site-redesign.js', 'src/product-surface.js', 'src/xlsx-ingest.js', 'src/zip-reader.js', 'src/core/command-kernel.js', 'src/core/migration.js', 'src/storage/indexeddb.js']) {
+for (const path of ['src/app.js', 'src/studio-flow.js', 'src/site-content.js', 'src/site-redesign.js', 'src/product-surface.js', 'src/xlsx-ingest.js', 'src/zip-reader.js', 'src/core/command-kernel.js', 'src/core/migration.js', 'src/storage/indexeddb.js', 'src/xlsx-worker-client.js', 'src/worker/xlsx-import.worker.js']) {
   execFileSync(process.execPath, ['--check', path], { stdio: 'inherit' });
 }
 execFileSync(process.execPath, ['--test',
@@ -75,6 +75,7 @@ execFileSync(process.execPath, ['--test',
   'tests/ui-contract.test.js',
   'tests/studio-workflow.test.js',
   'tests/xlsx-adversarial.test.js',
+  'tests/xlsx-worker-client.test.js',
   'tests/site-redesign.test.js'
 ], { stdio: 'inherit' });
 
