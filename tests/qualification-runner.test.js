@@ -5,7 +5,7 @@ import { generateKeyPairSync, createHash } from 'node:crypto';
 import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { testCounters, validateSigningMaterial, assertInstalledPackageEvidence, qualificationPlan } from '../scripts/qualify-bounded-release.js';
+import { assertPassingTestCounters, testCounters, validateSigningMaterial, assertInstalledPackageEvidence, qualificationPlan } from '../scripts/qualify-bounded-release.js';
 
 test('mandatory SQLite gate executes snapshot creation and privacy regressions without optional skips', () => {
   const suite = qualificationPlan().commands.find(item => item.id === 'required_sqlite_suite');
@@ -89,4 +89,24 @@ test('candidate preflight rejects actual tracked-source drift and mismatched HEA
     assert.equal(dirty.status, 1);
     assert.match(dirty.stderr, /Tracked source changed/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test('native qualification installs locked dependencies before auditing or executing suites', () => {
+  const first = qualificationPlan().commands[0];
+  assert.equal(first.id, 'dependency_install');
+  assert.deepEqual(first.command, ['npm', 'ci']);
+});
+
+test('qualification rejects cancelled, TODO, absent and inconsistent execution totals', () => {
+  const passing = { tests: 2, pass: 2, fail: 0, skipped: 0, cancelled: 0, todo: 0 };
+  assert.equal(assertPassingTestCounters(passing), true);
+  for (const counters of [null, { tests: 1, fail: 0 },
+    { ...passing, tests: 3 }, { ...passing, pass: 1, cancelled: 1 },
+    { ...passing, pass: 1, todo: 1 }, { ...passing, pass: 1, skipped: 1 },
+    { ...passing, pass: 1, fail: 1 }]) {
+    assert.throws(() => assertPassingTestCounters(counters), /counters/);
+  }
+  assert.equal(assertPassingTestCounters({ ...passing, pass: 1, skipped: 1 }, { allowSkips: true }), true);
+  assert.throws(() => assertPassingTestCounters({ ...passing, pass: 1, cancelled: 1 }, { allowSkips: true }), /counters/);
 });

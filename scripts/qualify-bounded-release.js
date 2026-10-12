@@ -25,6 +25,7 @@ const REQUIRED_REAL_SURFACES = Object.freeze([
   { id: 'production_denial', command: ['node', '--test', '--test-reporter=tap', 'tests/production-connector-policy.test.js'], source: 'tests/production-connector-policy.test.js' }
 ]);
 const CHECKS = Object.freeze([
+  { id: 'dependency_install', command: ['npm', 'ci'] },
   { id: 'full_suite', command: ['npm', 'test'] },
   { id: 'required_sqlite_suite', command: ['node', '--test', '--test-reporter=tap', '--test-concurrency=1',
     'tests/sqlite-target.test.js', 'tests/sqlite-preflight.test.js', 'tests/conformance/sqlite-conformance.test.js',
@@ -53,6 +54,17 @@ export function testCounters(output) {
     parsed[key] = Number(value);
   }
   return Object.keys(parsed).length ? parsed : null;
+}
+
+export function assertPassingTestCounters(counters, { allowSkips = false } = {}) {
+  const keys = ['tests', 'pass', 'fail', 'skipped', 'cancelled', 'todo'];
+  if (!counters || keys.some(key => !Number.isSafeInteger(counters[key]) || counters[key] < 0) ||
+      counters.tests < 1 || counters.pass < 1 || counters.fail !== 0 ||
+      counters.cancelled !== 0 || counters.todo !== 0 || (!allowSkips && counters.skipped !== 0) ||
+      counters.tests !== counters.pass + counters.fail + counters.skipped + counters.cancelled + counters.todo) {
+    throw new Error('Executed test counters are incomplete, inconsistent or contain required failures/skips');
+  }
+  return true;
 }
 
 export function validateSigningMaterial(privateKey, publicKeyPath) {
@@ -99,9 +111,10 @@ function runCheck(check, root) {
   writeFileSync(log, output, 'utf8');
   const counters = testCounters(output);
   let reason = result.error ? result.error.message : result.status !== 0 ? 'nonzero_exit' : null;
-  if (check.id === 'full_suite' && (!counters || counters.fail !== 0 || counters.tests === 0)) reason ||= 'suite_counts_missing_or_failed';
-  if (check.id === 'required_sqlite_suite' &&
-      (!counters || counters.fail !== 0 || counters.skipped !== 0 || counters.tests === 0)) reason ||= 'required_sqlite_skip_or_failure';
+  if (['full_suite', 'required_sqlite_suite', 'production_denial'].includes(check.id)) {
+    try { assertPassingTestCounters(counters, { allowSkips: check.id === 'full_suite' }); }
+    catch (error) { reason ||= (check.id === 'required_sqlite_suite' ? 'required_sqlite_skip_or_failure' : 'invalid_execution_counts') + ': ' + error.message; }
+  }
   // Qualifying a drifting source tree invalidates the exact-source evidence chain.
   try { assertCleanSource(root.sha); }
   catch (error) { reason ||= 'source_drift: ' + error.message; }
@@ -190,6 +203,10 @@ export function qualify() {
     return report;
   }
   try {
+    const installation = runCheck(CHECKS[0], root);
+    entries.push(installation);
+    persist();
+    if (installation.status !== 'PASS') throw new Error('Pinned dependency installation failed; see installation log');
     const audit = runCheck({
       id: 'security_audit', command: ['npm', 'audit', '--omit=dev', '--audit-level=high', '--json']
     }, root);
@@ -197,7 +214,7 @@ export function qualify() {
     persist();
     if (audit.status !== 'PASS') throw new Error('High/critical dependency audit failed; see audit log');
 
-    for (const check of CHECKS) {
+    for (const check of CHECKS.slice(1)) {
       const item = runCheck(check, root);
       entries.push(item);
       persist();
