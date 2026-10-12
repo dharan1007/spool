@@ -460,7 +460,17 @@ export class SpoolCommandService {
         try { this.#durableTransition(request.migrationId, st, { principal: request.principal, reason: `run prepare -> ${st}`, planId, sourceStateId, targetContractId }); } catch (e) { if (!['ILLEGAL_STATE_TRANSITION'].includes(e?.code)) throw e; }
       }
       // AWAITING_APPROVAL -> APPROVED with approval precondition
-      this.#durableTransition(request.migrationId, MIGRATION_STATES.APPROVED, {
+      const preparedState = this.#durableState(request.migrationId);
+      const resumeStates = [MIGRATION_STATES.APPROVED, MIGRATION_STATES.SNAPSHOT_ARMED,
+        MIGRATION_STATES.SNAPSHOT_RUNNING, MIGRATION_STATES.FULL_LOAD_RUNNING, MIGRATION_STATES.VERIFYING];
+      if (resumeStates.includes(preparedState?.currentState)) {
+        // A process death preserves its durable stage. The approval was checked
+        // above; resumption must additionally preserve the original bindings.
+        if (preparedState.planId !== planId || preparedState.sourceStateId !== sourceStateId ||
+            preparedState.targetContractId !== targetContractId) {
+          fail('APPROVAL_BINDING_MISMATCH', 'Restart does not match durable plan/source/target bindings');
+        }
+      } else this.#durableTransition(request.migrationId, MIGRATION_STATES.APPROVED, {
         principal: request.principal,
         reason: 'approval verified',
         planId,

@@ -207,6 +207,15 @@ test('streamed execution reconciles a real commit-before-checkpoint fault withou
     assert.deepEqual(targetStats(f.targetPath), { rows: 5, ledgers: 1 });
     assert.equal(f.service.runs.checkpointStore(request.migrationId).load(), null);
 
+    // Real target commit above is retained while durable coordinator state
+    // remains where a killed process would leave it, rather than APPROVED.
+    const bound = { principal: request.principal, planId: prepared.plan.planId,
+      sourceStateId: prepared.approval.record.sourceSnapshotId,
+      targetContractId: prepared.inspected.targetContractId };
+    f.service.runs.transition(request.migrationId, { ...bound, nextState: 'FULL_LOAD_RUNNING' });
+    f.service.close();
+    f.service = await SpoolCommandService.create(f.options);
+
     const result = await f.service.run(request, { approval: prepared.approval });
     assert.equal(result.verification.status, 'VERIFIED');
     assert.deepEqual(result.receipt.record.counts, { sourceRows: 13, writtenRows: 12, rejectedRows: 1, filteredRows: 0 });

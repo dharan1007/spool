@@ -81,10 +81,11 @@ async function child(ctxPath, mode) {
   let heapPeak = process.memoryUsage().heapUsed;
   const timer = setInterval(() => { heapPeak = Math.max(heapPeak, process.memoryUsage().heapUsed); }, 100);
   const began = performance.now();
+  let newestFence = 0;
   try {
     const input = request(ctx, mode === 'sustain' ? 10000 : 2);
     const approval = JSON.parse(await readFile(ctx.approval, 'utf8'));
-    if (mode.startsWith('kill_')) {
+    if (mode.startsWith('kill_') || mode === 'restart') {
       const registry = service.targetConnectors;
       const registration = registry.registrations.get('target:sqlite');
       registry.registrations.set('target:sqlite', { ...registration, factory: async args => {
@@ -93,10 +94,26 @@ async function child(ctxPath, mode) {
         runtime.createExecution = async args2 => {
           const execution = await create(args2);
           execution.leaseTtlMs = 1000; // Explicit disposable fault configuration only.
+          const renew = execution.renewLease.bind(execution);
+          execution.renewLease = (...values) => {
+            const lease = renew(...values); newestFence = Math.max(newestFence, lease.fencingToken); return lease;
+          };
+          if (mode === 'kill_before_target_commit') {
+            const openTarget = execution.openTarget.bind(execution);
+            execution.openTarget = () => {
+              const target = openTarget();
+              target.commitBatch = async () => {
+                process.send({ barrier: mode, checkpoint: 0 });
+                await new Promise(() => {});
+              };
+              return target;
+            };
+          }
           return execution;
         };
         return runtime;
       } });
+      if (mode === 'kill_before_checkpoint' || mode === 'kill_after_checkpoint') {
       const original = service.runs.checkpointStore.bind(service.runs);
       service.runs.checkpointStore = id => {
         const store = original(id);
@@ -106,6 +123,7 @@ async function child(ctxPath, mode) {
           await new Promise(() => {}); // Parent forcibly terminates this exact child.
         } };
       };
+      }
     }
     const result = await service.run(input, { approval });
     check(result.status === 'COMPLETE' && result.verification.status === 'VERIFIED', 'Run did not verify');
@@ -135,7 +153,7 @@ async function child(ctxPath, mode) {
     check((await service.run(input, { approval })).receipt.receiptId === result.receipt.receiptId, 'Idempotent retry changed terminal receipt');
     heapPeak = Math.max(heapPeak, process.memoryUsage().heapUsed);
     const usage = process.resourceUsage();
-    process.send({ done: true, assertions, counts, receiptId: result.receipt.receiptId,
+    process.send({ done: true, assertions, counts, receiptId: result.receipt.receiptId, newestFence,
       metrics: { wallMs: performance.now() - began, sampledNodeHeapPeakBytes: heapPeak, osReportedNodeMaxRssKiB: usage.maxRSS,
         userCpuMicroseconds: usage.userCPUTime, systemCpuMicroseconds: usage.systemCPUTime } });
   } finally { clearInterval(timer); service.close(); }
@@ -203,13 +221,13 @@ async function parent() {
     const large = await fixture('sustained_256mib', true, identity);
     report.entries.push({ case: 'exact_256mib', root: large.root, sourceSha256: large.sourceSha256, sourceBytes: (await stat(large.source)).size, execution: await launch(large, 'sustain', evidence) });
     await persist();
-    for (const mode of ['kill_before_checkpoint', 'kill_after_checkpoint']) {
+    for (const mode of ['kill_before_target_commit', 'kill_before_checkpoint', 'kill_after_checkpoint']) {
       const ctx = await fixture(mode, false, identity);
       const killed = await launch(ctx, mode, evidence);
       const db = new Database(ctx.target, { readonly: true });
       const lease = db.prepare('SELECT expires_at_ms,fencing_token FROM spool_execution_leases').get();
-      check(db.prepare('SELECT count(*) AS n FROM rows').get().n === 2, 'Killed child target commit was not exactly two rows');
-      check(db.prepare('SELECT count(*) AS n FROM __spool_batch_ledger').get().n === 1, 'Killed child did not atomically commit its ledger');
+      check(db.prepare('SELECT count(*) AS n FROM rows').get().n === (mode === 'kill_before_target_commit' ? 0 : 2), 'Killed child target commit cardinality differs from barrier');
+      check(db.prepare('SELECT count(*) AS n FROM __spool_batch_ledger').get().n === (mode === 'kill_before_target_commit' ? 0 : 1), 'Killed child did not atomically commit its ledger');
       db.close();
       const state = new Database(ctx.state, { readonly: true });
       const row = state.prepare('SELECT checkpoint_json FROM spool_checkpoints WHERE migration_id=?').get(ctx.id);
@@ -217,9 +235,7 @@ async function parent() {
       state.close();
       while (Date.now() <= lease.expires_at_ms) await new Promise(resolve => setTimeout(resolve, 100));
       const resumed = await launch(ctx, 'restart', evidence);
-      const final = new Database(ctx.target, { readonly: true });
-      check(final.prepare('SELECT fencing_token FROM spool_execution_leases').get().fencing_token > lease.fencing_token, 'Restart did not take over with a newer fence');
-      final.close();
+      check(resumed.proof.newestFence > lease.fencing_token, 'Restart did not take over with a newer fence');
       report.entries.push({ case: mode, root: ctx.root, killed, resumed }); await persist();
     }
     // These measured verticals do not yet cover the entire mandatory fault
