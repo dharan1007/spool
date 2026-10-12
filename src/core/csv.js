@@ -16,13 +16,13 @@ export function parseCsv(text, options = {}) {
   if (inputBytes > maxInputBytes) fail('SOURCE_TOO_LARGE', `CSV exceeds ${maxInputBytes} byte input limit`, { bytes: inputBytes, limit: maxInputBytes });
   const rows = [];
   let row = [];
-  let cell = '';
+  let cell = [];
   let quoted = false;
   let i = 0;
   const pushCell = () => {
     if (cell.length > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
-    row.push(cell);
-    cell = '';
+    row.push(cell.join(''));
+    cell = [];
     if (row.length > maxColumns) fail('TOO_MANY_COLUMNS', `CSV exceeds ${maxColumns} columns`);
   };
   const pushRow = () => {
@@ -36,10 +36,14 @@ export function parseCsv(text, options = {}) {
     const ch = text[i];
     if (quoted) {
       if (ch === '"') {
-        if (text[i + 1] === '"') { cell += '"'; i += 2; continue; }
+        if (text[i + 1] === '"') {
+          cell.push('"');
+          if (cell.length > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
+          i += 2; continue;
+        }
         quoted = false; i += 1; continue;
       }
-      cell += ch;
+      cell.push(ch);
       if (cell.length > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
       i += 1;
       continue;
@@ -51,7 +55,7 @@ export function parseCsv(text, options = {}) {
       if (text[i + 1] === '\n') i += 1;
       pushRow(); i += 1; continue;
     }
-    cell += ch;
+    cell.push(ch);
     if (cell.length > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
     i += 1;
   }

@@ -26,6 +26,11 @@ test('CSV parser handles quoted commas, quotes, and CRLF', () => {
   assert.equal(parsed.rows[0].note, 'said "hello"');
 });
 
+test('escaped quotes cannot grow a browser CSV cell past its bound before EOF', () => {
+  assert.throws(() => parseCsv('name\n"' + '""'.repeat(10), { maxCellLength: 4 }), { code: 'CELL_TOO_LARGE' });
+  assert.equal(parseCsv('name\n"' + '""'.repeat(4) + '"', { maxCellLength: 4 }).rows[0].name, '"'.repeat(4));
+});
+
 test('schema inference distinguishes integer, number, boolean, date and string', () => {
   const schema = inferSchema([
     { a: '1', b: '1.25', c: 'true', d: '2026-09-04', e: 'x' },

@@ -44,7 +44,7 @@ async function* iterateCsv(path, options = {}) {
   let headers = null;
   let rowIndex = 0;
   let row = [];
-  let cell = '';
+  let cell = [];
   let quoted = false;
   let quotePending = false;
   let skipLfAfterCr = false;
@@ -52,8 +52,8 @@ async function* iterateCsv(path, options = {}) {
 
   const pushCell = () => {
     if (cell.length > limits.maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${limits.maxCellLength} characters`);
-    row.push(cell);
-    cell = '';
+    row.push(cell.join(''));
+    cell = [];
     if (row.length > limits.maxColumns) fail('TOO_MANY_COLUMNS', `CSV exceeds ${limits.maxColumns} columns`);
   };
 
@@ -102,7 +102,7 @@ async function* iterateCsv(path, options = {}) {
       if (quoted) {
         if (quotePending) {
           if (ch === '"') {
-            cell += '"';
+            cell.push('"');
             quotePending = false;
             if (cell.length > limits.maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${limits.maxCellLength} characters`);
             continue;
@@ -114,7 +114,7 @@ async function* iterateCsv(path, options = {}) {
           quotePending = true;
           continue;
         } else {
-          cell += ch;
+          cell.push(ch);
           if (cell.length > limits.maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${limits.maxCellLength} characters`);
           continue;
         }
@@ -137,7 +137,7 @@ async function* iterateCsv(path, options = {}) {
         skipLfAfterCr = true;
         continue;
       }
-      cell += ch;
+      cell.push(ch);
       if (cell.length > limits.maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${limits.maxCellLength} characters`);
     }
   };

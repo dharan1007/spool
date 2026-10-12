@@ -427,7 +427,8 @@ def main():
 
         # Explicit manual run and browser termination/reload prove checkpoint
         # recovery on the genuinely uploaded near-limit source.
-        open_ui(cdp, base, "/studio/transform")
+        click(cdp, '[data-flow-route="/studio/understand"]', '/studio/understand')
+        click(cdp, '[data-flow-route="/studio/transform"]', '/studio/transform')
         click(cdp, '[data-flow-outcome="clean_standardize"]')
         click(cdp, '[data-flow-action="approve-plan"]', "/studio/test")
         click(cdp, '[data-flow-action="run-preview"]')
