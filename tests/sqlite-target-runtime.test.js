@@ -93,6 +93,10 @@ test('runtime owns durable fencing, target opening, ledger evidence and cleanup'
     const preflight = runtime.preflight(normalized);
     const execution = runtime.createExecution({ migrationId: 'mig_runtime_001', targetRef: normalized.targetRef });
     const lease = execution.renewLease({ nowMs: 1_000 });
+    const before = execution.leaseStore.db.prepare('SELECT total_changes() AS n').get().n;
+    assert.equal(execution.renewLease({ nowMs: 1_001 }).fencingToken, lease.fencingToken);
+    assert.equal(execution.leaseStore.db.prepare('SELECT total_changes() AS n').get().n, before,
+      'a still-valid lease should be checked without rewriting durable state');
     const target = execution.openTarget();
 
     const committed = target.commitBatch({
@@ -112,6 +116,14 @@ test('runtime owns durable fencing, target opening, ledger evidence and cleanup'
     assert.equal(ledger.length, 1);
     assert.equal(ledger[0].migrationId, 'mig_runtime_001');
     assert.equal(ledger[0].targetTable, 'customers');
+
+    const renewed = execution.renewLease({ nowMs: 40_000 });
+    assert.ok(renewed.expiresAtMs > lease.expiresAtMs, 'lease must actually renew before expiry');
+    execution.leaseStore.release(renewed);
+    const replacement = execution.leaseStore.acquire({ resource: renewed.resource, owner: 'other-runner', ttlMs: 60_000, nowMs: 40_001 });
+    assert.ok(replacement.fencingToken > renewed.fencingToken);
+    assert.throws(() => execution.renewLease({ nowMs: 40_002 }), /STALE_FENCE/,
+      'cached lease must still consult the actual durable fence');
 
     execution.close();
     assert.equal(execution.close(), undefined);

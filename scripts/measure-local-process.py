@@ -21,7 +21,7 @@ while not stop.exists() and psutil.pid_exists(pid):
             try:
                 rss += proc.memory_info().rss
                 cpu = proc.cpu_times()
-                cpu_by_pid[proc.pid] = cpu.user + cpu.system
+                cpu_by_pid[(proc.pid, proc.create_time())] = cpu.user + cpu.system
             except psutil.NoSuchProcess:
                 pass
         roots = json.loads(roots_file.read_text(encoding='utf-8'))

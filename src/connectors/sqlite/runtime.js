@@ -73,6 +73,13 @@ class SqliteTargetExecution {
 
   renewLease({ nowMs = Date.now() } = {}) {
     this.#assertOpen();
+    if (this.lease && this.lease.expiresAtMs - nowMs > this.leaseTtlMs / 2) {
+      // Validate the durable token on every batch, but avoid an extra fsync
+      // while more than half its TTL remains. The target also validates inside
+      // its write transaction; cached state never authorizes a stale write.
+      this.leaseStore.assertFence({ resource: this.leaseResource, fencingToken: this.lease.fencingToken, nowMs });
+      return this.lease;
+    }
     this.lease = this.leaseStore.acquire({ resource: this.leaseResource, owner: this.leaseOwner, ttlMs: this.leaseTtlMs, nowMs });
     return this.lease;
   }
