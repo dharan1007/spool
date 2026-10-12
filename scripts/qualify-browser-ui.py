@@ -278,6 +278,23 @@ def main():
             cdp.call(domain + ".enable")
         base = "http://127.0.0.1:8876"
         open_ui(cdp, base)
+        # Enforce the shipped privacy boundary against an actual blocked fetch.
+        meta = cdp.eval('document.querySelector("meta[http-equiv=Content-Security-Policy]")?.content || ""')
+        require("connect-src 'none'" in meta, "built Studio CSP lacks network prohibition")
+        require(cdp.eval('fetch("https://example.com/spool-qualifier").then(()=>false,()=>true)') is True,
+                "real browser permitted cross-origin data connection under CSP")
+
+        # Force a real IndexedDB write rejection from a file-input action.
+        # This is an injected storage fault, not a claim that disk quota is measured.
+        cdp.eval('window.__originalPut = IDBObjectStore.prototype.put; IDBObjectStore.prototype.put = function(){throw new DOMException("Storage capacity exhausted","QuotaExceededError")}')
+        upload(cdp, small_csv, should_reject=True)
+        require(cdp.eval('window.__spoolTest.state().job.phase') != "COMPLETE",
+                "IndexedDB quota failure created false COMPLETE")
+        cdp.call("Page.reload", {"ignoreCache": True})
+        ui_wait(cdp, 'Boolean(window.__spoolTest) && Boolean(document.querySelector("[data-spool-flow-root]"))',
+                "kernel reload after storage write fault")
+        require(cdp.eval('window.__spoolTest.state().job.phase') != "COMPLETE",
+                "reload exposed false success after failed IndexedDB write")
 
         upload(cdp, xlsx, expected_rows=2)
         require("People" in cdp.eval("document.body.innerText") or
@@ -323,6 +340,34 @@ def main():
         measurements["xlsxBytes"] = large_xlsx.stat().st_size
         measurements["xlsxRows"] = cdp.eval("window.__spoolTest.state().source.rows.length")
         measurements["heapAfterXlsxBytes"] = chrome_heap_bytes(cdp)
+
+        # Explicit manual run and browser termination/reload prove checkpoint
+        # recovery on the genuinely uploaded near-limit source.
+        open_ui(cdp, base, "/studio/transform")
+        click(cdp, '[data-flow-outcome="clean_standardize"]')
+        click(cdp, '[data-flow-action="approve-plan"]', "/studio/test")
+        click(cdp, '[data-flow-action="run-preview"]')
+        ui_wait(cdp, 'document.body.innerText.includes("TEST OUTPUT") || document.body.innerText.includes("Transformed sample")',
+                "large-workload noncommitting preview", timeout=95)
+        click(cdp, '[data-flow-route="/studio/process"]', "/studio/process")
+        click(cdp, '[data-flow-action="start-process"]')
+        ui_wait(cdp, 'window.__spoolTest.state().job.phase === "RUNNING" && window.__spoolTest.state().job.checkpoint > 0',
+                "large-worker active durable checkpoint", timeout=120)
+        measurements["checkpointBeforeForcedReload"] = cdp.eval('window.__spoolTest.state().job.checkpoint')
+        cdp.call("Page.reload", {"ignoreCache": True})
+        ui_wait(cdp, 'Boolean(window.__spoolTest) && window.__spoolTest.state().job.phase === "PAUSED_RECOVERED"',
+                "manual Worker reload recovery", timeout=80)
+        require(cdp.eval('window.__spoolTest.state().job.checkpoint') >=
+                measurements["checkpointBeforeForcedReload"],
+                "forced browser refresh regressed acknowledged checkpoint")
+        click(cdp, '[data-flow-action="resume-process"]')
+        ui_wait(cdp, 'window.__spoolTest.state().job.phase === "COMPLETE"',
+                "replayed or resumed large-worker completion", timeout=420)
+        recovered = cdp.eval('window.__spoolTest.state().job')
+        require(recovered["processedRows"] == measurements["xlsxRows"] and
+                recovered["validRows"] + recovered["invalidRows"] == recovered["processedRows"],
+                "recovered Worker final rows differ from input or double-count")
+        measurements["recoveredRows"] = recovered["processedRows"]
 
         sampler.stop()
         measurements["chromePeakTreeRssBytes"] = sampler.peak_rss
