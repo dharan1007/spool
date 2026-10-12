@@ -122,9 +122,9 @@ def upload(cdp, file_path, expected_rows=None, should_reject=False, timeout=180)
         return
     ui_wait(cdp, 'location.pathname === "/studio/inspect"', "real file upload", timeout=timeout)
     if expected_rows is not None:
-        require(cdp.eval("window.__spoolTest.state().source.rows.length") == expected_rows,
+        require(cdp.eval("window.__spoolTest.viewState().source.rows.length") == expected_rows,
                 "real uploaded row count did not match source fixture")
-    require(cdp.eval("window.__spoolTest.state().job.phase") == "SOURCE_READY",
+    require(cdp.eval("window.__spoolTest.viewState().job.phase") == "SOURCE_READY",
             "file input failed to create SOURCE_READY workspace")
 
 
@@ -140,7 +140,7 @@ def workflow(cdp, expected_csv, download_dir):
             "dry run incorrectly mutated complete output")
     click(cdp, '[data-flow-route="/studio/process"]', "/studio/process")
     click(cdp, '[data-flow-action="start-process"]')
-    ui_wait(cdp, 'window.__spoolTest.state().job.phase === "COMPLETE"',
+    ui_wait(cdp, 'window.__spoolTest.viewState().job.phase === "COMPLETE"',
             "real Worker execution", timeout=95)
     state = cdp.eval("window.__spoolTest.state()")
     require(state["job"]["processedRows"] == 2 and state["job"]["validRows"] == 2
@@ -288,17 +288,17 @@ def main():
         # This is an injected storage fault, not a claim that disk quota is measured.
         cdp.eval('window.__originalPut = IDBObjectStore.prototype.put; IDBObjectStore.prototype.put = function(){throw new DOMException("Storage capacity exhausted","QuotaExceededError")}')
         upload(cdp, small_csv, should_reject=True)
-        require(cdp.eval('window.__spoolTest.state().job.phase') != "COMPLETE",
+        require(cdp.eval('window.__spoolTest.viewState().job.phase') != "COMPLETE",
                 "IndexedDB quota failure created false COMPLETE")
         cdp.call("Page.reload", {"ignoreCache": True})
         ui_wait(cdp, 'Boolean(window.__spoolTest) && Boolean(document.querySelector("[data-spool-flow-root]"))',
                 "kernel reload after storage write fault")
-        require(cdp.eval('window.__spoolTest.state().job.phase') != "COMPLETE",
+        require(cdp.eval('window.__spoolTest.viewState().job.phase') != "COMPLETE",
                 "reload exposed false success after failed IndexedDB write")
 
         upload(cdp, xlsx, expected_rows=2)
         require("People" in cdp.eval("document.body.innerText") or
-                cdp.eval("window.__spoolTest.state().source.rows.length") == 2,
+                cdp.eval("window.__spoolTest.viewState().source.rows.length") == 2,
                 "first visible XLSX sheet was not accepted")
         workflow(cdp, b"id,name\r\n1,Ada\r\n2,Lin", temp / "downloads")
 
@@ -306,7 +306,7 @@ def main():
         workflow(cdp, b"id,name\r\n1,Ada\r\n2,Lin", temp / "downloads")
 
         upload(cdp, malformed, should_reject=True)
-        require(cdp.eval('window.__spoolTest.state().job.phase') == "EMPTY",
+        require(cdp.eval('window.__spoolTest.viewState().job.phase') == "EMPTY",
                 "malformed workbook mutated empty workspace")
         oversized_csv = temp / "max.csv"
         size_start = time.monotonic()
@@ -318,13 +318,13 @@ def main():
         measurements["heapAfterCsvBytes"] = chrome_heap_bytes(cdp)
         open_ui(cdp, base)
         upload(cdp, oversized, should_reject=True)
-        require(cdp.eval('window.__spoolTest.state().job.phase') == "SOURCE_READY",
+        require(cdp.eval('window.__spoolTest.viewState().job.phase') == "SOURCE_READY",
                 "oversized file corrupted previously valid source")
         bomb = temp / "zip-bomb.xlsx"
         expansion_bomb(bomb)
         open_ui(cdp, base)
         upload(cdp, bomb, should_reject=True, timeout=240)
-        require(cdp.eval('window.__spoolTest.state().job.phase') == "SOURCE_READY",
+        require(cdp.eval('window.__spoolTest.viewState().job.phase') == "SOURCE_READY",
                 "expanded XLSX rejection destroyed the previously accepted source")
         measurements["heapAfterZipBombBytes"] = chrome_heap_bytes(cdp)
         measurements["maxInputBytes"] = MAX_INPUT
@@ -338,7 +338,7 @@ def main():
         upload(cdp, large_xlsx, timeout=300)
         measurements["xlsxImportSeconds"] = round(time.monotonic() - import_started, 2)
         measurements["xlsxBytes"] = large_xlsx.stat().st_size
-        measurements["xlsxRows"] = cdp.eval("window.__spoolTest.state().source.rows.length")
+        measurements["xlsxRows"] = cdp.eval("window.__spoolTest.viewState().source.rows.length")
         measurements["heapAfterXlsxBytes"] = chrome_heap_bytes(cdp)
 
         # Explicit manual run and browser termination/reload prove checkpoint
@@ -351,19 +351,19 @@ def main():
                 "large-workload noncommitting preview", timeout=95)
         click(cdp, '[data-flow-route="/studio/process"]', "/studio/process")
         click(cdp, '[data-flow-action="start-process"]')
-        ui_wait(cdp, 'window.__spoolTest.state().job.phase === "RUNNING" && window.__spoolTest.state().job.checkpoint > 0',
+        ui_wait(cdp, 'window.__spoolTest.viewState().job.phase === "RUNNING" && window.__spoolTest.viewState().job.checkpoint > 0',
                 "large-worker active durable checkpoint", timeout=120)
-        measurements["checkpointBeforeForcedReload"] = cdp.eval('window.__spoolTest.state().job.checkpoint')
+        measurements["checkpointBeforeForcedReload"] = cdp.eval('window.__spoolTest.viewState().job.checkpoint')
         cdp.call("Page.reload", {"ignoreCache": True})
-        ui_wait(cdp, 'Boolean(window.__spoolTest) && window.__spoolTest.state().job.phase === "PAUSED_RECOVERED"',
+        ui_wait(cdp, 'Boolean(window.__spoolTest) && window.__spoolTest.viewState().job.phase === "PAUSED_RECOVERED"',
                 "manual Worker reload recovery", timeout=80)
-        require(cdp.eval('window.__spoolTest.state().job.checkpoint') >=
+        require(cdp.eval('window.__spoolTest.viewState().job.checkpoint') >=
                 measurements["checkpointBeforeForcedReload"],
                 "forced browser refresh regressed acknowledged checkpoint")
         click(cdp, '[data-flow-action="resume-process"]')
-        ui_wait(cdp, 'window.__spoolTest.state().job.phase === "COMPLETE"',
+        ui_wait(cdp, 'window.__spoolTest.viewState().job.phase === "COMPLETE"',
                 "replayed or resumed large-worker completion", timeout=420)
-        recovered = cdp.eval('window.__spoolTest.state().job')
+        recovered = cdp.eval('window.__spoolTest.viewState().job')
         require(recovered["processedRows"] == measurements["xlsxRows"] and
                 recovered["validRows"] + recovered["invalidRows"] == recovered["processedRows"],
                 "recovered Worker final rows differ from input or double-count")
