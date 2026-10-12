@@ -87,8 +87,10 @@ async function windowsAcl(path, apply) {
 
 export async function secureSnapshotPath(path, { directory = false } = {}) {
   await assertSnapshotPathUnaliased(path, { directory });
-  if (process.platform === 'win32') await windowsAcl(path, true);
-  else await chmod(path, directory ? 0o700 : 0o600);
+  // The Windows program reads back and validates the actual DACL after applying
+  // it. Avoid launching a second PowerShell process for the same verification.
+  if (process.platform === 'win32') return windowsAcl(path, true);
+  await chmod(path, directory ? 0o700 : 0o600);
   await verifySnapshotPrivacy(path, { directory });
 }
 

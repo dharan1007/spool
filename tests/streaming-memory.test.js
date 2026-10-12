@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 
 const MAX_OLD_SPACE_MIB = 48;
 
-function runConstrainedHeap() {
+function runConstrainedHeap(signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [
       `--max-old-space-size=${MAX_OLD_SPACE_MIB}`,
@@ -12,7 +12,8 @@ function runConstrainedHeap() {
     ], {
       cwd: process.cwd(),
       env: { ...process.env, NODE_OPTIONS: '' },
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      signal
     });
     let stdout = '';
     let stderr = '';
@@ -25,8 +26,8 @@ function runConstrainedHeap() {
   });
 }
 
-test('Local Runner completes a >50 MiB CSV with V8 max-old-space constrained to 48 MiB', { timeout: 180_000 }, async () => {
-  const result = await runConstrainedHeap();
+test('Local Runner completes a >50 MiB CSV with V8 max-old-space constrained to 48 MiB', { timeout: 180_000 }, async t => {
+  const result = await runConstrainedHeap(t.signal);
   assert.equal(result.signal, null, `child terminated by ${result.signal}\n${result.stderr}`);
   assert.equal(result.code, 0, `constrained-heap child failed\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
   const match = result.stdout.match(/BOUNDED_MEMORY_OK (\{.*\})/);

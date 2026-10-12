@@ -146,14 +146,24 @@ def click(cdp, selector, route=None):
 
 def upload(cdp, file_path, expected_rows=None, should_reject=False, timeout=180):
     """Drive the real DOM file input via CDP; do not invoke loadCsv directly."""
-    info = cdp.call("DOM.getDocument")
-    node = cdp.call("DOM.querySelector", {
-        "nodeId": info["root"]["nodeId"], "selector": "#flow-file"
-    })["nodeId"]
+    for attempt in range(20):
+        info = cdp.call("DOM.getDocument")
+        node = cdp.call("DOM.querySelector", {
+            "nodeId": info["root"]["nodeId"], "selector": "#flow-file"
+        })["nodeId"]
+        if node > 0:
+            try:
+                cdp.call("DOM.setFileInputFiles", {
+                    "nodeId": node, "files": [str(file_path.resolve())]
+                })
+                break
+            except RuntimeError as selection_error:
+                if 'Could not find node with given id' not in str(selection_error):
+                    raise
+        if attempt == 19:
+            raise AssertionError('Studio file input did not stabilize for real file selection')
+        time.sleep(.1)
     require(node > 0, "Studio original-file input missing")
-    cdp.call("DOM.setFileInputFiles", {
-        "nodeId": node, "files": [str(file_path.resolve())]
-    })
     # DOM.setFileInputFiles dispatches a real file change through Chromium;
     # never send a second event, which could race and load the source twice.
     if should_reject:
