@@ -6,6 +6,7 @@ Requires Chrome/Chromium, websocket-client and psutil. See browser-smoke.py for
 the existing shared CDP protocol and browser discovery.
 """
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -18,10 +19,23 @@ import zipfile
 from pathlib import Path
 
 import psutil
-from browser_smoke import (
-    CDP, get_json, launch_browser_with_cdp, resolve_browser,
-    stop_process, wait_for, CDP_PORT,
-)
+
+# The existing CDP implementation is named browser-smoke.py (hyphenated).
+# Python cannot import that filename using an ordinary 'from browser_smoke'.
+# Load the existing, reviewed executable as a module without duplicating it.
+_smoke_path = Path(__file__).resolve().with_name("browser-smoke.py")
+_smoke_spec = importlib.util.spec_from_file_location("spool_browser_smoke", _smoke_path)
+if _smoke_spec is None or _smoke_spec.loader is None:
+    raise RuntimeError(f"Existing Chrome CDP helper unavailable: {_smoke_path}")
+_smoke = importlib.util.module_from_spec(_smoke_spec)
+_smoke_spec.loader.exec_module(_smoke)
+CDP = _smoke.CDP
+get_json = _smoke.get_json
+launch_browser_with_cdp = _smoke.launch_browser_with_cdp
+resolve_browser = _smoke.resolve_browser
+stop_process = _smoke.stop_process
+wait_for = _smoke.wait_for
+CDP_PORT = _smoke.CDP_PORT
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
@@ -242,6 +256,13 @@ def chrome_heap_bytes(cdp):
 def main():
     global assertions
     sha = source_sha()
+    # Test data, a temporary Chrome profile and generated XLSX workbooks share
+    # the OS temp volume. Do not quietly fall back to a nearly full C: drive.
+    scratch = Path(tempfile.gettempdir()).resolve()
+    require(scratch.is_dir(), "Windows qualification scratch volume is unavailable")
+    free = shutil.disk_usage(scratch).free
+    require(free >= 3 * 1024 ** 3,
+            f"Browser qualification requires >=3 GiB scratch free; {scratch} has only {free} bytes")
     require(DIST.is_dir() and (DIST / "release.json").is_file(), "built dist/release.json missing")
     release = json.loads((DIST / "release.json").read_text(encoding="utf8"))
     require(release.get("commit") == sha,
