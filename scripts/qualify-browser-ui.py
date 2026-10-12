@@ -264,16 +264,22 @@ REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 PACKAGE_REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
 
 
+def write_zip_part(z, name, raw):
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    z.writestr(info, raw, compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
+
+
 def package_metadata(z, sheets):
     overrides = ''.join('<Override PartName="/xl/worksheets/sheet' + str(number) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' for number in sheets)
-    z.writestr('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' + overrides + '</Types>')
-    z.writestr('_rels/.rels', '<Relationships xmlns="' + PACKAGE_REL_NS + '"><Relationship Id="rId1" Type="' + REL_NS + '/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+    write_zip_part(z, '[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' + overrides + '</Types>')
+    write_zip_part(z, '_rels/.rels', '<Relationships xmlns="' + PACKAGE_REL_NS + '"><Relationship Id="rId1" Type="' + REL_NS + '/officeDocument" Target="xl/workbook.xml"/></Relationships>')
 
 
 def simple_xlsx(path, hidden=False):
     workbook = ('<workbook xmlns="' + MAIN_NS + '" xmlns:r="' + REL_NS + '"><sheets>'
-        + ('<sheet name="Hidden" state="hidden" r:id="rId2"/>' if hidden else '')
-        + '<sheet name="People" r:id="rId1"/></sheets></workbook>')
+        + ('<sheet name="Hidden" sheetId="2" state="hidden" r:id="rId2"/>' if hidden else '')
+        + '<sheet name="People" sheetId="1" r:id="rId1"/></sheets></workbook>')
     sheet = ('<worksheet xmlns="' + MAIN_NS + '"><sheetData>'
         '<row r="1"><c r="A1" t="inlineStr"><is><t>id</t></is></c>'
         '<c r="B1" t="inlineStr"><is><t>name</t></is></c></row>'
@@ -284,14 +290,14 @@ def simple_xlsx(path, hidden=False):
         '</sheetData></worksheet>')
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=False) as z:
         package_metadata(z, [1, 2] if hidden else [1])
-        z.writestr("xl/workbook.xml", workbook)
-        z.writestr("xl/_rels/workbook.xml.rels", '<Relationships xmlns="' + PACKAGE_REL_NS + '">'
+        write_zip_part(z, "xl/workbook.xml", workbook)
+        write_zip_part(z, "xl/_rels/workbook.xml.rels", '<Relationships xmlns="' + PACKAGE_REL_NS + '">'
             '<Relationship Id="rId1" Type="' + REL_NS + '/worksheet" Target="worksheets/sheet1.xml"/>'
             + ('<Relationship Id="rId2" Type="' + REL_NS + '/worksheet" Target="worksheets/sheet2.xml"/>' if hidden else '') +
             '</Relationships>')
-        z.writestr("xl/worksheets/sheet1.xml", sheet)
+        write_zip_part(z, "xl/worksheets/sheet1.xml", sheet)
         if hidden:
-            z.writestr("xl/worksheets/sheet2.xml",
+            write_zip_part(z, "xl/worksheets/sheet2.xml",
                        '<worksheet xmlns="' + MAIN_NS + '"><sheetData><row r="1"><c t="inlineStr"><is><t>secret</t></is></c></row></sheetData></worksheet>')
 
 
@@ -318,14 +324,14 @@ def adversarial_ui_fixtures(temp, template):
             parts['xl/styles.xml'] = b'<styleSheet><cellXfs><xf numFmtId="14"/></cellXfs></styleSheet>'
         path = temp / (name + '.xlsx')
         with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED, allowZip64=False) as z:
-            for part, raw in parts.items(): z.writestr(part, raw)
+            for part, raw in parts.items(): write_zip_part(z, part, raw)
         fixtures.append((name, path))
     for name in ['wrong_crc', 'duplicate_zip_entry', 'actual_size_overrun']:
         path = temp / (name + '.xlsx')
         with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED, allowZip64=False) as z:
-            for part, raw in original.items(): z.writestr(part, raw)
-            if name == 'duplicate_zip_entry': z.writestr('xl/workbook.xml', original['xl/workbook.xml'])
-            if name == 'actual_size_overrun': z.writestr('large.xml', b'A' * (2 * MiB))
+            for part, raw in original.items(): write_zip_part(z, part, raw)
+            if name == 'duplicate_zip_entry': write_zip_part(z, 'xl/workbook.xml', original['xl/workbook.xml'])
+            if name == 'actual_size_overrun': write_zip_part(z, 'large.xml', b'A' * (2 * MiB))
         if name != 'duplicate_zip_entry':
             with zipfile.ZipFile(path) as z:
                 item = z.getinfo('large.xml' if name == 'actual_size_overrun' else 'xl/workbook.xml')
@@ -369,8 +375,8 @@ def csv_near_limit(path):
 
 def expansion_bomb(path):
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=False) as z:
-        z.writestr("xl/workbook.xml", '<workbook><sheets><sheet name="Data" r:id="rId1"/></sheets></workbook>')
-        z.writestr("xl/_rels/workbook.xml.rels",
+        write_zip_part(z, "xl/workbook.xml", '<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        write_zip_part(z, "xl/_rels/workbook.xml.rels",
                    '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>')
         with z.open("xl/worksheets/sheet1.xml", "w", force_zip64=False) as entry:
             block = b" " * MiB
@@ -482,7 +488,7 @@ def main():
             b'<c r="B2" t="inlineStr"><is><t>Ada</t></is></c>',
             b'<c r="B2" t="str"><f>CONCAT("WRONG","WRONG")</f><v>Ada</v></c>')
         with zipfile.ZipFile(cached, 'w', compression=zipfile.ZIP_DEFLATED, allowZip64=False) as z:
-            for name, raw in parts.items(): z.writestr(name, raw)
+            for name, raw in parts.items(): write_zip_part(z, name, raw)
         independent = openpyxl.load_workbook(cached, read_only=True, data_only=True)
         require(list(independent['People'].values)[1][1] == 'Ada', 'Independent reader disagrees with saved cached formula result')
         independent.close()
@@ -663,8 +669,8 @@ def build_large_xlsx(path):
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6,
                              allowZip64=False) as z:
             package_metadata(z, [1, 2])
-            z.writestr("xl/workbook.xml", '<workbook xmlns="' + MAIN_NS + '" xmlns:r="' + REL_NS + '"><sheets><sheet name="Archive" state="hidden" r:id="rId2"/><sheet name="Data" r:id="rId1"/></sheets></workbook>')
-            z.writestr("xl/_rels/workbook.xml.rels",
+            write_zip_part(z, "xl/workbook.xml", '<workbook xmlns="' + MAIN_NS + '" xmlns:r="' + REL_NS + '"><sheets><sheet name="Archive" sheetId="2" state="hidden" r:id="rId2"/><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>')
+            write_zip_part(z, "xl/_rels/workbook.xml.rels",
                        '<Relationships xmlns="' + PACKAGE_REL_NS + '"><Relationship Id="rId1" Type="' + REL_NS + '/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="' + REL_NS + '/worksheet" Target="worksheets/sheet2.xml"/></Relationships>')
             for sheet_number in [1, 2]:
               with z.open('xl/worksheets/sheet' + str(sheet_number) + '.xml', 'w') as stream:

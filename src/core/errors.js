@@ -1,4 +1,5 @@
 const CATALOG = Object.freeze({
+  SOURCE_LOAD_SUPERSEDED: Object.freeze({ severity: 'concurrency', retryable: true, nextActions: Object.freeze(['Wait for the newer selected file to finish loading', 'Review the source name and fingerprint before approving']) }),
   WORKSPACE_WRITE_PENDING: Object.freeze({ severity: 'concurrency', retryable: true, nextActions: Object.freeze(['Wait for the current workspace write to finish', 'Retry the action after the durable checkpoint updates']) }),
   SOURCE_SNAPSHOT_PRIVACY_FAILED: Object.freeze({ severity: 'security', retryable: false, nextActions: Object.freeze(['Use an owner-controlled snapshot directory on a filesystem supporting private permissions', 'Restore private snapshot permissions before recovery; do not bypass the privacy check']) }),
   PRODUCTION_CAPABILITY_DENIED: Object.freeze({ severity: 'security', retryable: false, nextActions: Object.freeze(['Use a release with independently qualified target evidence', 'Use marked disposable qualification only for synthetic engineering data']) }),
