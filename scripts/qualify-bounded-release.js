@@ -17,8 +17,10 @@ function assertCleanSource(sha) {
   if (git(['rev-parse', 'HEAD']).toLowerCase() !== sha) throw new Error('Source HEAD changed during candidate qualification');
   if (git(['status', '--porcelain', '--untracked-files=no'])) throw new Error('Tracked source changed during candidate qualification');
 }
+const browserPython = process.env.SPOOL_BROWSER_PYTHON?.trim() || (process.platform === 'win32' ? 'py' : 'python3');
+const browserArgs = process.platform === 'win32' && browserPython.toLowerCase() === 'py' ? ['-3'] : [];
 const REQUIRED_REAL_SURFACES = Object.freeze([
-  { id: 'browser_ui', command: ['python3', 'scripts/qualify-browser-ui.py'], source: 'scripts/qualify-browser-ui.py' },
+  { id: 'browser_ui', command: [browserPython, ...browserArgs, 'scripts/qualify-browser-ui.py'], source: 'scripts/qualify-browser-ui.py' },
   { id: 'sqlite_sustained', command: ['node', 'scripts/qualify-sqlite-production.js'], source: 'scripts/qualify-sqlite-production.js' },
   { id: 'production_denial', command: ['node', '--test', '--test-reporter=tap', 'tests/production-connector-policy.test.js'], source: 'tests/production-connector-policy.test.js' }
 ]);
