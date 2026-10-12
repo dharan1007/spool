@@ -16,9 +16,11 @@ if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'S
 $owner = [Security.Principal.WindowsIdentity]::GetCurrent().User
 $allowed = @($owner.Value, 'S-1-5-18', 'S-1-5-32-544') | Select-Object -Unique
 if ($env:SPOOL_SNAPSHOT_ACL_APPLY -eq '1') {
+  if ($item.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $owner.Value) { throw 'Snapshot path is not owned by the execution principal' }
   if ($item.PSIsContainer) { $acl = New-Object Security.AccessControl.DirectorySecurity }
   else { $acl = New-Object Security.AccessControl.FileSecurity }
-  $acl.SetOwner($owner)
+  # Change only the DACL. Re-setting an unchanged owner unnecessarily requires
+  # WRITE_OWNER, which removable NTFS volumes may not grant to the owner.
   $acl.SetAccessRuleProtection($true, $false)
   foreach ($value in $allowed) {
     $sid = New-Object Security.Principal.SecurityIdentifier($value)

@@ -122,11 +122,18 @@ def ui_wait(cdp, expr, label, timeout=35):
 
 
 def open_ui(cdp, base_url, route="/studio/original"):
+    cdp.eval('window.__qualifierNavigationMarker = true')
     cdp.call("Page.navigate", {"url": base_url + route})
-    ui_wait(cdp, 'document.readyState === "complete"', "page ready")
+    ui_wait(cdp, 'typeof window.__qualifierNavigationMarker === "undefined" && document.readyState === "complete"', "new page ready")
     ui_wait(cdp, 'Boolean(window.__spoolTest) && Boolean(document.querySelector("[data-spool-flow-root]"))',
             "Studio document and kernel")
     require(cdp.eval("location.pathname") == route, "wrong Studio route")
+
+
+def reload_ui(cdp):
+    cdp.eval('window.__qualifierNavigationMarker = true')
+    cdp.call('Page.reload', {'ignoreCache': True})
+    ui_wait(cdp, 'typeof window.__qualifierNavigationMarker === "undefined" && document.readyState === "complete" && Boolean(window.__spoolTest)', 'new document after reload')
 
 
 def click(cdp, selector, route=None):
@@ -215,7 +222,7 @@ def workflow(cdp, expected_csv, download_dir):
                     [str(row.get("id")) for row in rows] == ["1", "2"] and
                     [row.get("name") for row in rows] == ["Ada", "Lin"],
                     "actual downloaded JSON records are incorrect")
-    cdp.call("Page.reload", {"ignoreCache": True})
+    reload_ui(cdp)
     ui_wait(cdp, 'Boolean(window.__spoolTest) && window.__spoolTest.state().job.phase === "COMPLETE"',
             "durable IndexedDB reload restoration")
     require(cdp.eval('location.pathname') == "/studio/validate", "reload lost the seven-stage route")
@@ -347,7 +354,7 @@ def main():
         upload(cdp, small_csv, should_reject=True)
         require(cdp.eval('window.__spoolTest.viewState().job.phase') != "COMPLETE",
                 "IndexedDB quota failure created false COMPLETE")
-        cdp.call("Page.reload", {"ignoreCache": True})
+        reload_ui(cdp)
         ui_wait(cdp, 'Boolean(window.__spoolTest) && Boolean(document.querySelector("[data-spool-flow-root]"))',
                 "kernel reload after storage write fault")
         require(cdp.eval('window.__spoolTest.viewState().job.phase') != "COMPLETE",
@@ -411,7 +418,7 @@ def main():
         ui_wait(cdp, 'window.__spoolTest.viewState().job.phase === "RUNNING" && window.__spoolTest.viewState().job.checkpoint > 0',
                 "large-worker active durable checkpoint", timeout=120)
         measurements["checkpointBeforeForcedReload"] = cdp.eval('window.__spoolTest.viewState().job.checkpoint')
-        cdp.call("Page.reload", {"ignoreCache": True})
+        reload_ui(cdp)
         ui_wait(cdp, 'Boolean(window.__spoolTest) && window.__spoolTest.viewState().job.phase === "PAUSED_RECOVERED"',
                 "manual Worker reload recovery", timeout=80)
         require(cdp.eval('window.__spoolTest.viewState().job.checkpoint') >=
