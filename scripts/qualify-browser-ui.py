@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import zipfile
 from pathlib import Path
 
@@ -192,7 +193,17 @@ def workflow(cdp, expected_csv, download_dir):
         path = download_dir / name
         if path.exists():
             path.unlink()
+        event_start = len(cdp.events)
         click(cdp, '[data-flow-action="' + action + '"]')
+        def download_completed():
+            cdp.eval('true')  # Drain Chrome download events on this connection.
+            events = cdp.events[event_start:]
+            ids = {e['params']['guid'] for e in events
+                   if e.get('method') == 'Page.downloadWillBegin' and e['params'].get('suggestedFilename') == name}
+            return any(e.get('method') == 'Page.downloadProgress' and
+                       e['params'].get('guid') in ids and e['params'].get('state') == 'completed'
+                       for e in events)
+        wait_for(download_completed, timeout=30, label='Chrome completed download ' + name)
         wait_for(lambda: path.exists() and path.stat().st_size > 0,
                  timeout=20, label="real browser download " + name)
         raw = path.read_bytes()
@@ -508,5 +519,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
+        traceback.print_exc()
         print("SPOOL browser_ui FAIL: " + repr(error), file=sys.stderr, flush=True)
         sys.exit(1)
