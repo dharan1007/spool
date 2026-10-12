@@ -98,10 +98,16 @@ class ProcessSampler:
                 if self.heap_cdp:
                     started = time.monotonic()
                     before_url = self.heap_cdp.eval('location.href')
+                    first_response = time.monotonic()
                     fields = {x['name']: x['value'] for x in self.heap_cdp.call('Performance.getMetrics').get('metrics', [])}
+                    second_response = time.monotonic()
                     observation = self.heap_cdp.eval('({url:location.href,frames:window.__qualifierFrames || null})')
                     frames = observation['frames']
-                    response_ms = (time.monotonic() - started) * 1000
+                    finished = time.monotonic()
+                    probe_ms = {'urlEvaluationMs': (first_response-started)*1000,
+                                'performanceMetricsMs': (second_response-first_response)*1000,
+                                'frameEvaluationMs': (finished-second_response)*1000}
+                    response_ms = max(probe_ms.values())
                     # Attribute initial about:blank/CDP startup separately. Never
                     # exclude SPOOL navigation, bootstrap, reload or recovery.
                     applicable = any(url.startswith('http://127.0.0.1:8876/') for url in (before_url, observation['url']))
@@ -117,7 +123,7 @@ class ProcessSampler:
                         self.heap_samples += 1
                         self.records.append({'monotonicSeconds': time.monotonic(), 'treeRssBytes': rss, 'mainPageHeapBytes': int(heap),
                                              'maxFrameGapMs': self.max_frame_gap_ms, 'maxCdpResponseMs': self.max_response_ms,
-                                             'responseMs': response_ms, 'urlBefore': before_url, 'urlAfter': observation['url'],
+                                             'responseMs': response_ms, 'probeTimings': probe_ms, 'probeTotalMs': (finished-started)*1000, 'urlBefore': before_url, 'urlAfter': observation['url'],
                                              'applicationInteraction': applicable, 'bootstrapMaxResponseMs': self.max_bootstrap_response_ms})
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
