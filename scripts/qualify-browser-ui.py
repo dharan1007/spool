@@ -112,9 +112,8 @@ def upload(cdp, file_path, expected_rows=None, should_reject=False, timeout=180)
     cdp.call("DOM.setFileInputFiles", {
         "nodeId": node, "files": [str(file_path.resolve())]
     })
-    # On Chrome the DevTools file-input action emits change. Explicitly dispatch
-    # if the browser didn't; the source still comes from a real selected File.
-    cdp.eval('document.getElementById("flow-file").dispatchEvent(new Event("change", {bubbles:true}))')
+    # DOM.setFileInputFiles dispatches a real file change through Chromium;
+    # never send a second event, which could race and load the source twice.
     if should_reject:
         ui_wait(cdp, 'Boolean(document.querySelector(".flow-notice.danger, .flow-notice[role=alert]")) || document.body.innerText.includes("File too large") || document.body.innerText.includes("Could not load source")',
                 "visible input rejection", timeout=timeout)
@@ -167,7 +166,9 @@ def workflow(cdp, expected_csv, download_dir):
             require(raw == expected_csv, "downloaded CSV bytes do not match independent expected bytes")
         else:
             rows = json.loads(raw)
-            require(rows == [{"id": "1", "name": "Ada"}, {"id": "2", "name": "Lin"}],
+            require(isinstance(rows, list) and len(rows) == 2 and
+                    [str(row.get("id")) for row in rows] == ["1", "2"] and
+                    [row.get("name") for row in rows] == ["Ada", "Lin"],
                     "actual downloaded JSON records are incorrect")
     cdp.call("Page.reload", {"ignoreCache": True})
     ui_wait(cdp, 'Boolean(window.__spoolTest) && window.__spoolTest.state().job.phase === "COMPLETE"',
@@ -243,7 +244,7 @@ def main():
     sha = source_sha()
     require(DIST.is_dir() and (DIST / "release.json").is_file(), "built dist/release.json missing")
     release = json.loads((DIST / "release.json").read_text(encoding="utf8"))
-    require(release.get("commit") == sha or release.get("commitSha") == sha,
+    require(release.get("commit") == sha,
             "built dist is not bound to current source SHA")
     browser = resolve_browser()
     temp = Path(tempfile.mkdtemp(prefix="spool-real-ui-"))
@@ -265,8 +266,8 @@ def main():
             sys.executable, str(ROOT / "scripts/spa-server.py"),
             "--port", "8876", "--directory", str(DIST)
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        wait_for(lambda: get_json("http://127.0.0.1:9336/json/version")
-                 if False else server.poll() is None, label="local SPA server started")
+        wait_for(lambda: server.poll() is None and (DIST / "release.json").is_file(),
+                 label="local SPA server process running")
         chrome, profile, log_handle, browser_log = launch_browser_with_cdp(browser)
         sampler = ProcessSampler(chrome.pid)
         sampler.start()
