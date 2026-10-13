@@ -46,13 +46,13 @@ export function validateTargetSchema(schema) {
 }
 
 export async function fingerprintText(text) {
-  const bytes = new TextEncoder().encode(text);
   if (globalThis.crypto?.subtle) {
-    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    const buffer = await new Blob([text]).arrayBuffer();
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', buffer);
     return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
   }
   const { createHash } = await import('node:crypto');
-  return createHash('sha256').update(bytes).digest('hex');
+  return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
 export function validateOutputRow(row, schema) {

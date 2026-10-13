@@ -13,7 +13,7 @@ function* parseCsvSteps(text, options = {}) {
   } = options;
   if (typeof text !== 'string') fail('INVALID_CSV', 'CSV input must be a string');
   if (!Number.isSafeInteger(maxInputBytes) || maxInputBytes <= 0) fail('INVALID_CSV_LIMIT', 'maxInputBytes must be a positive safe integer');
-  const inputBytes = new TextEncoder().encode(text).byteLength;
+  const inputBytes = new Blob([text]).size;
   if (inputBytes > maxInputBytes) fail('SOURCE_TOO_LARGE', `CSV exceeds ${maxInputBytes} byte input limit`, { bytes: inputBytes, limit: maxInputBytes });
 
   const rows = [];
@@ -112,7 +112,7 @@ function* parseCsvSteps(text, options = {}) {
 
   const objects = [];
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
-    if (rowIndex && rowIndex % 1000 === 0) yield;
+    if (rowIndex && rowIndex % 500 === 0) yield;
     const cells = rows[rowIndex];
     if (cells.length !== headers.length) {
       fail('COLUMN_COUNT_MISMATCH', `Row ${rowIndex + 2} has ${cells.length} columns; expected ${headers.length}`);

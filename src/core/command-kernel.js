@@ -1,4 +1,5 @@
 import { parseCsvAsync, toCsv } from './csv.js';
+import { yieldBrowserTurn } from '../runtime/cooperative-yield.js';
 import { inferSchema, fingerprintText, validateOutputRow, validateTargetSchema } from './schema.js';
 import { compileMapping, evaluateExpr } from './transforms.js';
 import { MigrationEngine } from './migration.js';
@@ -232,19 +233,24 @@ export class CommandKernel {
     if (epoch !== this.sourceLoadEpoch) fail('SOURCE_LOAD_SUPERSEDED', 'A newer file selection replaced this pending source load.');
     if (!headers.length) fail('EMPTY_SOURCE', 'Source CSV has no headers');
     if (!rows.length) fail('EMPTY_SOURCE_ROWS', 'Source CSV must contain at least one data row');
+    await yieldBrowserTurn();
     const fingerprint = await fingerprintText(text);
     if (epoch !== this.sourceLoadEpoch) fail('SOURCE_LOAD_SUPERSEDED', 'A newer file selection replaced this pending source load.');
     await this.runtime.abort();
     this.runEpoch += 1;
     await this.whenRuntimeIdle();
     if (epoch !== this.sourceLoadEpoch) fail('SOURCE_LOAD_SUPERSEDED', 'A newer file selection replaced this pending source load.');
+    await yieldBrowserTurn();
     const previous = this.workspace;
     const job = transition(createJob(), PHASES.SOURCE_READY, { sourceFingerprint: fingerprint, totalRows: rows.length });
+    const schema = inferSchema(rows);
+    const sourceBytes = new Blob([text]).size;
     this.workspace = {
       ...freshWorkspace(),
       job,
-      source: { fileName, fingerprint, headers, rows, schema: inferSchema(rows), bytes: new TextEncoder().encode(text).byteLength }
+      source: { fileName, fingerprint, headers, rows, schema, bytes: sourceBytes }
     };
+    await yieldBrowserTurn();
     try { await this.persist(); }
     catch (error) {
       this.workspace = previous;

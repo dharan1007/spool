@@ -79,6 +79,7 @@ class ProcessSampler:
         self.max_frame_gap_ms = 0
         self.max_response_ms = 0
         self.max_bootstrap_response_ms = 0
+        self.bootstrapped = False
         self.records = []
         self.measurement_errors = []
         self.thread = threading.Thread(target=self.sample, daemon=True)
@@ -110,7 +111,11 @@ class ProcessSampler:
                     response_ms = max(probe_ms.values())
                     # Attribute initial about:blank/CDP startup separately. Never
                     # exclude SPOOL navigation, bootstrap, reload or recovery.
-                    applicable = any(url.startswith('http://127.0.0.1:8876/') for url in (before_url, observation['url']))
+                    if not self.bootstrapped and frames is None:
+                        applicable = False
+                    else:
+                        self.bootstrapped = True
+                        applicable = any(url.startswith('http://127.0.0.1:8876/') for url in (before_url, observation['url']))
                     if applicable:
                         self.max_response_ms = max(self.max_response_ms, response_ms)
                     else:
