@@ -472,6 +472,7 @@ def main():
         oversized = temp / "oversized.csv"
         with oversized.open("wb") as stream:
             stream.truncate(MAX_INPUT + 1)
+        _smoke.ensure_loopback_port_free(8876, 'Real Studio qualifier HTTP server')
         server = subprocess.Popen([
             sys.executable, str(ROOT / "scripts/spa-server.py"),
             "--port", "8876", "--directory", str(DIST)
