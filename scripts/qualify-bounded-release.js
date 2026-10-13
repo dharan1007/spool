@@ -159,7 +159,7 @@ export function assertSignedVerificationReceipt(payload, { sha, version, artifac
       payload.commit !== sha || payload.version !== version ||
       payload.artifactRootSha256 !== artifactRootSha256 ||
       !/^[a-f0-9]{64}$/.test(payload.artifactRootSha256) ||
-      typeof payload.key !== 'string' || !payload.key.startsWith('ed25519:fpr:')) {
+      typeof payload.key !== 'string' || !/^ed25519:fpr:[a-f0-9]{64}$/.test(payload.key)) {
     throw new Error('Actual enrolled-key signature verification or immutable release identity is missing');
   }
   return true;
