@@ -153,10 +153,11 @@ test('starting a new migration cancels an in-flight cooperative source parse and
   await kernel.initialize();
   const large = 'id,value\n' + Array.from({ length: 10000 }, (_, i) => i + ',row-' + i).join('\n');
   const uploading = kernel.loadSourceText(large, 'stale-source.csv');
+  const rejected = assert.rejects(uploading, error => error.code === 'SOURCE_LOAD_SUPERSEDED');
   // Yield once to ensure the asynchronous parser has begun before reset.
   await Promise.resolve();
   await kernel.cmd_start_new_migration();
-  await assert.rejects(uploading, error => error.code === 'SOURCE_LOAD_SUPERSEDED');
+  await rejected;
   const finalState = kernel.snapshot();
   assert.equal(finalState.job.phase, PHASES.EMPTY);
   assert.equal(finalState.source, null);
