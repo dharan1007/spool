@@ -5,7 +5,22 @@ import { generateKeyPairSync, createHash } from 'node:crypto';
 import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { assertPassingTestCounters, testCounters, validateSigningMaterial, assertInstalledPackageEvidence, assertSignedVerificationReceipt, qualificationPlan } from '../scripts/qualify-bounded-release.js';
+import { assertPassingTestCounters, testCounters, validateSigningMaterial, assertInstalledPackageEvidence, assertSignedVerificationReceipt, qualificationPlan, qualificationEvidenceDirectory } from '../scripts/qualify-bounded-release.js';
+
+test('independent runs on one SHA have isolated, non-overwriting evidence roots', () => {
+  const checkout = join(tmpdir(), 'spool-evidence-isolation-source');
+  const external = join(tmpdir(), 'spool-evidence-isolation-output');
+  const sha = 'b'.repeat(40);
+  const options = { checkout, evidenceRoot: external, sha };
+  const first = qualificationEvidenceDirectory(options);
+  const second = qualificationEvidenceDirectory(options);
+  assert.notEqual(first, second, 'two runs must never share logs or installed package artifacts');
+  assert.ok(first.startsWith(join(external, 'bounded-qualification', sha)));
+  assert.ok(second.startsWith(join(external, 'bounded-qualification', sha)));
+  assert.throws(() => qualificationEvidenceDirectory({ ...options, evidenceRoot: join(checkout, 'evidence') }), /outside the source checkout/);
+  assert.throws(() => qualificationEvidenceDirectory({ ...options, attemptId: '../../run' }), /random attempt UUID/);
+  assert.throws(() => qualificationEvidenceDirectory({ ...options, sha: 'not-a-sha' }), /exact commit SHA/);
+});
 
 test('mandatory SQLite gate executes snapshot creation and privacy regressions without optional skips', () => {
   const suite = qualificationPlan().commands.find(item => item.id === 'required_sqlite_suite');
