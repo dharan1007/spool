@@ -584,6 +584,11 @@ async function upload(file) {
   const csv = lower.endsWith('.csv') || file.type === 'text/csv';
   const xlsx = lower.endsWith('.xlsx') || file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   if (!csv && !xlsx) return setNotice('danger', 'Unsupported file', 'Choose a .csv or .xlsx source file.');
+  // Parsing and persisting a 50 MiB input are asynchronous. Hold the same
+  // exclusive UI action lock as mapping/process operations until durable
+  // source replacement finishes, preventing two file inputs from racing.
+  busyAction = true;
+  schedule();
   try {
     let text;
     let meta;
@@ -615,6 +620,9 @@ async function upload(file) {
     navigate('/studio/inspect');
   } catch (error) {
     setNotice('danger', 'Could not load source', error && error.message ? error.message : String(error));
+  } finally {
+    busyAction = false;
+    schedule();
   }
 }
 async function approve() {
