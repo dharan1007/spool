@@ -725,9 +725,9 @@ async function action(name) {
 document.addEventListener('click', event => {
   if (!isFlowPath()) return;
   const route = event.target.closest('[data-flow-route]');
-  if (route) { event.preventDefault(); navigate(route.dataset.flowRoute); return; }
+  if (route) { event.preventDefault(); if (!busyAction) navigate(route.dataset.flowRoute); return; }
   const choice = event.target.closest('[data-flow-outcome]');
-  if (choice && !choice.disabled) { setOutcome(choice.dataset.flowOutcome); schedule(); return; }
+  if (choice && !choice.disabled && !busyAction) { setOutcome(choice.dataset.flowOutcome); schedule(); return; }
   const button = event.target.closest('[data-flow-action]');
   if (button && !button.disabled) { event.preventDefault(); void action(button.dataset.flowAction); }
 }, true);
