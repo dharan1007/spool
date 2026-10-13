@@ -486,7 +486,6 @@ def main():
                  label="local SPA server process running")
         chrome, profile, log_handle, browser_log = launch_browser_with_cdp(browser)
         sampler = ProcessSampler(chrome.pid)
-        sampler.start()
         pages = get_json("http://127.0.0.1:" + str(CDP_PORT) + "/json")
         page = next(p for p in pages if p.get("type") == "page")
         cdp = SerializedCDP(CDP(page["webSocketDebuggerUrl"]))
@@ -504,6 +503,7 @@ def main():
         '''})
         base = "http://127.0.0.1:8876"
         open_ui(cdp, base)
+        sampler.start()
         # Enforce the shipped privacy boundary against an actual blocked fetch.
         meta = cdp.eval('document.querySelector("meta[http-equiv=Content-Security-Policy]")?.content || ""')
         require("connect-src 'none'" in meta, "built Studio CSP lacks network prohibition")
