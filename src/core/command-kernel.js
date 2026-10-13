@@ -648,6 +648,10 @@ export class CommandKernel {
   async cmd_export_json() { return this.envelope({ mime: 'application/json', fileName: 'spool-result.json', content: JSON.stringify(this.workspace.output, null, 2) }); }
 
   async cmd_start_new_migration() {
+    // Invalidate any asynchronous CSV parse/hash already in progress before
+    // clearing the workspace. Otherwise its later continuation can publish an
+    // older file into a freshly reset migration.
+    this.sourceLoadEpoch = (this.sourceLoadEpoch ?? 0) + 1;
     await this.runtime.abort();
     this.runEpoch += 1;
     this.workspace = freshWorkspace();
