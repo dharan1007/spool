@@ -6,9 +6,9 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { resolve, sep, dirname } from 'node:path';
 import { join } from 'node:path';
-import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const SHA = /^[a-f0-9]{40}$/;
@@ -165,6 +165,23 @@ export function assertSignedVerificationReceipt(payload, { sha, version, artifac
   return true;
 }
 
+/**
+ * Give every invocation its own evidence directory, even for an unchanged SHA.
+ * Reusing the SHA directory let two independent gate runs overwrite one
+ * another's logs, package artifacts and signatures, destroying provenance.
+ */
+export function qualificationEvidenceDirectory({ checkout, evidenceRoot, sha, attemptId = randomUUID() }) {
+  if (!SHA.test(sha) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(attemptId)) {
+    throw new Error('Qualification evidence requires an exact commit SHA and random attempt UUID');
+  }
+  const source = resolve(checkout);
+  const evidence = resolve(evidenceRoot, 'bounded-qualification', sha, attemptId);
+  if (evidence === source || evidence.startsWith(source + sep)) {
+    throw new Error('Qualification evidence must be stored outside the source checkout');
+  }
+  return evidence;
+}
+
 export function qualificationPlan() {
   return Object.freeze({ actionsFree: true, commands: CHECKS, requiredRealSurfaces: REQUIRED_REAL_SURFACES });
 }
@@ -193,14 +210,12 @@ export function qualify() {
   const identity = candidatePreflight();
   const checkout = resolve('.');
   const evidenceRoot = resolve(process.env.SPOOL_QUALIFICATION_EVIDENCE_ROOT?.trim() || join(checkout, '..', 'evidence'));
-  const evidence = resolve(evidenceRoot, 'bounded-qualification', identity.sha);
-  if (evidence === checkout || evidence.startsWith(checkout + sep)) {
-    throw new Error('Qualification evidence must be stored outside the source checkout');
-  }
+  const evidence = qualificationEvidenceDirectory({ checkout, evidenceRoot, sha: identity.sha });
   // Keep logs, benchmark products and the exact installed tarball external.
   // Build outputs under dist are excluded from committed source, but tracked files
   // must remain unmodified after every command.
-  mkdirSync(evidence, { recursive: true });
+  mkdirSync(dirname(evidence), { recursive: true });
+  mkdirSync(evidence); // Exclusive create: concurrent runs must never share an attempt directory.
   const root = { ...identity, evidence };
   const entries = [];
   const reportPath = join(evidence, 'qualification.json');
