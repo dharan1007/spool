@@ -26,8 +26,8 @@ Status: **NOT RELEASE-AUTHORIZED**. Baseline main: `9acaf3de3a5d922c18a639dd3f5a
 - Read AGENTS.md, README, docs/ARCHITECTURE.md, docs/THREAT_MODEL.md, docs/PRODUCTION_AUDIT.md, docs/CAPABILITIES.md and docs/LIMITS.md.
 - Reproduce P0 bugs with failing fixtures; patch minimal code; pass focused tests.
 - Implement production-vs-experimental connector guard with changes to impacted conformance harnesses.
-- Execute browser, SQLite correctness, crash and storage tests on disposable local systems. Preserve raw logs and resource evidence.
-- Run one fail-closed offline qualification command (no GitHub Actions). Verify actual executed test counts and zero required skips.
+- Execute browser, SQLite correctness, crash and storage tests on disposable local systems. The current real SQLite runner requires 10 GiB free on the scratch filesystem (`statfs`), while the real Chrome runner requires at least 3 GiB; both fail closed if unavailable. Preserve raw logs and resource evidence.
+- Run one fail-closed offline qualification command (no GitHub Actions). Each invocation gets an exclusive evidence directory under `bounded-qualification/<sha>/<random-attempt-uuid>`; do not reuse or overwrite logs, binaries or attestations from a prior run on the same commit. Verify actual executed test counts and zero required skips.
 - Package, install and verify exact SHA; only then assess deployment, run live Chrome smoke and create a release decision.
 
 ## Required commands (not a substitute for inspecting their results)
