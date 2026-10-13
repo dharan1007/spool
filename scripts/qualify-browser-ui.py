@@ -145,6 +145,25 @@ class ProcessSampler:
         self.heap_cdp = connection
 
 
+class SerializedCDP:
+    """Share a protocol socket so browser actions and resource probes cannot race."""
+    def __init__(self, connection):
+        self.connection = connection
+        self.lock = threading.RLock()
+        self.events = connection.events
+
+    def call(self, method, params=None):
+        with self.lock:
+            return self.connection.call(method, params)
+
+    def eval(self, expression):
+        with self.lock:
+            return self.connection.eval(expression)
+
+    def close(self):
+        self.connection.close()
+
+
 def ui_wait(cdp, expr, label, timeout=35):
     return wait_for(lambda: cdp.eval(expr), timeout=timeout, label=label)
 
@@ -464,7 +483,7 @@ def main():
         sampler.start()
         pages = get_json("http://127.0.0.1:" + str(CDP_PORT) + "/json")
         page = next(p for p in pages if p.get("type") == "page")
-        cdp = CDP(page["webSocketDebuggerUrl"])
+        cdp = SerializedCDP(CDP(page["webSocketDebuggerUrl"]))
         sampler.attach_heap(page["webSocketDebuggerUrl"])
         for domain in ["Runtime", "Page", "Network", "Performance", "Log"]:
             cdp.call(domain + ".enable")
