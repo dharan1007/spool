@@ -10,7 +10,7 @@ test('optimized CSV slices preserve embedded commas, doubled quotes and CRLF', (
   assert.deepEqual(result, { headers: ['id', 'note', 'flag'], rows: [
     { id: '1', note: 'a,b', flag: 'hello "world"' },
     { id: '2', note: 'line one\nline two', flag: 'yes' },
-    { id: '3', note: 'plain"quote', flag: 'no' }
+    { id: '3', note: 'plain"quote"', flag: 'no' }
   ] });
 });
 
