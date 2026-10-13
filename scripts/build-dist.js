@@ -76,6 +76,7 @@ execFileSync(process.execPath, ['--test',
   'tests/studio-workflow.test.js',
   'tests/xlsx-adversarial.test.js',
   'tests/xlsx-worker-client.test.js',
+  'tests/csv-cooperative-slices.test.js',
   'tests/site-redesign.test.js'
 ], { stdio: 'inherit' });
 
