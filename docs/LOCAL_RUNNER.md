@@ -2,11 +2,7 @@
 
 ## Current candidate execution policy
 
-The bounded release candidate defaults to production mode. It refuses SQLite,
-PostgreSQL, MySQL and SQL Server target discovery, approval and execution while
-their target capabilities are EXPERIMENTAL. C4 runtime assurance does not grant
-production permission. Status and existing verified receipt access remain
-available. The historical v1.1.1 release is not qualification of this candidate.
+The v1.1.2 bounded candidate permits filesystem CSV to existing ordinary SQLite tables, INSERT only, with a 256 MiB source ceiling and explicit bound approval. PostgreSQL, MySQL, SQL Server, repair, CDC and cutover remain denied. C4 assurance never overrides this policy. The candidate is not release-authorized until every exact-source gate, enrolled-key signature and live deployment check passes.
 
 Engineering fixtures must opt in explicitly using a unique marked disposable
 scratch directory and its run UUID. The CLI requires both
@@ -24,7 +20,7 @@ version must match the shipped policy; missing, changed or stale policy fails
 closed. Policy checks repeat before connector opening, approval, leases and
 batch writes. Repair, CDC and cutover are excluded from production scope.
 
-The Local Runner is SPOOL Gate B's intended customer-local target-mutation surface. **Qualification status, 11 October 2026:** `sqlite.target` remains **EXPERIMENTAL** in the authoritative capability matrix; the current candidate is **NOT RELEASE-AUTHORIZED** until strict load, crash, permission and exact-SHA gates pass. It runs on the machine that owns the source CSV and SQLite database. Source rows, target credentials, durable snapshots, and database contents are not uploaded to the hosted Browser Studio.
+The Local Runner runs on the machine that owns the source CSV and SQLite database. The matrix cites independently inspected Windows sustained-load, crash and snapshot privacy evidence for `ffb2cce0ab63d59fb5c873f9d5f591ea974a319b`; a changed source must qualify again. Source rows, snapshots, credentials and target contents stay customer-local. Linux/macOS qualification is not established by that Windows evidence.
 
 ## Requirements
 

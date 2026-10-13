@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "release": "1.1.1",
+  "release": "1.1.2",
   "statuses": [
     "PRODUCTION",
     "EXPERIMENTAL",
@@ -52,7 +52,7 @@
     {
       "id": "sqlite.target",
       "label": "SQLite target",
-      "status": "EXPERIMENTAL",
+      "status": "PRODUCTION",
       "assurance": "C4",
       "evidence": {
         "implementation": [
@@ -67,18 +67,23 @@
         "faultTests": [
           "tests/conformance/sqlite-faults.test.js",
           "tests/fencing.test.js",
-          "tests/crash-recovery.test.js"
+          "tests/crash-recovery.test.js",
+          "scripts/qualify-sqlite-production.js"
         ],
         "securityTests": [
-          "tests/credential-broker.test.js"
+          "tests/credential-broker.test.js",
+          "tests/snapshot-permissions.test.js",
+          "tests/production-connector-policy.test.js"
         ],
-        "loadTests": [],
+        "loadTests": [
+          "scripts/qualify-sqlite-production.js"
+        ],
         "benchmarks": [
           "benchmarks/run.js (sqliteEndToEnd suite)"
         ],
         "limits": "docs/LIMITS.md#sqlite-target"
       },
-      "notes": "Missing a sustained load test; promoted from PRODUCTION under the strict rule until one lands."
+      "notes": "Bounded UTF-8 filesystem CSV to existing ordinary SQLite tables, INSERT only, 256 MiB ceiling. Windows sustained-load, 20 fault/privacy cases and 262599 assertions retained for ffb2cce0ab63d59fb5c873f9d5f591ea974a319b. Each release still requires exact-final-SHA qualification and enrolled-key signing; no cross-platform qualification claim."
     },
     {
       "id": "sqlite.source",

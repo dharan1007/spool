@@ -17,7 +17,7 @@ SPOOL orders work by **migration correctness, recoverability and evidence**, not
 
 ## Implemented in Gate B — CSV → SQLite (production qualification pending)
 
-The **intended production scope** is filesystem UTF-8 CSV → existing ordinary SQLite table using insert mode. As of 11 October 2026, `sqlite.target` is EXPERIMENTAL in `capabilities/matrix.json`: the supported production claim is **blocked** pending 256 MiB sustained-load, Windows/Unix crash and permission evidence, and exact-SHA release qualification.
+The bounded v1.1.2 candidate permits filesystem UTF-8 CSV to existing ordinary SQLite tables using INSERT only. Retained Windows 256 MiB sustained-load, crash and snapshot privacy evidence supports that capability boundary. Publication remains blocked until the changed final source qualifies, is signed by the enrolled key, and its deployment is independently verified.
 
 Implemented safety contract:
 

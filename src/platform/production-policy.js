@@ -7,8 +7,8 @@ import { fail, SpoolError } from '../core/errors.js';
 // Release-reviewed product scope. Updating the register requires reviewing and
 // regenerating this pin; runtime assurance never changes this allowlist.
 export const PRODUCTION_POLICY = Object.freeze({
-  version: 1, release: '1.1.1',
-  matrixSha256: '32ee51dd3b5d0296bdf2bc4fb5147fa4e4e5b1917d3628747c8d02f9451ca99f',
+  version: 1, release: '1.1.2',
+  matrixSha256: 'ab1e3691e81a11756a10b0b7adfb3599e6565f2927de3ddae5979c2b372e4a90',
   target: 'sqlite', source: 'filesystem', maxSourceBytes: 256 * 1024 * 1024
 });
 const instances = new WeakSet();

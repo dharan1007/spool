@@ -28,6 +28,14 @@ test('publication is bound to requested SHA and refuses tag rewriting', async ()
   assert.match(script, /--verify-tag/);
 });
 
+test('publication preserves qualification and publishes the installed retained artifact', async () => {
+  const script = await readFile('scripts/publish-release.sh', 'utf8');
+  assert.doesNotMatch(script, /rm -rf|npm pack/);
+  assert.match(script, /scripts\/prepare-release-publication\.js/);
+  assert.match(script, /parity-evidence\.json/);
+  assert.match(script, /qualification\.json/);
+});
+
 test('release manifest generator binds artifact digest to version and commit', async () => {
   const source = await readFile('scripts/release-manifest.js', 'utf8');
   assert.match(source, /sha256/i);

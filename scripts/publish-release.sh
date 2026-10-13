@@ -23,19 +23,17 @@ test "$PACKAGE_VERSION" = "$VERSION" || { echo "package.json version $PACKAGE_VE
 
 npm audit --omit=dev --audit-level=high
 npm ci
-SPOOL_COMMIT_SHA="$COMMIT" SPOOL_RELEASE_VERSION="$VERSION" node scripts/qualify-bounded-release.js
+QUALIFICATION_LOG="$(mktemp "${TMPDIR:-/tmp}/spool-publication-XXXXXX")"
+SPOOL_COMMIT_SHA="$COMMIT" SPOOL_RELEASE_VERSION="$VERSION" node scripts/qualify-bounded-release.js | tee "$QUALIFICATION_LOG"
 # Any failure above stops before tag creation, push, or publication.
 
-rm -rf release existing-release
-mkdir release
-PACK_JSON="$(npm pack --json --pack-destination release)"
-ARTIFACT_NAME="$(node -e "const x=JSON.parse(process.argv[1]);if(!Array.isArray(x)||!x[0]?.filename)process.exit(2);process.stdout.write(x[0].filename)" "$PACK_JSON")"
-ARTIFACT="release/$ARTIFACT_NAME"
-test -s "$ARTIFACT"
-node scripts/release-manifest.js --version "$VERSION" --commit "$COMMIT" --artifact "$ARTIFACT" --out release/release-record.json
+REPORT="$(sed -n 's/^Evidence: //p' "$QUALIFICATION_LOG")"
+test -n "$REPORT"
+PUBLICATION_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/spool-publication-assets-XXXXXX")"
+PUBLICATION_DIR="$PUBLICATION_PARENT/assets"
+node scripts/prepare-release-publication.js "$REPORT" "$COMMIT" "$VERSION" "$PUBLICATION_DIR"
 (
-  cd release
-  sha256sum "$ARTIFACT_NAME" release-record.json > SHA256SUMS
+  cd "$PUBLICATION_DIR"
   sha256sum -c SHA256SUMS
 )
 
@@ -51,17 +49,17 @@ else
   git push origin "refs/tags/$TAG"
 fi
 
-python3 - "$VERSION" <<'PY'
+python3 - "$VERSION" "$PUBLICATION_PARENT/release-notes.md" <<'PY'
 from pathlib import Path
 import sys
 version = sys.argv[1]
-Path('release-notes.md').write_text(f'''# SPOOL v{version}
+Path(sys.argv[2]).write_text(f'''# SPOOL v{version}
 
 Evidence-backed SPOOL release for zero-cost customer-local operation.
 
 ## Production-supported scope
 
-- Browser Studio: local-first CSV profiling, deterministic transformation, validation and export; 50 MiB browser boundary.
+- Browser Studio: local-first CSV/XLSX profiling, deterministic transformation, durable recovery, validation and CSV/JSON export; 50 MiB source boundary.
 - Local Runner: UTF-8 filesystem CSV into an existing ordinary SQLite table, INSERT only.
 - Source snapshot, live target contract, bound target_write approval, lease/fencing, atomic batch ledger, crash reconciliation, verification and commit-bound receipt.
 - Installed `spool` CLI and authenticated loopback `spoold` share the production command service.
@@ -73,7 +71,7 @@ npm install -g github:dharan1007/spool#v{version}
 spool --help
 ```
 
-The attached package tarball, `SHA256SUMS`, and `release-record.json` provide a verifiable artifact path.
+The attached package tarball is the exact installed and qualified artifact. `SHA256SUMS`, `release-record.json`, `qualification.json`, `parity-evidence.json`, the enrolled public key and signature verification receipt retain its release evidence.
 
 ## Explicit boundary
 
@@ -83,22 +81,23 @@ PY
 
 if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
   # Never mutate or overwrite an existing release. Verify its published evidence instead.
-  mkdir existing-release
-  gh release download "$TAG" --repo "$REPOSITORY" --dir existing-release --pattern '*.tgz' --pattern 'SHA256SUMS' --pattern 'release-record.json'
+  EXISTING_DIR="$PUBLICATION_PARENT/existing-release"
+  mkdir "$EXISTING_DIR"
+  gh release download "$TAG" --repo "$REPOSITORY" --dir "$EXISTING_DIR" --pattern '*.tgz' --pattern 'SHA256SUMS' --pattern 'release-record.json' --pattern 'parity-evidence.json' --pattern 'qualification.json' --pattern 'signature-receipt.json' --pattern 'release-public.key'
   (
-    cd existing-release
+    cd "$EXISTING_DIR"
     sha256sum -c SHA256SUMS
   )
-  RELEASE_VERSION="$VERSION" RELEASE_COMMIT="$COMMIT" node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync('existing-release/release-record.json','utf8'));if(r.version!==process.env.RELEASE_VERSION)throw new Error('Existing release version mismatch: '+r.version);if(r.commit!==process.env.RELEASE_COMMIT)throw new Error('Existing release commit mismatch: '+r.commit);if(!r.artifact?.filename||!r.artifact.filename.endsWith('.tgz'))throw new Error('Existing release record lacks package artifact');if(!fs.existsSync('existing-release/'+r.artifact.filename))throw new Error('Existing package artifact named by release record is missing');"
+  RELEASE_VERSION="$VERSION" RELEASE_COMMIT="$COMMIT" EXISTING_DIR="$EXISTING_DIR" PUBLICATION_DIR="$PUBLICATION_DIR" node -e "const fs=require('fs'),path=require('path');const r=JSON.parse(fs.readFileSync(path.join(process.env.EXISTING_DIR,'release-record.json'),'utf8'));const candidate=JSON.parse(fs.readFileSync(path.join(process.env.PUBLICATION_DIR,'release-record.json'),'utf8'));if(r.version!==process.env.RELEASE_VERSION||r.commit!==process.env.RELEASE_COMMIT||r.artifact?.sha256!==candidate.artifact.sha256||r.artifactRootSha256!==candidate.artifactRootSha256)throw new Error('Existing immutable release identity differs from qualified artifact');"
 else
-  gh release create "$TAG" release/*.tgz release/SHA256SUMS release/release-record.json --verify-tag --title "SPOOL $TAG" --notes-file release-notes.md --repo "$REPOSITORY"
+  gh release create "$TAG" "$PUBLICATION_DIR"/*.tgz "$PUBLICATION_DIR/SHA256SUMS" "$PUBLICATION_DIR/release-record.json" "$PUBLICATION_DIR/qualification.json" "$PUBLICATION_DIR/parity-evidence.json" "$PUBLICATION_DIR/signature-receipt.json" "$PUBLICATION_DIR/release-public.key" --verify-tag --title "SPOOL $TAG" --notes-file "$PUBLICATION_PARENT/release-notes.md" --repo "$REPOSITORY"
 fi
 
 git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
 test "$(git rev-parse "refs/tags/$TAG^{}")" = "$COMMIT"
-gh release view "$TAG" --json tagName,assets,url --repo "$REPOSITORY" > release/github-release.json
-grep -q 'SHA256SUMS' release/github-release.json
-grep -q 'release-record.json' release/github-release.json
-grep -q '\.tgz' release/github-release.json
+gh release view "$TAG" --json tagName,assets,url --repo "$REPOSITORY" > "$PUBLICATION_PARENT/github-release.json"
+grep -q 'SHA256SUMS' "$PUBLICATION_PARENT/github-release.json"
+grep -q 'release-record.json' "$PUBLICATION_PARENT/github-release.json"
+grep -q '\.tgz' "$PUBLICATION_PARENT/github-release.json"
 
 echo "SPOOL $TAG release evidence verified at $COMMIT"

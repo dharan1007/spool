@@ -5,7 +5,6 @@ import { join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { markDisposableQualification } from '../src/platform/disposable-qualification.js';
 import { PRODUCTION_POLICY } from '../src/platform/production-policy.js';
 
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -33,7 +32,6 @@ function parseJson(text, label) {
 
 async function main() {
   const root = await mkdtemp(join(tmpdir(), 'spool-package-verify-'));
-  const qualification = await markDisposableQualification(root);
   try {
     const evidenceDestination = process.env.SPOOL_PACKAGE_EVIDENCE_DIR?.trim();
     const checkout = resolve('.');
@@ -74,7 +72,7 @@ async function main() {
     const approvalPath = join(root, 'approval.json');
     const resultPath = join(root, 'run-result.json');
     const receiptPath = join(root, 'receipt.json');
-    const common = ['--request', requestPath, '--source-root', sourceRoot, '--target-root', targetRoot, '--state', statePath, '--qualification-root', qualification.root, '--qualification-run', qualification.runId];
+    const common = ['--request', requestPath, '--source-root', sourceRoot, '--target-root', targetRoot, '--state', statePath];
     const env = {
       ...process.env,
       SPOOL_APPROVAL_KEY: APPROVAL_KEY,
@@ -83,7 +81,11 @@ async function main() {
     };
     const installedMatrix = join(prefix, 'node_modules', 'spool-webmcp', 'capabilities', 'matrix.json');
     if (createHash('sha256').update(await readFile(installedMatrix)).digest('hex') !== PRODUCTION_POLICY.matrixSha256) throw new Error('Installed capability policy bytes differ from shipped pin');
-    const denial = spawnSync(spool, ['inspect', '--request', requestPath, '--source-root', sourceRoot, '--target-root', targetRoot, '--state', statePath], { env, encoding: 'utf8', shell: process.platform === 'win32' });
+    const deniedRequestPath = join(root, 'denied-request.json');
+    const deniedRequest = JSON.parse(await readFile(requestPath, 'utf8'));
+    deniedRequest.planInput.targetRef.connector = 'postgres';
+    await writeFile(deniedRequestPath, JSON.stringify(deniedRequest));
+    const denial = spawnSync(spool, ['inspect', '--request', deniedRequestPath, '--source-root', sourceRoot, '--target-root', targetRoot, '--state', statePath], { env, encoding: 'utf8', shell: process.platform === 'win32' });
     if (denial.status !== 1 || JSON.parse(denial.stderr).error?.code !== 'PRODUCTION_CAPABILITY_DENIED') throw new Error('Installed production CLI did not deny the unqualified target');
 
     const inspect = parseJson(run(spool, ['inspect', ...common], { env }).stdout, 'spool inspect').result;
@@ -131,7 +133,7 @@ async function main() {
 
     const retainedSha256 = createHash('sha256').update(await readFile(tarball)).digest('hex');
     if (retainedSha256 !== tarballSha256) throw new Error('Tested package tarball changed after installation');
-    process.stdout.write(`${JSON.stringify({ status: 'PASS', executionMode: 'DISPOSABLE_QUALIFICATION_NOT_RELEASE_AUTHORIZED', productionDenial: 'PASS', packagedPolicySha256: PRODUCTION_POLICY.matrixSha256, tarball: packInfo[0].filename, tarballPath: tarball, tarballSha256, retainedAfterVerification: Boolean(evidenceDestination), installedSameRetainedArtifact: Boolean(evidenceDestination), installedBinary: spool, sourceRows: 5, writtenRows: 3, rejectedRows: 2, ledgerEntries: 3, releaseCommit: RELEASE_SHA }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ status: 'PASS', executionMode: 'PRODUCTION', productionDenial: 'PASS', packagedPolicySha256: PRODUCTION_POLICY.matrixSha256, tarball: packInfo[0].filename, tarballPath: tarball, tarballSha256, retainedAfterVerification: Boolean(evidenceDestination), installedSameRetainedArtifact: Boolean(evidenceDestination), installedBinary: spool, sourceRows: 5, writtenRows: 3, rejectedRows: 2, ledgerEntries: 3, releaseCommit: RELEASE_SHA }, null, 2)}\n`);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

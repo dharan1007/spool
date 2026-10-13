@@ -94,3 +94,13 @@ test('PostgreSQL source remains experimental without exact-release live qualific
   assert.equal(source.status, 'EXPERIMENTAL');
   assert.match(source.notes, /not been independently reproduced and SHA-bound/);
 });
+
+test('bounded SQLite maturity cites sustained qualification without promoting remote targets', async () => {
+  const data = await matrix();
+  const sqlite = data.capabilities.find(item => item.id === 'sqlite.target');
+  assert.equal(sqlite.status, 'PRODUCTION');
+  assert.ok(sqlite.evidence.loadTests.includes('scripts/qualify-sqlite-production.js'));
+  for (const id of ['postgres.target', 'mysql.target', 'mssql.target', 'repair.protocol', 'cutover.protocol']) {
+    assert.equal(data.capabilities.find(item => item.id === id).status, 'EXPERIMENTAL');
+  }
+});

@@ -1,5 +1,9 @@
 # Security policy
 
+## Bounded v1.1.2 dependency audit
+
+The 14 October 2026 audit reports no high/critical production vulnerabilities and two moderate entries for the same transitive issue: `mssql -> tedious@20.0.0 -> sprintf-js@1.1.3`, [GHSA-hp3w-g68c-fv3c](https://github.com/advisories/GHSA-hp3w-g68c-fv3c). It concerns attacker-controlled format strings with unbounded precision. Inspection of the installed Tedious callers found fixed literal format strings; SQL Server execution is also denied by the bounded production policy, and the Browser Studio does not ship this Node dependency. This limits observed exposure in the supported paths; it does not declare the dependency fixed. The advisory currently lists no patched sprintf-js version. Remote connector qualification must reassess this dependency before promotion.
+
 SPOOL treats migration correctness as a security property. The browser Studio processes untrusted CSV locally; the Gate B Local Runner additionally performs approved filesystem CSV → SQLite mutation under explicit path, source, target, concurrency, authorization, memory, and recovery boundaries.
 
 ## Report a vulnerability

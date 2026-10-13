@@ -1,9 +1,9 @@
 # SPOOL Capability Matrix
 
-Release: 1.1.1
+Release: 1.1.2
 Production rule: implementation + real integration test + fault test + security test + load test + benchmark evidence + documented limits.
 
-## PRODUCTION (4)
+## PRODUCTION (5)
 
 ### `filesystem.source` — Filesystem CSV source
 
@@ -16,6 +16,20 @@ Production rule: implementation + real integration test + fault test + security 
 - limits: docs/LIMITS.md#filesystem-source
 
 _Gate B production claim; bounded-memory proof above the 50 MiB boundary._
+
+### `sqlite.target` — SQLite target
+
+Assurance: C4
+
+- implementation: src/connectors/sqlite/target.js, src/connectors/sqlite/runtime.js, src/connectors/sqlite/preflight.js
+- integrationTests: tests/sqlite-target.test.js, tests/conformance/sqlite-conformance.test.js
+- faultTests: tests/conformance/sqlite-faults.test.js, tests/fencing.test.js, tests/crash-recovery.test.js, scripts/qualify-sqlite-production.js
+- securityTests: tests/credential-broker.test.js, tests/snapshot-permissions.test.js, tests/production-connector-policy.test.js
+- loadTests: scripts/qualify-sqlite-production.js
+- benchmarks: benchmarks/run.js (sqliteEndToEnd suite)
+- limits: docs/LIMITS.md#sqlite-target
+
+_Bounded UTF-8 filesystem CSV to existing ordinary SQLite tables, INSERT only, 256 MiB ceiling. Windows sustained-load, 20 fault/privacy cases and 262599 assertions retained for ffb2cce0ab63d59fb5c873f9d5f591ea974a319b. Each release still requires exact-final-SHA qualification and enrolled-key signing; no cross-platform qualification claim._
 
 ### `release-integrity` — Release integrity: Git-to-dist SHA parity and per-merge evidence
 
@@ -53,20 +67,7 @@ _Gate F production claim: Ed25519 PEM key management, domain-bound signatures, k
 
 _Gate F production claim: two independent builds over the same committed source must produce the identical artifact root._
 
-## EXPERIMENTAL (23)
-
-### `sqlite.target` — SQLite target
-
-Assurance: C4
-
-- implementation: src/connectors/sqlite/target.js, src/connectors/sqlite/runtime.js, src/connectors/sqlite/preflight.js
-- integrationTests: tests/sqlite-target.test.js, tests/conformance/sqlite-conformance.test.js
-- faultTests: tests/conformance/sqlite-faults.test.js, tests/fencing.test.js, tests/crash-recovery.test.js
-- securityTests: tests/credential-broker.test.js
-- benchmarks: benchmarks/run.js (sqliteEndToEnd suite)
-- limits: docs/LIMITS.md#sqlite-target
-
-_Missing a sustained load test; promoted from PRODUCTION under the strict rule until one lands._
+## EXPERIMENTAL (22)
 
 ### `postgres.source` — PostgreSQL source
 

@@ -10,10 +10,12 @@ import Database from 'better-sqlite3';
 import { SpoolCommandService } from '../src/daemon/command-service.js';
 import { createSpoolDaemon } from '../src/daemon/spoold.js';
 import { markDisposableQualification } from '../src/platform/disposable-qualification.js';
+import { PRODUCTION_POLICY } from '../src/platform/production-policy.js';
 
 let assertions = 0;
 let passed = true;
 let disposableRowsWritten = 0;
+let productionRowsWritten = 0;
 const a = new Proxy(assert, { get(target, name) {
   const value = target[name];
   if (typeof value !== 'function') return value;
@@ -36,7 +38,7 @@ async function fixture(qualification = false) {
   const source = join(sourceRoot, 'rows.csv');
   await writeFile(source, 'id,name\n1,Ada\n2,Lin\n');
   const db = new Database(path); db.exec('CREATE TABLE rows(id INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT'); db.close();
-  const options = { sourceRoot, targetRoot, statePath: join(root, 'state.db'), approvalSigningKey: 'policy-tests-0123456789abcdef', release: { version: '1.1.1', commitSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() } };
+  const options = { sourceRoot, targetRoot, statePath: join(root, 'state.db'), approvalSigningKey: 'policy-tests-0123456789abcdef', release: { version: PRODUCTION_POLICY.release, commitSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() } };
   if (qualification) options.qualification = await markDisposableQualification(root);
   const service = await SpoolCommandService.create(options);
   const request = { migrationId: 'policy_test', principal: 'qualification:operator', planInput: {
@@ -50,6 +52,26 @@ async function fixture(qualification = false) {
   return { root, path, options, request, service, async close() { service.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
+evidenceTest('production permits only approved SQLite INSERT through the canonical lifecycle', async () => {
+  const f = await fixture();
+  try {
+    a.equal(f.service.executionMode, 'PRODUCTION');
+    a.equal((await f.service.inspect(f.request)).sourceRows, 2);
+    await a.rejects(() => f.service.run(f.request), error => error.code === 'APPROVAL_REQUIRED');
+    const approval = await f.service.approve(f.request, { expiresAt: '2099-01-01T00:00:00.000Z', nonce: 'production-proof' });
+    const result = await f.service.run(f.request, { approval });
+    a.equal(result.verification.status, 'VERIFIED');
+    a.equal(result.receipt.record.counts.writtenRows, 2);
+    a.equal(result.receipt.record.release.commitSha, f.options.release.commitSha);
+    const db = new Database(f.path, { readonly: true });
+    try {
+      a.deepEqual(db.prepare('SELECT id,name FROM rows ORDER BY id').all(), [{ id: 1, name: 'Ada' }, { id: 2, name: 'Lin' }]);
+      a.equal(db.prepare('SELECT COUNT(*) AS n FROM __spool_batch_ledger').get().n, 2);
+    } finally { db.close(); }
+    productionRowsWritten += 2;
+  } finally { await f.close(); }
+});
+
 evidenceTest('production denies every experimental target before discovery, approval or mutation', async () => {
   const f = await fixture();
   try {
@@ -57,11 +79,18 @@ evidenceTest('production denies every experimental target before discovery, appr
     a.throws(() => f.service.sourceCoordinator, denial);
     await a.rejects(() => SpoolCommandService.create({ ...f.options, maxSourceBytes: 257 * 1024 * 1024 }), denial);
     await a.rejects(() => SpoolCommandService.create({ ...f.options, release: { ...f.options.release, version: 'unmatched' } }), error => error.code === 'RELEASE_IDENTITY_REQUIRED');
-    for (const connector of ['sqlite', 'postgres', 'mysql', 'mssql', 'unknown']) {
+    for (const connector of ['postgres', 'mysql', 'mssql', 'unknown']) {
       const request = structuredClone(f.request); request.planInput.targetRef.connector = connector;
       request.qualification = { allowExperimental: true }; request.planInput.targetRef.assurance = 'C4';
       for (const method of ['inspect', 'plan', 'dryRun', 'approve', 'run', 'approveRepair', 'runRepair', 'beginCutover', 'commitCutover']) await a.rejects(() => f.service[method](request), denial);
     }
+    for (const mode of ['upsert', 'replace', 'delete', 'truncate']) {
+      const request = structuredClone(f.request); request.planInput.writeStrategy.mode = mode;
+      await a.rejects(() => f.service.inspect(request), denial);
+    }
+    const bulk = structuredClone(f.request); bulk.planInput.writeStrategy.bulk = true;
+    await a.rejects(() => f.service.inspect(bulk), denial);
+    for (const method of ['approveRepair', 'runRepair', 'beginCutover', 'commitCutover']) await a.rejects(() => f.service[method](f.request), denial);
     await a.rejects(() => f.service.abortCutover('policy_test'), denial);
     await a.rejects(() => f.service.setSnapshotCdcBinding('policy_test', {}), denial);
     await a.rejects(() => f.service.updateCdcProgress('policy_test', {}), denial);
@@ -76,6 +105,7 @@ evidenceTest('production denies every experimental target before discovery, appr
 evidenceTest('authenticated HTTP cannot opt into experiments or bypass a production service', async () => {
   const f = await fixture(); const daemon = createSpoolDaemon({ service: f.service, token });
   try {
+    f.request.planInput.targetRef.connector = 'postgres';
     const address = await daemon.listen(0);
     for (const command of ['inspect', 'plan', 'approve', 'run', 'approve-repair', 'run-repair', 'begin-cutover', 'commit-cutover', 'abort-cutover']) {
       const result = await fetch(`http://127.0.0.1:${address.port}/v1/command`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ command, request: f.request, migrationId: 'policy_test', options: { qualification: await markDisposableQualification(f.root), allowExperimental: true } }) });
@@ -88,6 +118,7 @@ evidenceTest('authenticated HTTP cannot opt into experiments or bypass a product
 evidenceTest('released CLI denies production invocation despite test-mode environment names', async () => {
   const f = await fixture();
   try {
+    f.request.planInput.targetRef.connector = 'postgres';
     const requestPath = join(f.root, 'request.json'); await writeFile(requestPath, JSON.stringify(f.request));
     const run = spawnSync(process.execPath, ['src/cli/spool.js', 'inspect', '--request', requestPath, '--source-root', f.options.sourceRoot, '--target-root', f.options.targetRoot, '--state', f.options.statePath], {
       encoding: 'utf8', env: { ...process.env, NODE_ENV: 'test', SPOOL_ALLOW_EXPERIMENTAL: '1', SPOOL_APPROVAL_KEY: f.options.approvalSigningKey, SPOOL_COMMIT_SHA: f.options.release.commitSha }
@@ -174,5 +205,5 @@ after(() => {
   if (!passed || assertions === 0) return;
   if (execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim()) return;
   const commitSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  process.stdout.write('SPOOL_EVIDENCE_JSON=' + JSON.stringify({ surface: 'production_denial', status: 'PASS', commitSha, actualExecution: true, assertions, device: { platform: platform(), os: release(), node: process.version }, workload: { targetsDenied: 5, disposableRowsWritten, productionTargetRowsWritten: 0 } }) + '\n');
+  process.stdout.write('SPOOL_EVIDENCE_JSON=' + JSON.stringify({ surface: 'production_denial', status: 'PASS', commitSha, actualExecution: true, assertions, device: { platform: platform(), os: release(), node: process.version }, workload: { targetsDenied: 4, disposableRowsWritten, productionTargetRowsWritten: productionRowsWritten } }) + '\n');
 });

@@ -15,7 +15,7 @@ SPOOL has two deliberately separate local-first execution paths:
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Release qualification notice (11 October 2026):** The current development branch is **NOT RELEASE-AUTHORIZED**. The capability matrix classifies `sqlite.target` as **EXPERIMENTAL** pending sustained-load, fault-injection, and exact-source release evidence. Browser Studio has passed a limited Chrome smoke test but not the complete real-UI upload/export/recovery and maximum-file resource gates. The production Vercel deployment has not been attested to the latest source. This notice concerns the newer candidate; a published historical release is not proof that today's main branch is qualified.
+> **Release qualification notice (14 October 2026):** The v1.1.2 review candidate is **NOT RELEASE-AUTHORIZED**. The matrix now permits only the bounded SQLite INSERT path after retained Windows qualification on `ffb2cce0ab63d59fb5c873f9d5f591ea974a319b`; this source change requires a fresh full qualification, enrolled-key signature, publication and deployment verification. Production still serves historical v1.1.1. PostgreSQL/MySQL/SQL Server, CDC, repair and cutover remain outside this release.
 
 ## Install the Local Runner
 
@@ -59,7 +59,7 @@ The browser path is local-first and retains the production CSP boundary `connect
 
 ### Gate B Local Runner
 
-The **implemented** Local Runner connector scope is intentionally narrow. Its design guarantees and the CLI workflow are described below, but `sqlite.target` remains **EXPERIMENTAL** under the stricter capability-matrix release rule pending the required 256 MiB sustained-load, crash and Windows permissions evidence. The Local Runner uses bounded-memory streaming and defaults to a **256 MiB** source ceiling; the ceiling is a deliberate product boundary, not a claim that a 256 MiB dataset is retained in JavaScript memory.
+The Local Runner production policy permits only UTF-8 filesystem CSV into an existing ordinary SQLite table using INSERT. The matrix cites retained Windows 256 MiB sustained-load, crash and snapshot privacy qualification. The v1.1.2 candidate still requires exact-final-SHA release authorization. The default source ceiling is **256 MiB**, with bounded-memory streaming.
 
 ```text
 UTF-8 filesystem CSV
