@@ -103,7 +103,8 @@ function runCheck(check, root) {
       SPOOL_COMMIT_SHA: root.sha,
       EXPECTED_SHA: root.sha,
       SPOOL_BENCHMARK_OUTPUT_DIR: join(root.evidence, 'benchmarks'),
-      SPOOL_PACKAGE_EVIDENCE_DIR: join(root.evidence, 'packages')
+      SPOOL_PACKAGE_EVIDENCE_DIR: join(root.evidence, 'packages'),
+      ...(check.env || {})
     }
   });
   const output = (result.stdout || '') + '\n' + (result.stderr || '');
@@ -151,6 +152,17 @@ function runCheck(check, root) {
     logSha256: sha256(Buffer.from(output, 'utf8')),
     log
   };
+}
+
+export function assertSignedVerificationReceipt(payload, { sha, version, artifactRootSha256 }) {
+  if (!payload || payload.pass !== true || payload.signatureVerified !== true ||
+      payload.commit !== sha || payload.version !== version ||
+      payload.artifactRootSha256 !== artifactRootSha256 ||
+      !/^[a-f0-9]{64}$/.test(payload.artifactRootSha256) ||
+      typeof payload.key !== 'string' || !payload.key.startsWith('ed25519:fpr:')) {
+    throw new Error('Actual enrolled-key signature verification or immutable release identity is missing');
+  }
+  return true;
 }
 
 export function qualificationPlan() {
@@ -237,14 +249,45 @@ export function qualify() {
     }
     const privateKey = process.env.SPOOL_RELEASE_PRIVATE_KEY?.trim();
     const publicKey = process.env.SPOOL_RELEASE_PUBLIC_KEY?.trim() || 'keys/release-public.key';
-    const signedEvidence = join(process.cwd(), 'release', 'parity-evidence.json');
+    const signedEvidence = process.env.SPOOL_PARITY_EVIDENCE?.trim() || 'release/parity-evidence.json';
     if (!privateKey || !existsSync(publicKey) || !existsSync(signedEvidence)) {
       entries.push({ id: 'signed_provenance', status: 'NOT_EXECUTED', reason: 'release_keys_or_parity_evidence_missing' });
       persist();
       throw new Error('Ed25519 release signature, keys or parity evidence missing');
     }
     validateSigningMaterial(privateKey, publicKey);
-    entries.push({ id: 'signed_provenance', status: 'PASS', verifiedBy: 'scripts/release-gate.js' });
+    // The earlier release_chain job may have signed the candidate, but it ran
+    // BEFORE the real Chrome/SQLite jobs. Verify actual signed bytes again
+    // after all mandatory surfaces, not just a key match or file existence.
+    const signed = runCheck({
+      id: 'signed_provenance_verify',
+      command: ['node', 'scripts/verify-release-chain.js'],
+      env: { SPOOL_PARITY_EVIDENCE: signedEvidence, SPOOL_RELEASE_PUBLIC_KEY: publicKey }
+    }, root);
+    if (signed.status !== 'PASS') {
+      entries.push({ id: 'signed_provenance', status: 'FAIL', reason: 'cryptographic_verification_failed', log: signed.log });
+      persist();
+      throw new Error('Ed25519 enrolled-key signature verification failed; see ' + signed.log);
+    }
+    let receipt;
+    try {
+      const lines = readFileSync(signed.log, 'utf8').split(/\r?\n/).filter(Boolean);
+      if (lines.length !== 1) throw new Error('Signature verifier must emit one result');
+      receipt = JSON.parse(lines[0]);
+      const release = JSON.parse(readFileSync('dist/release.json', 'utf8'));
+      assertSignedVerificationReceipt(receipt, {
+        sha: root.sha, version: root.version,
+        artifactRootSha256: release.artifactRootSha256
+      });
+    } catch (error) {
+      entries.push({ id: 'signed_provenance', status: 'FAIL', reason: error.message, log: signed.log });
+      persist();
+      throw new Error('Signed release receipt is not valid: ' + error.message);
+    }
+    entries.push({ id: 'signed_provenance', status: 'PASS', signatureVerified: true,
+      commitSha: root.sha, version: root.version, key: receipt.key,
+      artifactRootSha256: receipt.artifactRootSha256,
+      log: signed.log, logSha256: signed.logSha256 });
   } catch (error) {
     persist();
     process.stderr.write('SPOOL production candidate BLOCKED: ' + error.message + '\nEvidence: ' + reportPath + '\n');
