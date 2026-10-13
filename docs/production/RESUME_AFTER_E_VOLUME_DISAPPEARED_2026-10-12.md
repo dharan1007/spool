@@ -40,7 +40,7 @@ if (-not (Test-Path 'E:\spool-release\qualification\.git')) { throw 'STOP: origi
 if (-not (Test-Path 'E:\spool-release\evidence')) { throw 'STOP: existing release evidence not restored' }
 if (-not (Test-Path 'E:\spool-release\temp\spool-browser-venv\Scripts\python.exe')) { throw 'STOP: browser venv not restored' }
 $free = (Get-Volume -DriveLetter E).SizeRemaining
-if ($free -lt 4GB) { throw "STOP: E: has insufficient free space: $free bytes" }
+if ($free -lt 10GB) { throw "STOP: E: has insufficient free space for the exact 256 MiB SQLite qualification (10 GiB minimum): $free bytes" }
 Set-Location 'E:\spool-release\qualification'
 git status --porcelain=v1
 git rev-parse --abbrev-ref HEAD
@@ -73,7 +73,7 @@ This runner **has not passed** and may reveal further CDP/UI/Zip errors. Repair 
 
 ## C. If E: cannot be recovered
 
-Do **not** treat a new checkout as recovered evidence. A clean Git clone from PR #91 can restore source code to a separately identified physical volume with at least **4 GiB free** for browser qualification and sufficient additional capacity for SQLite WAL/snapshot/fault workloads. Only do so after identifying that volume by actual disk identity and capacity. Historical E: test artifacts, venv and evidence remain inaccessible; report them as unavailable, not deleted, and redo the mandatory gates on the new exact SHA. If the only drive is the current 1.34 GiB-free C:, **STOP** the large qualification jobs. Do not bypass space checks or shrink workloads to fabricate coverage.
+Do **not** treat a new checkout as recovered evidence. A clean Git clone from PR #91 can restore source code to a separately identified physical volume with at least **10 GiB free** for the current SQLite qualifier's mandatory statfs preflight (also covers the browser's separate 3 GiB minimum), with additional verified headroom for snapshots/WAL/fault workloads. Only do so after identifying that volume by actual disk identity and capacity. Historical E: test artifacts, venv and evidence remain inaccessible; report them as unavailable, not deleted, and redo the mandatory gates on the new exact SHA. If the only drive is the current 1.34 GiB-free C:, **STOP** the large qualification jobs. Do not bypass space checks or shrink workloads to fabricate coverage.
 
 ## D. Exact next step / stop conditions
 
