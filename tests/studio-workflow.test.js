@@ -116,6 +116,16 @@ test('XLSX import fails closed on duplicate or empty headers', () => {
   assert.throws(() => xlsxEntriesToCsv(empty), /empty column name/i);
 });
 
+test('Studio serializes overlapping real CSV/XLSX source imports until durable replacement completes', () => {
+  const upload = flow.slice(flow.indexOf('async function upload(file)'), flow.indexOf('async function approve()'));
+  assert.ok(upload.startsWith('async function upload(file)'), 'source upload handler missing');
+  assert.match(upload, /if \(!file \|\| busyAction\) return/);
+  assert.match(upload, /busyAction = true;\s*schedule\(\);\s*try \{/);
+  assert.match(upload, /await module\.xlsxFileToCsvInWorker\(file\)/);
+  assert.match(upload, /await api\(\)\.loadCsv\(text, file\.name\)/);
+  assert.match(upload, /finally \{\s*busyAction = false;\s*schedule\(\)/);
+});
+
 test('visual system contains responsive seven-stage Studio primitives', () => {
   for (const selector of [
     '.spool-flow',
