@@ -8,7 +8,7 @@ import { fail, SpoolError } from '../core/errors.js';
 // regenerating this pin; runtime assurance never changes this allowlist.
 export const PRODUCTION_POLICY = Object.freeze({
   version: 1, release: '1.1.1',
-  matrixSha256: '5b12f928e456b03fa1397aeb3540aab346ae58684dde229e2af3f0002eb8fca3',
+  matrixSha256: '32ee51dd3b5d0296bdf2bc4fb5147fa4e4e5b1917d3628747c8d02f9451ca99f',
   target: 'sqlite', source: 'filesystem', maxSourceBytes: 256 * 1024 * 1024
 });
 const instances = new WeakSet();

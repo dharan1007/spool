@@ -115,7 +115,7 @@
     {
       "id": "postgres.source",
       "label": "PostgreSQL source",
-      "status": "PRODUCTION",
+      "status": "EXPERIMENTAL",
       "assurance": "C1",
       "evidence": {
         "implementation": [
@@ -140,7 +140,7 @@
         ],
         "limits": "docs/LIMITS.md#postgresql"
       },
-      "notes": "300k-row qualification with RSS ceiling runs in CI on every change."
+      "notes": "Connector and local conformance fixtures exist, but live PostgreSQL source qualification has not been independently reproduced and SHA-bound for this bounded release; no production maturity claim."
     },
     {
       "id": "postgres.target",

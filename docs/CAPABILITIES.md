@@ -3,7 +3,7 @@
 Release: 1.1.1
 Production rule: implementation + real integration test + fault test + security test + load test + benchmark evidence + documented limits.
 
-## PRODUCTION (5)
+## PRODUCTION (4)
 
 ### `filesystem.source` — Filesystem CSV source
 
@@ -16,20 +16,6 @@ Production rule: implementation + real integration test + fault test + security 
 - limits: docs/LIMITS.md#filesystem-source
 
 _Gate B production claim; bounded-memory proof above the 50 MiB boundary._
-
-### `postgres.source` — PostgreSQL source
-
-Assurance: C1
-
-- implementation: src/connectors/postgres/source.js
-- integrationTests: tests/conformance/postgres-source-conformance.test.js, tests/postgres-materialization-contract.test.js
-- faultTests: tests/conformance/postgres-command-recovery-conformance.test.js
-- securityTests: tests/credential-broker.test.js, tests/platform-security.test.js
-- loadTests: scripts/qualify-postgres-materialization.js
-- benchmarks: scripts/qualify-postgres-materialization.js (MiB/s + RSS ceiling)
-- limits: docs/LIMITS.md#postgresql
-
-_300k-row qualification with RSS ceiling runs in CI on every change._
 
 ### `release-integrity` — Release integrity: Git-to-dist SHA parity and per-merge evidence
 
@@ -67,7 +53,7 @@ _Gate F production claim: Ed25519 PEM key management, domain-bound signatures, k
 
 _Gate F production claim: two independent builds over the same committed source must produce the identical artifact root._
 
-## EXPERIMENTAL (22)
+## EXPERIMENTAL (23)
 
 ### `sqlite.target` — SQLite target
 
@@ -81,6 +67,20 @@ Assurance: C4
 - limits: docs/LIMITS.md#sqlite-target
 
 _Missing a sustained load test; promoted from PRODUCTION under the strict rule until one lands._
+
+### `postgres.source` — PostgreSQL source
+
+Assurance: C1
+
+- implementation: src/connectors/postgres/source.js
+- integrationTests: tests/conformance/postgres-source-conformance.test.js, tests/postgres-materialization-contract.test.js
+- faultTests: tests/conformance/postgres-command-recovery-conformance.test.js
+- securityTests: tests/credential-broker.test.js, tests/platform-security.test.js
+- loadTests: scripts/qualify-postgres-materialization.js
+- benchmarks: scripts/qualify-postgres-materialization.js (MiB/s + RSS ceiling)
+- limits: docs/LIMITS.md#postgresql
+
+_Connector and local conformance fixtures exist, but live PostgreSQL source qualification has not been independently reproduced and SHA-bound for this bounded release; no production maturity claim._
 
 ### `postgres.target` — PostgreSQL target
 

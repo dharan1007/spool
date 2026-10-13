@@ -86,3 +86,11 @@ test('capability docs are freshly generated from the matrix', async () => {
   const checkedIn = (await readFile(new URL('../docs/CAPABILITIES.md', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
   assert.equal(checkedIn, rendered);
 });
+
+
+test('PostgreSQL source remains experimental without exact-release live qualification', async () => {
+  const data = await matrix();
+  const source = data.capabilities.find(item => item.id === 'postgres.source');
+  assert.equal(source.status, 'EXPERIMENTAL');
+  assert.match(source.notes, /not been independently reproduced and SHA-bound/);
+});
