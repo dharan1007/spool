@@ -45,7 +45,7 @@ test('cooperative parser preserves 1 MiB cell ceiling and multiline quote semant
   const input = 'text\n"' + 'A'.repeat(limit - 5) + '""x"\n';
   const parsed = await parseCsvAsync(input);
   assert.equal(parsed.rows.length, 1);
-  assert.equal(parsed.rows[0].text.length, limit - 4);
+  assert.equal(parsed.rows[0].text.length, limit - 3);
   await assert.rejects(parseCsvAsync('text\n"' + 'a'.repeat(limit + 1) + '"'), /CELL_TOO_LARGE/);
 });
 
