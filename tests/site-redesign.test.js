@@ -36,6 +36,12 @@ test('homepage presents two explicit paths and the seven-stage workflow', () => 
   ]) assert.match(pages, new RegExp(phrase, 'i'), 'missing homepage workflow content: ' + phrase);
 });
 
+test('website release links and installation examples match the package version', async () => {
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.ok(pages.includes(`const RELEASE = 'v${pkg.version}'`));
+  assert.ok(pages.includes(`github:dharan1007/spool#v${pkg.version}`));
+});
+
 test('Studio terminal, active-run and blocked states always expose recovery actions', () => {
   assert.match(studio, /Source replacement is locked while processing/);
   assert.match(studio, /Open current processing/);
