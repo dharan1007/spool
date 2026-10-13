@@ -146,3 +146,21 @@ test('autopilot refresh recovery resumes from the durable checkpoint automatical
   assert.equal(recoveryRuntime.startCalls.length, 1);
   assert.equal(recoveryRuntime.startCalls[0].payload.startIndex, 20);
 });
+
+test('starting a new migration cancels an in-flight cooperative source parse and prevents stale publication', async () => {
+  const store = new MemoryWorkspaceStore();
+  const kernel = new CommandKernel({ store, runtime: new ControlledRuntime() });
+  await kernel.initialize();
+  const large = 'id,value\n' + Array.from({ length: 10000 }, (_, i) => i + ',row-' + i).join('\n');
+  const uploading = kernel.loadSourceText(large, 'stale-source.csv');
+  // Yield once to ensure the asynchronous parser has begun before reset.
+  await Promise.resolve();
+  await kernel.cmd_start_new_migration();
+  await assert.rejects(uploading, error => error.code === 'SOURCE_LOAD_SUPERSEDED');
+  const finalState = kernel.snapshot();
+  assert.equal(finalState.job.phase, PHASES.EMPTY);
+  assert.equal(finalState.source, null);
+  assert.equal(finalState.output.length, 0);
+  assert.equal((await store.load()).source, null);
+});
+
