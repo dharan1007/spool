@@ -87,3 +87,25 @@ test('purity scanner classifies actual timers, not quoted timer signatures in it
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('XLSX worker timeout is narrowly allowlisted and still fails closed', async () => {
+  const root = await fixture({
+    'src/xlsx-worker-client.js': "timer = setTimeout(() => finish(new Error('XLSX background processing exceeded its 5-minute safety limit.')), timeoutMs);\n"
+  });
+  try {
+    const report = await scanProductionPurity({ root });
+    assert.equal(report.violations.length, 1);
+    assert.equal(report.violations[0].pattern, 'sleep-sync');
+    assert.equal(report.ok, true);
+    const unknown = await fixture({ 'src/unknown.js': 'setTimeout(() => grantSuccess(), 5000);\n' });
+    try {
+      const unknownReport = await scanProductionPurity({ root: unknown });
+      assert.equal(unknownReport.ok, false);
+      assert.equal(unknownReport.uncovered.length, 1);
+    } finally {
+      await rm(unknown, { recursive: true, force: true });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
