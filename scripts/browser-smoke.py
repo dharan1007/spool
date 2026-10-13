@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import base64, json, os, shutil, subprocess, sys, tempfile, time, urllib.request
+import base64, json, os, shutil, socket, subprocess, sys, tempfile, time, urllib.request
 import websocket
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -13,6 +13,14 @@ def get_json(url, method='GET'):
     req = urllib.request.Request(url, method=method)
     with urllib.request.urlopen(req, timeout=3) as response:
         return json.load(response)
+
+
+def ensure_loopback_port_free(port, purpose):
+    """Do not attach a release test to an unrelated local Chrome or SPA server."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        if sock.connect_ex(('127.0.0.1', port)) == 0:
+            raise RuntimeError(f'{purpose} port {port} is occupied; refusing to reuse an unknown local process')
 
 
 def resolve_browser():
@@ -97,6 +105,7 @@ def stop_process(process):
 def launch_browser_with_cdp(browser, port=CDP_PORT):
     failures = []
     for attempt in range(1, 4):
+        ensure_loopback_port_free(port, 'Chromium debugging')
         profile = tempfile.mkdtemp(prefix=f'spool-chrome-{attempt}-')
         browser_log = tempfile.NamedTemporaryFile(prefix=f'spool-browser-{attempt}-', suffix='.log', delete=False)
         browser_log_path = browser_log.name
@@ -119,6 +128,8 @@ def launch_browser_with_cdp(browser, port=CDP_PORT):
         ], stdout=log_handle, stderr=log_handle)
         try:
             wait_for(lambda: get_json(f'http://127.0.0.1:{port}/json/version'), timeout=12, label=f'Chromium CDP attempt {attempt}')
+            if chrome.poll() is not None:
+                raise RuntimeError('New Chromium exited; CDP endpoint may belong to a different process')
             pages = get_json(f'http://127.0.0.1:{port}/json')
             if not any(page.get('type') == 'page' for page in pages):
                 raise AssertionError('CDP opened without a page target')
@@ -156,6 +167,7 @@ def main():
         target = base_url + '/studio/original'
     else:
         serve_dir = resolve_serve_dir()
+        ensure_loopback_port_free(HTTP_PORT, 'Local SPA server')
         server = subprocess.Popen([sys.executable, os.path.join(ROOT, 'scripts', 'spa-server.py'), '--port', str(HTTP_PORT), '--directory', serve_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         base_url = f'http://127.0.0.1:{HTTP_PORT}'
         target = base_url + '/'
