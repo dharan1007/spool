@@ -5,7 +5,7 @@ import { generateKeyPairSync, createHash } from 'node:crypto';
 import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { assertPassingTestCounters, testCounters, validateSigningMaterial, assertInstalledPackageEvidence, qualificationPlan } from '../scripts/qualify-bounded-release.js';
+import { assertPassingTestCounters, testCounters, validateSigningMaterial, assertInstalledPackageEvidence, assertSignedVerificationReceipt, qualificationPlan } from '../scripts/qualify-bounded-release.js';
 
 test('mandatory SQLite gate executes snapshot creation and privacy regressions without optional skips', () => {
   const suite = qualificationPlan().commands.find(item => item.id === 'required_sqlite_suite');
@@ -24,6 +24,28 @@ test('qualification counters preserve real executed pass, failure and skip total
     assert.deepEqual(testCounters(run.stdout), { tests: 3, pass: 1, fail: 1, cancelled: 0, skipped: 1, todo: 0 });
     assert.equal(testCounters(''), null);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('final candidate refuses missing, stale, unsigned and wrong-root signature receipts', () => {
+  const sha = 'a'.repeat(40);
+  const version = '1.1.2';
+  const artifactRootSha256 = 'b'.repeat(64);
+  const options = { sha, version, artifactRootSha256 };
+  const verified = { pass: true, signatureVerified: true, commit: sha, version,
+    artifactRootSha256, key: 'ed25519:fpr:' + 'c'.repeat(64) };
+  assert.equal(assertSignedVerificationReceipt(verified, options), true);
+  for (const receipt of [
+    null,
+    { ...verified, signatureVerified: false },
+    { ...verified, pass: false },
+    { ...verified, commit: '0'.repeat(40) },
+    { ...verified, version: '1.1.1' },
+    { ...verified, artifactRootSha256: '0'.repeat(64) },
+    { ...verified, key: '' },
+    { ...verified, key: 'fake-signer' }
+  ]) {
+    assert.throws(() => assertSignedVerificationReceipt(receipt, options), /signature verification|identity/);
+  }
 });
 
 test('release signing accepts actual PEM material only for its enrolled Ed25519 public key', async () => {
