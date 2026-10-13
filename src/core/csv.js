@@ -15,20 +15,34 @@ function* parseCsvSteps(text, options = {}) {
   if (!Number.isSafeInteger(maxInputBytes) || maxInputBytes <= 0) fail('INVALID_CSV_LIMIT', 'maxInputBytes must be a positive safe integer');
   const inputBytes = new TextEncoder().encode(text).byteLength;
   if (inputBytes > maxInputBytes) fail('SOURCE_TOO_LARGE', `CSV exceeds ${maxInputBytes} byte input limit`, { bytes: inputBytes, limit: maxInputBytes });
+
   const rows = [];
   let row = [];
-  let cell = [];
+  let pieces = [];
+  let cellLength = 0;
   let quoted = false;
   let i = 0;
+  let segmentStart = 0;
   let nextYield = 65536;
-  const pushCell = () => {
-    if (cell.length > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
-    row.push(cell.join(''));
-    cell = [];
+
+  // Retain source slices rather than creating one short-lived array element
+  // for every input character. At 50 MiB, that avoids tens of millions of
+  // temporary string/array entries and their main-thread GC pressure.
+  const flushSegment = end => {
+    if (end <= segmentStart) return;
+    cellLength += end - segmentStart;
+    if (cellLength > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
+    pieces.push(text.slice(segmentStart, end));
+  };
+  const pushCell = end => {
+    flushSegment(end);
+    row.push(pieces.join(''));
+    pieces = [];
+    cellLength = 0;
     if (row.length > maxColumns) fail('TOO_MANY_COLUMNS', `CSV exceeds ${maxColumns} columns`);
   };
-  const pushRow = () => {
-    pushCell();
+  const pushRow = end => {
+    pushCell(end);
     rows.push(row);
     row = [];
     if (rows.length > maxRows + 1) fail('TOO_MANY_ROWS', `CSV exceeds ${maxRows} data rows`);
@@ -40,30 +54,51 @@ function* parseCsvSteps(text, options = {}) {
     if (quoted) {
       if (ch === '"') {
         if (text[i + 1] === '"') {
-          cell.push('"');
-          if (cell.length > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
-          i += 2; continue;
+          flushSegment(i);
+          cellLength += 1;
+          if (cellLength > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
+          pieces.push('"');
+          i += 2;
+          segmentStart = i;
+          continue;
         }
-        quoted = false; i += 1; continue;
+        flushSegment(i);
+        quoted = false;
+        i += 1;
+        segmentStart = i;
+        continue;
       }
-      cell.push(ch);
-      if (cell.length > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
+      if (cellLength + i - segmentStart + 1 > maxCellLength) {
+        fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
+      }
       i += 1;
       continue;
     }
-    if (ch === '"' && cell.length === 0) { quoted = true; i += 1; continue; }
-    if (ch === ',') { pushCell(); i += 1; continue; }
-    if (ch === '\n') { pushRow(); i += 1; continue; }
-    if (ch === '\r') {
-      if (text[i + 1] === '\n') i += 1;
-      pushRow(); i += 1; continue;
+
+    // Preserve the existing permissive CSV semantics: a quote only opens a
+    // quoted cell when the accumulated cell is empty. Quotes elsewhere are
+    // ordinary characters; characters after a closing quote are retained.
+    if (ch === '"' && cellLength === 0 && i === segmentStart) {
+      quoted = true;
+      i += 1;
+      segmentStart = i;
+      continue;
     }
-    cell.push(ch);
-    if (cell.length > maxCellLength) fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
+    if (ch === ',') { pushCell(i); i += 1; segmentStart = i; continue; }
+    if (ch === '\n') { pushRow(i); i += 1; segmentStart = i; continue; }
+    if (ch === '\r') {
+      pushRow(i);
+      i += text[i + 1] === '\n' ? 2 : 1;
+      segmentStart = i;
+      continue;
+    }
+    if (cellLength + i - segmentStart + 1 > maxCellLength) {
+      fail('CELL_TOO_LARGE', `Cell exceeds ${maxCellLength} characters`);
+    }
     i += 1;
   }
   if (quoted) fail('UNCLOSED_QUOTE', 'CSV ended inside a quoted cell');
-  if (cell.length || row.length) pushRow();
+  if (cellLength || i > segmentStart || row.length) pushRow(i);
   if (rows.length === 0) return { headers: [], rows: [] };
   if (rows.length > 1 && rows.at(-1).length === 1 && rows.at(-1)[0] === '') rows.pop();
 
@@ -88,7 +123,6 @@ function* parseCsvSteps(text, options = {}) {
   }
   return { headers, rows: objects };
 }
-
 export function parseCsv(text, options = {}) {
   const steps = parseCsvSteps(text, options);
   let step = steps.next();
