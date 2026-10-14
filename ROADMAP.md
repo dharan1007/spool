@@ -17,7 +17,7 @@ SPOOL orders work by **migration correctness, recoverability and evidence**, not
 
 ## Implemented in Gate B — CSV → SQLite (production qualification pending)
 
-The bounded v1.1.2 candidate permits filesystem UTF-8 CSV to existing ordinary SQLite tables using INSERT only. Retained Windows 256 MiB sustained-load, crash and snapshot privacy evidence supports that capability boundary. Publication remains blocked until the changed final source qualifies, is signed by the enrolled key, and its deployment is independently verified.
+The bounded v1.1.2 candidate permits filesystem UTF-8 CSV to existing ordinary SQLite tables using INSERT only. Retained Windows 256 MiB sustained-load, crash and snapshot privacy evidence supports that capability boundary. Publication requires qualification of the exact final source and an enrolled-key signature; deployment requires independent HTTPS artifact and browser verification.
 
 Implemented safety contract:
 

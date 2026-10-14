@@ -15,23 +15,23 @@ SPOOL has two deliberately separate local-first execution paths:
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Release qualification notice (14 October 2026):** The v1.1.2 review candidate is **NOT RELEASE-AUTHORIZED**. The matrix now permits only the bounded SQLite INSERT path after retained Windows qualification on `ffb2cce0ab63d59fb5c873f9d5f591ea974a319b`; this source change requires a fresh full qualification, enrolled-key signature, publication and deployment verification. Production still serves historical v1.1.1. PostgreSQL/MySQL/SQL Server, CDC, repair and cutover remain outside this release.
+> **Verify the release before use:** v1.1.2 is bounded to Browser Studio CSV/XLSX and customer-local filesystem CSV to an existing ordinary SQLite table using INSERT. A published release must carry an exact-source qualification report, enrolled-key signed parity evidence, the tested package and checksums. Verify those artifacts against the release tag before installing; source code or a capability entry alone is not release authorization. Windows workload evidence does not establish Linux/macOS qualification. Remote targets, CDC, repair and cutover remain outside this release. The owner-authorized key rotation is recorded in `docs/production/RELEASE_KEY_ROTATION_2026-10-14.md`.
 
 ## Install the Local Runner
 
 Node.js 22+ is required. The release remains protected against accidental npm-registry publication; installation is directly from the signed/versioned GitHub source or release artifact.
 
-For the current published release:
+For v1.1.2, first verify its published signed GitHub release, then install:
 
 ```bash
-npm install -g github:dharan1007/spool#v1.1.1
+npm install -g github:dharan1007/spool#v1.1.2
 spool --help
 ```
 
 Source-verification path:
 
 ```bash
-git clone --branch v1.1.1 https://github.com/dharan1007/spool.git
+git clone --branch v1.1.2 https://github.com/dharan1007/spool.git
 cd spool
 npm ci
 npm run check
@@ -59,7 +59,7 @@ The browser path is local-first and retains the production CSP boundary `connect
 
 ### Gate B Local Runner
 
-The Local Runner production policy permits only UTF-8 filesystem CSV into an existing ordinary SQLite table using INSERT. The matrix cites retained Windows 256 MiB sustained-load, crash and snapshot privacy qualification. The v1.1.2 candidate still requires exact-final-SHA release authorization. The default source ceiling is **256 MiB**, with bounded-memory streaming.
+The Local Runner production policy permits only UTF-8 filesystem CSV into an existing ordinary SQLite table using INSERT. The matrix cites retained Windows 256 MiB sustained-load, crash and snapshot privacy qualification. Every release requires exact-final-SHA qualification and enrolled-key signature verification. The default source ceiling is **256 MiB**, with bounded-memory streaming.
 
 ```text
 UTF-8 filesystem CSV
