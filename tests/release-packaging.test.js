@@ -34,6 +34,8 @@ test('publication preserves qualification and publishes the installed retained a
   assert.match(script, /scripts\/prepare-release-publication\.js/);
   assert.match(script, /parity-evidence\.json/);
   assert.match(script, /qualification\.json/);
+  assert.match(script, /immutable-releases/);
+  assert.match(script, /\.immutable/);
 });
 
 test('release manifest generator binds artifact digest to version and commit', async () => {

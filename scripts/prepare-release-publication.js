@@ -18,7 +18,7 @@ export function validatePublicationReport(report, commit, version) {
 }
 
 export async function preparePublication({ reportPath, commit, version, output, distDir = 'dist',
-  parityPath = process.env.SPOOL_PARITY_EVIDENCE || 'release/parity-evidence.json',
+  parityPath = process.env.SPOOL_PARITY_EVIDENCE || null,
   publicKeyPath = process.env.SPOOL_RELEASE_PUBLIC_KEY || 'keys/release-public.key' }) {
   if (!/^[a-f0-9]{40}$/.test(commit || '')) throw new Error('Publication requires an exact commit');
   if (execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() !== commit ||
@@ -26,6 +26,9 @@ export async function preparePublication({ reportPath, commit, version, output, 
   const reportBytes = await readFile(reportPath);
   const report = JSON.parse(reportBytes);
   validatePublicationReport(report, commit, version);
+  const signed = report.entries.find(x => x.id === 'signed_provenance');
+  parityPath ||= signed.evidencePath;
+  if (!parityPath) throw new Error('Qualification does not retain its signed parity evidence path');
   const evidence = dirname(resolve(reportPath));
   for (const entry of report.entries) {
     if (!entry.log || hash(await readFile(entry.log)) !== entry.logSha256) throw new Error('Qualification log digest mismatch: ' + entry.id);
@@ -40,7 +43,6 @@ export async function preparePublication({ reportPath, commit, version, output, 
   const publicKey = await readFile(publicKeyPath, 'utf8');
   const payload = verifySignedReleaseEnvelope(envelope, publicKey, { expectedCommit: commit, expectedRoot: chain.artifactRootSha256 });
   if (payload.version !== version) throw new Error('Signed version differs from publication');
-  const signed = report.entries.find(x => x.id === 'signed_provenance');
   const signedBytes = await readFile(signed.log);
   const receipt = JSON.parse(signedBytes);
   assertSignedVerificationReceipt(receipt, { sha: commit, version, artifactRootSha256: chain.artifactRootSha256 });

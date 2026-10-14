@@ -217,6 +217,8 @@ export function qualify() {
   mkdirSync(dirname(evidence), { recursive: true });
   mkdirSync(evidence); // Exclusive create: concurrent runs must never share an attempt directory.
   const root = { ...identity, evidence };
+  const signedEvidence = resolve(process.env.SPOOL_PARITY_EVIDENCE?.trim() || join(evidence, 'parity-evidence.json'));
+  if (signedEvidence === checkout || signedEvidence.startsWith(checkout + sep)) throw new Error('Signed release evidence must remain outside the source checkout');
   const entries = [];
   const reportPath = join(evidence, 'qualification.json');
   function persist() {
@@ -242,7 +244,8 @@ export function qualify() {
     if (audit.status !== 'PASS') throw new Error('High/critical dependency audit failed; see audit log');
 
     for (const check of CHECKS.slice(1)) {
-      const item = runCheck(check, root);
+      const item = runCheck(check.id === 'release_chain'
+        ? { ...check, env: { SPOOL_PARITY_EVIDENCE: signedEvidence } } : check, root);
       entries.push(item);
       persist();
       if (item.status !== 'PASS') throw new Error(check.id + ': failed, see ' + item.log);
@@ -264,7 +267,6 @@ export function qualify() {
     }
     const privateKey = process.env.SPOOL_RELEASE_PRIVATE_KEY?.trim();
     const publicKey = process.env.SPOOL_RELEASE_PUBLIC_KEY?.trim() || 'keys/release-public.key';
-    const signedEvidence = process.env.SPOOL_PARITY_EVIDENCE?.trim() || 'release/parity-evidence.json';
     if (!privateKey || !existsSync(publicKey) || !existsSync(signedEvidence)) {
       entries.push({ id: 'signed_provenance', status: 'NOT_EXECUTED', reason: 'release_keys_or_parity_evidence_missing' });
       persist();
@@ -300,6 +302,7 @@ export function qualify() {
       throw new Error('Signed release receipt is not valid: ' + error.message);
     }
     entries.push({ id: 'signed_provenance', status: 'PASS', signatureVerified: true,
+      evidencePath: signedEvidence,
       commitSha: root.sha, version: root.version, key: receipt.key,
       artifactRootSha256: receipt.artifactRootSha256,
       log: signed.log, logSha256: signed.logSha256 });

@@ -46,6 +46,8 @@ A mapping edited while paused increments `mappingRevision` and sets `needsReplay
 
 Release publication requires the complete exact-source bounded qualification report, including enrolled-key signature verification. The publication preparer validates retained log digests, the installed package digest, current artifact root and signed parity envelope before copying the tested tarball into an exclusively created publication directory. It preserves historical evidence and never repacks after qualification. Version 1.1.2 permits only the bounded filesystem-to-SQLite INSERT path; remote targets, CDC, repair and cutover remain denied by the pinned capability policy.
 
+Signed parity is generated outside the checkout, in each qualification attempt's evidence directory. The qualification report retains that exact path for publication. The tracked `release/parity-evidence.json` is historical evidence and is never overwritten by a new signature; otherwise signing would invalidate its own exact-source cleanliness check. Standalone signing also defaults to a unique external directory and rejects checkout-local output.
+
 Production is delivered as ordinary same-origin static assets: `index.html`, `styles.css`, ES modules under `/src`, and the module Worker. The release deliberately does **not** reconstruct the application from compressed JavaScript payload chunks, `DecompressionStream`, or a dynamic blob module import. This removes an unnecessary startup failure boundary and keeps browser execution debuggable.
 
 Vercel uses one SPA rewrite from `/(.*)` to `/index.html`, so direct navigation to product and Studio routes resolves to the same application shell while real static assets are served normally.

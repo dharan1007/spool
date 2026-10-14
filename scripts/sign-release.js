@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { createPrivateKey, createPublicKey } from 'node:crypto';
+import { createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { join } from 'node:path';
+import { resolve, dirname, join, sep } from 'node:path';
 import { fail } from '../src/core/errors.js';
 import { signedReleaseEnvelope, loadReleaseChain, verifySignedReleaseEnvelope } from '../src/platform/release-chain.js';
 import { fingerprintOfPublicKey } from '../src/platform/signing.js';
@@ -34,10 +34,13 @@ async function main() {
   const distDir = process.env.SPOOL_DIST_DIR?.trim() || 'dist';
   const privateKey = requireEnv('SPOOL_RELEASE_PRIVATE_KEY');
   const version = process.env.SPOOL_RELEASE_VERSION?.trim() || null;
-  const outPath = process.env.SPOOL_PARITY_EVIDENCE?.trim() || 'release/parity-evidence.json';
-  const outFile = join(process.cwd(), outPath);
-
   const chain = await loadReleaseChain({ distDir, commit: process.env.EXPECTED_SHA?.trim() || null });
+  const outPath = process.env.SPOOL_PARITY_EVIDENCE?.trim() || resolve(
+    process.env.SPOOL_QUALIFICATION_EVIDENCE_ROOT || join('..', 'evidence'),
+    'release-signatures', chain.commit, randomUUID(), 'parity-evidence.json');
+  const outFile = resolve(outPath);
+  const checkout = resolve('.');
+  if (outFile === checkout || outFile.startsWith(checkout + sep)) fail('RELEASE_EVIDENCE_PATH', 'Signed release evidence must remain outside the source checkout');
   const publicKey = fingerprintOfPublicKey(privateKeyToPublicPem(privateKey));
 
   let existing = null;
@@ -70,7 +73,7 @@ async function main() {
     envelope
   });
 
-  await mkdir(join(process.cwd(), 'release'), { recursive: true });
+  await mkdir(dirname(outFile), { recursive: true });
   await writeFile(outFile, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8');
   process.stdout.write(`${JSON.stringify({ pass: true, unchanged: false, commit: chain.commit, artifactRootSha256: chain.artifactRootSha256, key: envelope.key, evidence: outPath })}\n`);
 }

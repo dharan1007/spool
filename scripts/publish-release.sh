@@ -21,6 +21,8 @@ test "$MAIN_SHA" = "$COMMIT" || { echo "Requested release SHA is not current ori
 PACKAGE_VERSION="$(node -p "require('./package.json').version")"
 test "$PACKAGE_VERSION" = "$VERSION" || { echo "package.json version $PACKAGE_VERSION does not match requested version $VERSION" >&2; exit 2; }
 
+test "$(gh api "repos/$REPOSITORY/immutable-releases" --jq '.enabled')" = true || { echo 'Enable repository release immutability before publication' >&2; exit 2; }
+
 npm audit --omit=dev --audit-level=high
 npm ci
 QUALIFICATION_LOG="$(mktemp "${TMPDIR:-/tmp}/spool-publication-XXXXXX")"
@@ -99,5 +101,6 @@ gh release view "$TAG" --json tagName,assets,url --repo "$REPOSITORY" > "$PUBLIC
 grep -q 'SHA256SUMS' "$PUBLICATION_PARENT/github-release.json"
 grep -q 'release-record.json' "$PUBLICATION_PARENT/github-release.json"
 grep -q '\.tgz' "$PUBLICATION_PARENT/github-release.json"
+test "$(gh api "repos/$REPOSITORY/releases/tags/$TAG" --jq '.immutable')" = true || { echo 'Published release is not immutable' >&2; exit 2; }
 
 echo "SPOOL $TAG release evidence verified at $COMMIT"
