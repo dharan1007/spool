@@ -37,7 +37,7 @@
     "better-sqlite3": "12.10.1",
     "mssql": "^12.7.2",
     "mysql2": "^3.24.4",
-    "pg": "8.23.0",
+    "pg": "8.23.1",
     "pg-copy-streams": "^7.0.0",
     "pg-logical-replication": "^2.5.0"
   },
