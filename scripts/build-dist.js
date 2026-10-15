@@ -79,7 +79,8 @@ execFileSync(process.execPath, ['--test',
   'tests/xlsx-adversarial.test.js',
   'tests/xlsx-worker-client.test.js',
   'tests/csv-cooperative-slices.test.js',
-  'tests/site-redesign.test.js'
+  'tests/site-redesign.test.js',
+  'tests/static-distribution-gate.test.js'
 ], { stdio: 'inherit' });
 
 const distDir = process.env.SPOOL_DIST_DIR?.trim() || 'dist';
