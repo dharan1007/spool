@@ -22,6 +22,6 @@ test('Unified site exposes the current Local Runner release and full installed-C
   assert.match(source, /Browser Studio stays capped at 50 MiB/i);
   assert.match(source, /256 MiB/i);
   assert.match(source, /customer-controlled machine/i);
-  assert.match(source, /Hobby/i);
+  assert.match(source, /Cloudflare Pages/i);
   assert.doesNotMatch(source, /paid checkout/i);
 });
