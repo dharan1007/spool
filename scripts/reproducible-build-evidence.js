@@ -9,7 +9,7 @@ import { collectArtifactEntries, artifactRootSha256, requireExactCommitSha } fro
 import { fail } from '../src/core/errors.js';
 
 const RELEASE_FILES = new Set(['release.json', 'release-manifest.json']);
-const HOST_CONSUMED_CONFIG = new Set(['vercel.json']);
+const HOST_CONSUMED_CONFIG = new Set(['vercel.json', '_headers']);
 
 function environmentFingerprint() {
   const lockfile = readFileSync('package-lock.json', 'utf8');
