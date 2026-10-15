@@ -96,7 +96,7 @@ for (const file of [
 ]) {
   await cp(`src/${file}`, `${distDir}/src/${file}`);
 }
-for (const file of ['index.html', 'styles.css', 'product.css', 'boot-watchdog.js', 'vercel.json']) await cp(file, `${distDir}/${file}`);
+for (const file of ['index.html', 'styles.css', 'product.css', 'boot-watchdog.js', 'vercel.json', '_headers']) await cp(file, `${distDir}/${file}`);
 const exposed = [
   'src/cli', 'src/connectors', 'src/daemon', 'src/execution',
   'src/platform', 'src/protocol', 'src/safety'
