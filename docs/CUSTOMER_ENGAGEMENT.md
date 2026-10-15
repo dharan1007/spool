@@ -4,7 +4,7 @@ This document defines the operational workflow for paid SPOOL migration work del
 
 ## Zero-cost operating model
 
-SPOOL does not require a hosted customer-data plane, paid checkout, company entity, CRM, or payment gateway for the current service model. Public GitHub intake is **metadata-only**. Customer datasets, database files, credentials, private URLs, personal data, payment details, and production access instructions stay out of public issues.
+SPOOL does not require a hosted customer-data plane, paid checkout, company entity, CRM, or payment gateway for the current service model. Public Tally intake (https://tally.so/r/7XlNdA) is **metadata-only**, and Tally processes submitted business contact/project metadata. Customer datasets, database files, credentials, private URLs, personal data, payment details, and production access instructions stay out of public issues.
 
 The working flow is:
 
@@ -35,7 +35,7 @@ The public Migration Assessment may contain only enough metadata to understand t
 - whether sensitive or regulated information exists;
 - whether the customer controls the target and has a backup/restore path.
 
-Never request or accept raw production rows, database dumps, credentials, API tokens, private URLs, or confidential documents in a public GitHub issue.
+Never request or accept raw production rows, database dumps, credentials, API tokens, private URLs, or confidential documents in public Tally intake or GitHub issues.
 
 ## 2. Move real details to a private channel
 
