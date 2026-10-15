@@ -2,16 +2,16 @@
 
 **Migration correctness infrastructure: dirty data in, typed and verified data out.**
 
-SPOOL is an open-source local-first migration product built and commercially supported by **Dharan Tej Reddy Poduvu**, an individual solo builder. There is currently no incorporated SPOOL company and no paid SaaS dependency required to use or buy supported migration services.
+SPOOL is an MIT-licensed local-first migration product (the source repository is currently private, so unauthenticated installation is not yet available) built and commercially supported by **Dharan Tej Reddy Poduvu**, an individual solo builder. There is currently no incorporated SPOOL company and no paid SaaS dependency required to use or buy supported migration services.
 
 SPOOL has two deliberately separate local-first execution paths:
 
 1. **Browser Studio** — profile, infer, deterministically transform, validate and export CSV/XLSX source data without sending rows to an application backend. XLSX import uses the first visible worksheet, never executes formulas, and normalizes the worksheet into the same deterministic local source contract used by CSV.
 2. **Gate B Local Runner** — bounded-memory streaming execution of an approved UTF-8 filesystem CSV into an existing ordinary SQLite table with a durable content-bound source snapshot, live target preflight, transactional batch evidence, crash reconciliation, fencing, verification and a commit-bound receipt. The Local Runner defaults to a **256 MiB** source ceiling while Browser Studio remains capped at **50 MiB** for CSV/XLSX source files.
 
-[Technical browser surface](https://spool-webmcp.vercel.app/) · [Request a Migration Assessment](https://github.com/dharan1007/spool/issues/new?template=migration-assessment.yml) · [Local Runner](docs/LOCAL_RUNNER.md) · [Customer engagement workflow](docs/CUSTOMER_ENGAGEMENT.md) · [Migration services](docs/MIGRATION_SERVICES.md) · [Security](SECURITY.md)
+[Technical browser surface](https://spool-webmcp.vercel.app/) · [Request a Migration Assessment](https://tally.so/r/7XlNdA) · [Local Runner](docs/LOCAL_RUNNER.md) · [Customer engagement workflow](docs/CUSTOMER_ENGAGEMENT.md) · [Migration services](docs/MIGRATION_SERVICES.md) · [Security](SECURITY.md)
 
-> The Vercel endpoint is a technical/open-source Browser Studio and documentation surface, not a paid customer data plane or checkout. Paid target work is delivered locally/customer-side so no paid hosting is required before revenue.
+> The current Vercel endpoint is a technical Browser Studio and documentation surface. A separately qualified Cloudflare Pages preview is available during migration, not a paid customer data plane or checkout. Paid target work is delivered locally/customer-side so no paid hosting is required before revenue.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -21,7 +21,7 @@ SPOOL has two deliberately separate local-first execution paths:
 
 Node.js 22+ is required. The release remains protected against accidental npm-registry publication; installation is directly from the signed/versioned GitHub source or release artifact.
 
-For v1.1.2, first verify its published signed GitHub release, then install:
+For v1.1.2, authorized repository members should first verify its signed GitHub release, then install. This command is not available to unauthenticated visitors until a separately verified public distribution exists:
 
 ```bash
 npm install -g github:dharan1007/spool#v1.1.2
@@ -214,7 +214,7 @@ Operational documents:
 - [`docs/TERMS_TEMPLATE.md`](docs/TERMS_TEMPLATE.md)
 - [`docs/PRIVACY_TEMPLATE.md`](docs/PRIVACY_TEMPLATE.md)
 
-Public intake is metadata only. Never post production rows, customer/employee data, credentials, database dumps, private URLs, payment details, or identity documents to a GitHub issue.
+Public intake uses the external Tally assessment (https://tally.so/r/7XlNdA) and is metadata only. Tally processes contact and project metadata. Never submit production rows, customer/employee data, credentials, database dumps, private URLs, payment details, or identity documents to this form.
 
 ## Roadmap
 
