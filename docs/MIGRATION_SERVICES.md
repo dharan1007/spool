@@ -1,6 +1,6 @@
 # SPOOL Migration Services
 
-Commercial migration work is currently offered personally by **Dharan Tej Reddy Poduvu**, an individual solo builder/service provider. SPOOL is not currently represented as an incorporated company. The open-source repository remains MIT licensed; paid work covers scoped outcomes, execution, support, and implementation.
+Commercial migration work is currently offered personally by **Dharan Tej Reddy Poduvu**, an individual solo builder/service provider. SPOOL is not currently represented as an incorporated company. The code is MIT-licensed, but the source repository currently requires authorization; paid work covers scoped outcomes, execution, support, and implementation.
 
 ## Zero-cost delivery model
 
@@ -77,7 +77,7 @@ Unsupported capability is a separate engineering project; do not bypass safety c
 
 ## Commercial intake
 
-Use the repository's **Migration Assessment** issue form for initial non-sensitive qualification. It is public: provide only system category, approximate size, failure mode, urgency, and sensitivity classification. Never attach real rows, database dumps, secrets, private URLs, or customer records.
+Use the public **SPOOL Migration Assessment** at https://tally.so/r/7XlNdA for initial non-sensitive qualification. Tally is a third-party form processor; provide business contact details and generic source/target categories, approximate size, failure type, urgency and sensitivity, never actual rows, dumps, credentials, private URLs or customer records.
 
 If the case proceeds, establish a private contact channel and an accepted written quote/order before sensitive information is exchanged. Follow [`CUSTOMER_ENGAGEMENT.md`](CUSTOMER_ENGAGEMENT.md) from qualification through closeout.
 

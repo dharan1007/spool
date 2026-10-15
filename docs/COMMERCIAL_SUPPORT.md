@@ -1,12 +1,12 @@
 # SPOOL Commercial Support
 
-SPOOL's open-source repository remains the public engineering and community surface. Commercial migration work is a separate scoped service relationship.
+SPOOL's MIT-licensed source repository is currently private; its engineering issues and release files cannot be assumed available to unauthenticated customers. Commercial migration work is a separate scoped service relationship.
 
 ## Public channels
 
-Use GitHub issues for reproducible non-sensitive bugs, feature requests and migration-case metadata. Public channels do not carry a response-time SLA and must never contain customer datasets, credentials or confidential records.
+Use the published metadata-only SPOOL Tally assessment (https://tally.so/r/7XlNdA) for public project inquiries. It collects business contact details and categories through the third-party Tally service, not production rows. GitHub engineering issues remain accessible only to authorized repo collaborators. No public intake carries an implied response-time SLA.
 
-The **Migration Assessment** issue form is the initial qualification path for a real migration. It asks only for source/target category, approximate size, failure mode, deadline and sensitivity. It is public by design and explicitly prohibits raw rows and secrets.
+The **SPOOL Migration Assessment** Tally form is the public initial qualification path. It asks for business email, company/team, source/target category, size and urgency, and a safe summary. It explicitly prohibits raw rows and secrets. Tally handles the submitted metadata under its terms and privacy practices.
 
 ## Commercial engagement boundary
 
@@ -21,7 +21,7 @@ A paid engagement begins only after the parties establish:
 7. support or response targets, if purchased;
 8. any customer-specific security/data-handling terms.
 
-No public issue constitutes authorization to mutate a production database.
+No web form, private issue or public inquiry constitutes authorization to mutate a production database.
 
 ## Severity model for scoped engagements
 

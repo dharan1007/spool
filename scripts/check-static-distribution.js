@@ -4,7 +4,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 const root = path.resolve(process.argv[2] || 'dist');
-const forbidden = ['cli', 'connectors', 'daemon', 'execution', 'platform', 'protocol', 'safety'];
+const forbidden = ['assurance', 'cli', 'connectors', 'daemon', 'execution', 'platform', 'protocol', 'safety'];
 for (const dir of forbidden) {
   const target = path.join(root, 'src', dir);
   if (await stat(target).then(() => true, () => false)) {

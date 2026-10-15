@@ -65,3 +65,13 @@ test('permits WebCrypto guarded Node fallback used only outside browsers',async(
     assert.equal(r.status,0,r.stderr);
   });
 });
+
+test('rejects Node-only experimental assurance source in public dist',async()=>{
+  await fixture(async dir=>{
+    await mkdir(join(dir,'src','assurance'));
+    await writeFile(join(dir,'src','assurance','foundation.js'),"import {sign} from 'node:crypto';");
+    const r=validate(dir);
+    assert.notEqual(r.status,0);
+    assert.match(r.stderr,/Privileged Node-only directory/);
+  });
+});
