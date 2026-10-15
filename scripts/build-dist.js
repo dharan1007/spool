@@ -83,8 +83,29 @@ execFileSync(process.execPath, ['--test',
 const distDir = process.env.SPOOL_DIST_DIR?.trim() || 'dist';
 await rm(distDir, { recursive: true, force: true });
 await mkdir(distDir, { recursive: true });
-await cp('src', `${distDir}/src`, { recursive: true });
+// Ship only the browser application. Node-side connectors, CLI, daemon, signing,
+ // secrets, and database mutation internals must not be served from a public CDN.
+await mkdir(`${distDir}/src`, { recursive: true });
+for (const dir of ['core', 'runtime', 'storage', 'webmcp', 'worker']) {
+  await cp(`src/${dir}`, `${distDir}/src/${dir}`, { recursive: true });
+}
+for (const file of [
+  'app.js', 'studio-flow.js', 'site-content.js', 'site-redesign.js',
+  'site-redesign.css', 'product-surface.js', 'xlsx-ingest.js',
+  'xlsx-worker-client.js', 'zip-reader.js'
+]) {
+  await cp(`src/${file}`, `${distDir}/src/${file}`);
+}
 for (const file of ['index.html', 'styles.css', 'product.css', 'boot-watchdog.js', 'vercel.json']) await cp(file, `${distDir}/${file}`);
+const exposed = [
+  'src/cli', 'src/connectors', 'src/daemon', 'src/execution',
+  'src/platform', 'src/protocol', 'src/safety'
+];
+for (const path of exposed) {
+  const found = await import('node:fs/promises').then(fs => fs.stat(`${distDir}/${path}`).then(() => true, () => false));
+  if (found) throw new Error(`Refusing browser distribution of Node-only module tree ${path}`);
+}
+
 
 const html = await readFile(`${distDir}/index.html`, 'utf8');
 const config = JSON.parse(await readFile(`${distDir}/vercel.json`, 'utf8'));
