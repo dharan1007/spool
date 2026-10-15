@@ -101,7 +101,7 @@ for (const file of [
 }
 for (const file of ['index.html', 'styles.css', 'product.css', 'boot-watchdog.js', 'vercel.json', '_headers']) await cp(file, `${distDir}/${file}`);
 const exposed = [
-  'src/cli', 'src/connectors', 'src/daemon', 'src/execution',
+  'src/assurance', 'src/cli', 'src/connectors', 'src/daemon', 'src/execution',
   'src/platform', 'src/protocol', 'src/safety'
 ];
 for (const path of exposed) {
