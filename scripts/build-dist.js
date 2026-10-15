@@ -8,13 +8,14 @@ const RELEASE_FILES = new Set(['release.json', 'release-manifest.json']);
 // rewrite answers /vercel.json with /index.html instead), so no production
 // deployment can ever attest it. It stays in dist/ for the host, but must
 // not enter the served-artifact manifest or its root hash.
-const HOST_CONSUMED_CONFIG = new Set(['vercel.json']);
+const HOST_CONSUMED_CONFIG = new Set(['vercel.json', '_headers']);
 const EXACT_GIT_SHA = /^[a-f0-9]{40}$/i;
 
 function resolveCommitIdentity() {
   const candidates = [
     ['SPOOL_COMMIT_SHA', process.env.SPOOL_COMMIT_SHA],
     ['VERCEL_GIT_COMMIT_SHA', process.env.VERCEL_GIT_COMMIT_SHA],
+    ['CF_PAGES_COMMIT_SHA', process.env.CF_PAGES_COMMIT_SHA],
     ['GITHUB_SHA', process.env.GITHUB_SHA]
   ];
   for (const [name, raw] of candidates) {
@@ -30,7 +31,8 @@ function resolveCommitIdentity() {
 
 function releaseIdentityRequired() {
   return process.env.SPOOL_REQUIRE_RELEASE_IDENTITY?.trim() === '1'
-    || process.env.VERCEL?.trim() === '1';
+    || process.env.VERCEL?.trim() === '1'
+    || process.env.CF_PAGES?.trim() === '1';
 }
 
 async function collectArtifactEntries(root, relative = '') {
@@ -106,6 +108,8 @@ for (const path of exposed) {
   if (found) throw new Error(`Refusing browser distribution of Node-only module tree ${path}`);
 }
 
+
+execFileSync(process.execPath, ['scripts/check-static-distribution.js', distDir], { stdio: 'inherit' });
 
 const html = await readFile(`${distDir}/index.html`, 'utf8');
 const config = JSON.parse(await readFile(`${distDir}/vercel.json`, 'utf8'));
