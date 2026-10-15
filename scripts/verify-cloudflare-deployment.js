@@ -54,5 +54,21 @@ for (const asset of [
     throw new Error('Privileged Node-side source exposed at '+asset);
   }
 }
-const parity = await verifyDeployedRelease({baseUrl:origin,expectedCommit:commit});
+// Cloudflare Pages canonicalizes /index.html to /. Permit ONLY that
+// byte-equivalent same-origin canonical redirect for the manifest verifier.
+async function cloudflareFetch(input, options = {}) {
+  const requested = new URL(input);
+  if (requested.origin !== origin) throw new Error('Refusing cross-origin asset fetch');
+  if (requested.pathname !== '/index.html') return fetch(input, options);
+  const first = await fetch(input, {...options, redirect:'manual'});
+  if (![301, 302, 307, 308].includes(first.status)) return first;
+  const location = first.headers.get('location');
+  const destination = location ? new URL(location, requested) : null;
+  if (!destination || destination.origin !== origin || destination.pathname !== '/' ||
+      destination.search || destination.hash) {
+    throw new Error('Refusing unexpected index.html redirect');
+  }
+  return fetch(destination, {...options, redirect:'error'});
+}
+const parity = await verifyDeployedRelease({baseUrl:origin,expectedCommit:commit,fetchImpl:cloudflareFetch});
 console.log(JSON.stringify({status:'PASS',origin,commit:parity.commit,artifacts:parity.artifactCount,csp:true,restrictedPaths:5,deepLinks:5}));
