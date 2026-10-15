@@ -38,7 +38,7 @@ for (const file of jsFiles) {
     for (const match of code.matchAll(re)) imports.push(match[1]);
   }
   for (const target of imports) {
-    if (target === 'node:crypto' && code.includes("typeof window")) continue;
+    if (target === 'node:crypto' && code.includes("globalThis.crypto?.subtle")) continue;
     if (!(target.startsWith('./') || target.startsWith('../') || target.startsWith('/'))) {
       throw new Error('Unsupported web module import in ' + path.relative(root, file) + ': ' + target);
     }
