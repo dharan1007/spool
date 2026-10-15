@@ -8,13 +8,14 @@ const RELEASE_FILES = new Set(['release.json', 'release-manifest.json']);
 // rewrite answers /vercel.json with /index.html instead), so no production
 // deployment can ever attest it. It stays in dist/ for the host, but must
 // not enter the served-artifact manifest or its root hash.
-const HOST_CONSUMED_CONFIG = new Set(['vercel.json']);
+const HOST_CONSUMED_CONFIG = new Set(['vercel.json', '_headers']);
 const EXACT_GIT_SHA = /^[a-f0-9]{40}$/i;
 
 function resolveCommitIdentity() {
   const candidates = [
     ['SPOOL_COMMIT_SHA', process.env.SPOOL_COMMIT_SHA],
     ['VERCEL_GIT_COMMIT_SHA', process.env.VERCEL_GIT_COMMIT_SHA],
+    ['CF_PAGES_COMMIT_SHA', process.env.CF_PAGES_COMMIT_SHA],
     ['GITHUB_SHA', process.env.GITHUB_SHA]
   ];
   for (const [name, raw] of candidates) {
@@ -30,7 +31,8 @@ function resolveCommitIdentity() {
 
 function releaseIdentityRequired() {
   return process.env.SPOOL_REQUIRE_RELEASE_IDENTITY?.trim() === '1'
-    || process.env.VERCEL?.trim() === '1';
+    || process.env.VERCEL?.trim() === '1'
+    || process.env.CF_PAGES?.trim() === '1';
 }
 
 async function collectArtifactEntries(root, relative = '') {
@@ -77,14 +79,38 @@ execFileSync(process.execPath, ['--test',
   'tests/xlsx-adversarial.test.js',
   'tests/xlsx-worker-client.test.js',
   'tests/csv-cooperative-slices.test.js',
-  'tests/site-redesign.test.js'
+  'tests/site-redesign.test.js',
+  'tests/static-distribution-gate.test.js'
 ], { stdio: 'inherit' });
 
 const distDir = process.env.SPOOL_DIST_DIR?.trim() || 'dist';
 await rm(distDir, { recursive: true, force: true });
 await mkdir(distDir, { recursive: true });
-await cp('src', `${distDir}/src`, { recursive: true });
-for (const file of ['index.html', 'styles.css', 'product.css', 'boot-watchdog.js', 'vercel.json']) await cp(file, `${distDir}/${file}`);
+// Ship only the browser application. Node-side connectors, CLI, daemon, signing,
+ // secrets, and database mutation internals must not be served from a public CDN.
+await mkdir(`${distDir}/src`, { recursive: true });
+for (const dir of ['core', 'runtime', 'storage', 'webmcp', 'worker']) {
+  await cp(`src/${dir}`, `${distDir}/src/${dir}`, { recursive: true });
+}
+for (const file of [
+  'app.js', 'studio-flow.js', 'site-content.js', 'site-redesign.js',
+  'site-redesign.css', 'product-surface.js', 'xlsx-ingest.js',
+  'xlsx-worker-client.js', 'zip-reader.js'
+]) {
+  await cp(`src/${file}`, `${distDir}/src/${file}`);
+}
+for (const file of ['index.html', 'styles.css', 'product.css', 'boot-watchdog.js', 'vercel.json', '_headers']) await cp(file, `${distDir}/${file}`);
+const exposed = [
+  'src/cli', 'src/connectors', 'src/daemon', 'src/execution',
+  'src/platform', 'src/protocol', 'src/safety'
+];
+for (const path of exposed) {
+  const found = await import('node:fs/promises').then(fs => fs.stat(`${distDir}/${path}`).then(() => true, () => false));
+  if (found) throw new Error(`Refusing browser distribution of Node-only module tree ${path}`);
+}
+
+
+execFileSync(process.execPath, ['scripts/check-static-distribution.js', distDir], { stdio: 'inherit' });
 
 const html = await readFile(`${distDir}/index.html`, 'utf8');
 const config = JSON.parse(await readFile(`${distDir}/vercel.json`, 'utf8'));

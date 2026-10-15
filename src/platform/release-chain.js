@@ -7,7 +7,7 @@ import { collectArtifactEntries, artifactRootSha256, requireExactCommitSha, requ
 import { publicKeyId, signCanonical, verifyCanonical } from './signing.js';
 
 const RELEASE_FILES = new Set(['release.json', 'release-manifest.json']);
-const HOST_CONSUMED_CONFIG = new Set(['vercel.json']);
+const HOST_CONSUMED_CONFIG = new Set(['vercel.json', '_headers']);
 const EXACT_GIT_SHA = /^[a-f0-9]{40}$/i;
 
 export function gitCommitForDir({ cwd = process.cwd(), ref = 'HEAD' } = {}) {

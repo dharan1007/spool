@@ -5,10 +5,10 @@ import { createHash } from 'node:crypto';
 import { fail, SpoolError } from '../core/errors.js';
 
 // Release-reviewed product scope. Updating the register requires reviewing and
-// regenerating this pin; runtime assurance never changes this allowlist.
+// regenerating this pin from the exact LF bytes in the Git repository; runtime assurance never changes this allowlist.
 export const PRODUCTION_POLICY = Object.freeze({
   version: 1, release: '1.1.2',
-  matrixSha256: 'ab1e3691e81a11756a10b0b7adfb3599e6565f2927de3ddae5979c2b372e4a90',
+  matrixSha256: 'fd7af7c0b383d2f8c318897e95f741cd3242eb08642c3746f5a0cb49e599630a',
   target: 'sqlite', source: 'filesystem', maxSourceBytes: 256 * 1024 * 1024
 });
 const instances = new WeakSet();
