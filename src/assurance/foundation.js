@@ -222,9 +222,10 @@ export function verifyProofCapsule(capsule,publicKey){
   if(hash('proof-capsule',c.payload)!==c.digest)return freeze({verified:false,reason:'PAYLOAD_TAMPERED'});
   if(!c.signature||c.signatureStatus!=='SIGNED')return freeze({verified:false,reason:'UNSIGNED'});
   if(!publicKey)return freeze({verified:false,reason:'NO_TRUST_ROOT'});
-  const spki=createPublicKey(publicKey).export({type:'spki',format:'der'});
+  const verifyingKey=publicKey?.type==='public'?publicKey:createPublicKey(publicKey);
+  const spki=verifyingKey.export({type:'spki',format:'der'});
   const id=createHash('sha256').update(spki).digest('hex');
   if(id!==c.signature.keyId||c.signature.algorithm!=='Ed25519')return freeze({verified:false,reason:'WRONG_TRUST_ROOT'});
-  let valid=false;try {valid=verify(null,Buffer.from(c.digest,'utf8'),publicKey,Buffer.from(c.signature.bytes,'base64'));} catch {valid=false;}
+  let valid=false;try {valid=verify(null,Buffer.from(c.digest,'utf8'),verifyingKey,Buffer.from(c.signature.bytes,'base64'));} catch {valid=false;}
   return freeze({verified:valid,reason:valid?'SIGNED_EVIDENCE_ONLY':'BAD_SIGNATURE',productionAuthorization:false});
 }
