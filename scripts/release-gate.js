@@ -17,7 +17,7 @@ function gitHead() {
 }
 
 function resolveCommit() {
-  for (const name of ['SPOOL_COMMIT_SHA', 'GITHUB_SHA', 'VERCEL_GIT_COMMIT_SHA']) {
+  for (const name of ['SPOOL_COMMIT_SHA', 'GITHUB_SHA', 'VERCEL_GIT_COMMIT_SHA', 'CF_PAGES_COMMIT_SHA']) {
     const value = process.env[name]?.trim() || '';
     if (!value) continue;
     if (!EXACT_GIT_SHA.test(value)) fail('INVALID_COMMIT_SHA', `${name} must be an exact 40-character Git commit SHA`);
