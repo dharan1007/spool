@@ -18,6 +18,7 @@ async function buildFixture(t, env = {}) {
       SPOOL_COMMIT_SHA: '',
       VERCEL_GIT_COMMIT_SHA: '',
       CF_PAGES_COMMIT_SHA: '',
+      CF_PAGES: '',
       GITHUB_SHA: '',
       SPOOL_REQUIRE_RELEASE_IDENTITY: '',
       VERCEL: '',
