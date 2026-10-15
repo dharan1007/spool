@@ -133,3 +133,9 @@ test('test data size is capped and invalid rules cannot trigger arbitrary code',
  assert.throws(()=>compareSnapshots({sourceRows:huge,targetRows:[],keyFields:['id']}),/limit|bounded/i);
  assert.throws(()=>createCovenant({...raw,rules:[{id:'x',type:'field_equal',field:'id',constructor:'x'}]}),/Unsupported/);
 });
+
+test('field-level equality never verifies a target-only identity',()=>{
+ const modified=[...structuredClone(dst),{id:'0003',amount:'0.00'}];
+ const result=evaluateCovenant(cov,{sourceRows:src,targetRows:modified});
+ assert.equal(result.findings.find(f=>f.id==='amount').status,'MISMATCH');
+});
