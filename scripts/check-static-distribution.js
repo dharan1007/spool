@@ -31,9 +31,9 @@ let checkedEdges = 0;
 for (const file of jsFiles) {
   const code = await readFile(file, 'utf8');
   const imports = [];
-  const statements = /\\b(?:import|export)\\s+(?:[^'";]*?\\s+from\\s*)?['"]([^'"]+)['"]/g;
-  const lazy = /\\bimport\\s*\\(\\s*['"]([^'"]+)['"]\\s*\\)/g;
-  const assets = /\\bnew\\s+URL\\s*\\(\\s*['"]([^'"]+)['"]\\s*,\\s*import\\.meta\\.url/g;
+  const statements = /\b(?:import|export)\s+(?:[^'";]*?\s+from\s*)?['"]([^'"]+)['"]/g;
+  const lazy = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  const assets = /\bnew\s+URL\s*\(\s*['"]([^'"]+)['"]\s*,\s*import\.meta\.url/g;
   for (const re of [statements, lazy, assets]) {
     for (const match of code.matchAll(re)) imports.push(match[1]);
   }
