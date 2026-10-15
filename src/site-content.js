@@ -1,5 +1,6 @@
 const REPO = 'https://github.com/dharan1007/spool';
 const RELEASE = 'v1.1.2';
+const ASSESSMENT = 'https://tally.so/r/7XlNdA';
 
 function esc(value) {
   return String(value == null ? '' : value).replace(/[&<>'"]/g, function (char) {
@@ -44,11 +45,11 @@ function home(ctx) {
     "<section class='redesign-hero'>",
       "<div class='redesign-hero-copy'>",
         badge('Browser-local preparation + verified local execution'),
-        "<h1>Move messy data through a clear, controlled workflow.</h1>",
-        "<p>SPOOL separates every important decision: inspect the source, understand problems, approve the transformation, test it without committing, process the records, then validate the result. No mystery button and no hidden jump from upload to execution.</p>",
+        "<h1>Make messy data import-ready, and know what failed before committing anything.</h1>",
+        "<p>Prepare CSV/XLSX safely in your browser. See what will be accepted, what needs attention, and what cannot be proven. For a real migration, request a scoped assessment before any customer database is touched.</p>",
         buttonRow([
           route(resume, ctx.hasSource ? 'Resume current workflow →' : 'Start with a file →', 'redesign-button primary large'),
-          route('/how-it-works', 'See every stage', 'redesign-button secondary large')
+          external(ASSESSMENT, 'Request a migration assessment →', 'redesign-button secondary large')
         ]),
         "<div class='redesign-trust'><span>CSV + XLSX</span><span>50 MiB Browser Studio limit</span><span>Rows stay local</span></div>",
       "</div>",
@@ -56,6 +57,7 @@ function home(ctx) {
         "<span class='redesign-label'>CHOOSE WHAT YOU NEED</span>",
         route(resume, "<span class='redesign-choice-number'>01</span><div><strong>Prepare a dataset</strong><p>Inspect, transform, dry-run, process and export CSV/XLSX in Browser Studio.</p></div><b>Open Studio →</b>", 'redesign-choice primary-choice'),
         route('/local-runner', "<span class='redesign-choice-number'>02</span><div><strong>Write to SQLite</strong><p>Use the verified Local Runner for customer-controlled production target mutation.</p></div><b>Open Local Runner →</b>", 'redesign-choice'),
+        external(ASSESSMENT, "<span class='redesign-choice-number'>03</span><div><strong>Plan or rescue an import</strong><p>Send project metadata only. No uploads, credentials or production access requested.</p></div><b>Request assessment →</b>", 'redesign-choice'),
       "</aside>",
     "</section>",
     "<section class='redesign-section'>",
@@ -139,13 +141,13 @@ function benchmarks() {
 function localRunner() {
   return [
     "<section class='redesign-page-hero redesign-product-hero'><div>", badge('LOCAL RUNNER · EXPERIMENTAL TARGET WRITES'), "<h1>CSV → SQLite with explicit approval, recovery and proof.</h1><p>The Browser Studio prepares files. The candidate Local Runner defaults to denying target execution until independent qualification passes. Target writes stay on the customer-controlled machine. Marked disposable engineering runs use synthetic data and existing ordinary SQLite tables with bounded-memory streaming and a 256 MiB default source ceiling.</p>",
-      buttonRow([external(REPO + '/releases/tag/' + RELEASE, 'Open ' + RELEASE + ' release →', 'redesign-button primary large'), route('/examples', 'See the verified CRM example', 'redesign-button secondary large')]), "</div>",
+      buttonRow([external(ASSESSMENT, 'Request verified installation →', 'redesign-button primary large'), route('/examples', 'See the verified CRM example', 'redesign-button secondary large')]), "</div>",
       "<aside class='redesign-runner-sequence'><span>1 · Snapshot source</span><span>2 · Inspect target</span><span>3 · Plan</span><span>4 · Dry-run</span><span>5 · target_write approval</span><span>6 · Execute with fencing</span><span>7 · Reconcile</span><strong>8 · Verify + receipt</strong></aside>",
     "</section>",
     "<section class='redesign-section'><div class='redesign-section-head'><div>", badge('WHAT TO USE'), "<h2>Choose the execution surface by destination.</h2><p>Do not use the hosted Browser Studio as if it were a remote database service.</p></div></div>",
       "<div class='redesign-choice-grid'>",
         "<article><span>BROWSER STUDIO</span><h3>Prepare CSV / XLSX</h3><p>Inspect, understand, transform, dry-run, process in a Worker, validate and export. Browser limit: 50 MiB.</p>", route('/studio/original', 'Open Browser Studio →', 'redesign-button secondary'), "</article>",
-        "<article class='featured'><span>LOCAL RUNNER</span><h3>Write to SQLite</h3><p>Filesystem CSV → existing ordinary SQLite table, insert-only, with durable snapshot, target contract, approval, fencing and reconciliation.</p>", external(REPO + '/releases/tag/' + RELEASE, 'Install Local Runner →', 'redesign-button primary'), "</article>",
+        "<article class='featured'><span>LOCAL RUNNER</span><h3>Write to SQLite</h3><p>Filesystem CSV → existing ordinary SQLite table, insert-only, with durable snapshot, target contract, approval, fencing and reconciliation.</p>", external(ASSESSMENT, 'Request Local Runner installation →', 'redesign-button primary'), "</article>",
         "<article><span>LOCAL BRIDGE</span><h3>Use spoold for local tools</h3><p>Loopback-only authenticated HTTP access to the same command service. It is not a public hosted mutation API.</p>", external(REPO + '/blob/main/src/daemon/spoold.js', 'Inspect spoold →', 'redesign-button text'), "</article>",
       "</div>",
     "</section>",
@@ -167,7 +169,7 @@ function localRunner() {
     "</section>",
     "<section class='redesign-section redesign-command-card'><div><span class='redesign-eyebrow'>INSTALL + RUN</span><h2>The production path is a deliberate sequence.</h2><p>Node.js 22+ is required. Browser Studio stays capped at 50 MiB. Use the same roots and durable state file across the full Local Runner lifecycle.</p></div>",
       "<pre>npm install -g github:dharan1007/spool#v1.1.2\nspool --help\nexport SPOOL_APPROVAL_KEY=&quot;$(openssl rand -hex 32)&quot;\nspool inspect --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db\nspool plan --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db\nspool dry-run --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db\nspool approve --request migration.json --source-root ./data --target-root ./data --state ./data/spool-state.db --expires 2026-12-31T23:59:59.000Z --nonce first-run --out approval.json\nspool run --request migration.json --approval approval.json --source-root ./data --target-root ./data --state ./data/spool-state.db --out run-result.json\nspool status --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db\nspool verify --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db\nspool receipt --migration-id mig_customers_001 --source-root ./data --target-root ./data --state ./data/spool-state.db --out receipt.json</pre>",
-      buttonRow([external(REPO + '/releases/tag/' + RELEASE, 'Download / verify ' + RELEASE + ' →', 'redesign-button primary'), external(REPO + '/blob/main/docs/LOCAL_RUNNER.md', 'Open migration.json guide', 'redesign-button secondary'), external(REPO + '/tree/main/examples/crm-export', 'Use verified example', 'redesign-button text')]),
+      buttonRow([external(ASSESSMENT, 'Request a verified Local Runner package →', 'redesign-button primary'), external(REPO + '/blob/main/docs/LOCAL_RUNNER.md', 'Open migration.json guide', 'redesign-button secondary'), external(REPO + '/tree/main/examples/crm-export', 'Use verified example', 'redesign-button text')]),
     "</section>"
   ].join('');
 }
@@ -195,10 +197,12 @@ function security() {
 
 function services() {
   return [
-    "<section class='redesign-page-hero'><div>", badge('DEPLOYMENT + SUPPORT'), "<h1>The hosted site prepares data. Production target writes stay local.</h1><p>The public deployment does not receive SQLite credentials or customer database rows. This hosted surface is intentionally non-commercial while deployed on a personal Hobby workspace.</p>",
-      buttonRow([route('/local-runner', 'Run SPOOL locally →', 'redesign-button primary large'), external(REPO, 'Open source repository', 'redesign-button secondary large')]), "</div></section>",
+    "<section class='redesign-page-hero'><div>", badge('DEPLOYMENT + SUPPORT'), "<h1>Know what will fail before importing. Fix the file, or request a scoped migration assessment.</h1><p>Browser Studio processes your CSV/XLSX locally and does not upload dataset rows. SPOOL assessments use a separate Tally form collecting only project metadata and contact details; do not submit secrets or datasets. Production target writes are customer-local and require separate authorization.</p>",
+      buttonRow([external(ASSESSMENT, 'Request assessment →', 'redesign-button primary large'), route('/studio/original', 'Try Browser Studio', 'redesign-button secondary large')]), "</div></section>",
     "<section class='redesign-section redesign-service-grid'><article><span>01</span><h2>Browser Studio</h2><p>Hosted browser-local CSV/XLSX inspection, transformation, dry-run, processing and export.</p>", route('/studio/original', 'Open Studio →', 'redesign-button secondary'), "</article><article><span>02</span><h2>Local Runner</h2><p>Customer-local CSV → SQLite with snapshot, approval, fencing, reconciliation, verification and receipt.</p>", route('/local-runner', 'Open Local Runner →', 'redesign-button secondary'), "</article><article><span>03</span><h2>Local Bridge</h2><p><code>spoold</code> gives local developer tools authenticated loopback access to the command service.</p>", external(REPO + '/blob/main/src/daemon/spoold.js', 'Inspect spoold →', 'redesign-button text'), "</article><article><span>04</span><h2>Self-host</h2><p>Build the static <code>dist/</code> output and deploy it under infrastructure appropriate to your organization.</p>", external(REPO + '/blob/main/docs/SELF_HOSTING.md', 'Read self-hosting guide →', 'redesign-button text'), "</article></section>",
-    "<section class='redesign-section redesign-callout'><div><h2>Support is metadata-only.</h2><p>Do not attach production datasets, credentials, private URLs, database dumps or customer records to public issues.</p></div>", external(REPO + '/issues', 'Open GitHub issues →', 'redesign-button secondary'), "</section>"
+    "<section class='redesign-section redesign-callout'><div><h2>Request help without sharing raw data.</h2><p>Only share business contact details and generic source/target categories via the separate Tally assessment form. No datasets, credentials, private URLs, database dumps or confidential records. An inquiry is not an authorization to modify a database.</p></div>", external(ASSESSMENT, 'Submit a safe assessment →', 'redesign-button secondary'), "</section>",
+    "<section class='redesign-section redesign-three-col'><article><span>PREFLIGHT</span><h3>Migration readiness</h3><p>Scoped CSV inspection, error categories and safer target-import recommendations. A quote follows the assessment.</p></article><article><span>IMPORT PREPARATION</span><h3>Import-ready data</h3><p>Deterministic mapping, documented rejects and a reproducible local export within supported boundaries.</p></article><article><span>SUPPORTED EXECUTION</span><h3>CSV to SQLite</h3><p>Existing ordinary SQLite tables, INSERT-only, customer-controlled execution, evidence and recovery procedures.</p></article></section>",
+    "<section class='redesign-section redesign-callout'><div><h2>What we cannot promise yet.</h2><p>PostgreSQL/MySQL/SQL Server target writes, enterprise CDC, repair, automatic cutover and the proposed assurance modules are not production-qualified. No access to private GitHub source or installer is guaranteed to unauthenticated visitors.</p></div>", external(ASSESSMENT, 'Discuss a scoped engagement →', 'redesign-button primary'), "</section>"
   ].join('');
 }
 
