@@ -111,6 +111,8 @@ export function evaluateCovenant(covenant,{sourceRows,targetRows,collections={},
       if(a.duplicates||b.duplicates||a.missing||b.missing){status='INDETERMINATE';reason='AMBIGUOUS_IDENTITY';}
       else {
         for(const [key,row] of a.index){const to=b.index.get(key);if(!to||!Object.hasOwn(row,rule.field)||!Object.hasOwn(to,rule.field)||canonicalJson(row[rule.field])!==canonicalJson(to[rule.field]))affected++;}
+        // A target-only identity must not be silently treated as verified equality.
+        for(const key of b.index.keys()) if(!a.index.has(key)) affected++;
         status=affected?'MISMATCH':'VERIFIED';reason='FIELD_EQUIVALENCE';
       }
     } else if(rule.type==='sum_equal'&&source&&target){

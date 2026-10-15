@@ -46,7 +46,9 @@ for (const asset of [
   '/src/connectors/postgres/connection.js',
   '/src/platform/secrets.js',
   '/src/daemon/spoold.js',
-  '/src/execution/migration-runner.js'
+  '/src/execution/migration-runner.js',
+  '/src/connectors/sqlite/source-readonly.js',
+  '/src/assurance/foundation.js'
 ]) {
   const result = await get(asset);
   const contentType = result.response.headers.get('content-type') || '';
@@ -71,4 +73,4 @@ async function cloudflareFetch(input, options = {}) {
   return fetch(destination, {...options, redirect:'error'});
 }
 const parity = await verifyDeployedRelease({baseUrl:origin,expectedCommit:commit,fetchImpl:cloudflareFetch});
-console.log(JSON.stringify({status:'PASS',origin,commit:parity.commit,artifacts:parity.artifactCount,csp:true,restrictedPaths:5,deepLinks:5}));
+console.log(JSON.stringify({status:'PASS',origin,commit:parity.commit,artifacts:parity.artifactCount,csp:true,restrictedPaths:7,deepLinks:5}));
