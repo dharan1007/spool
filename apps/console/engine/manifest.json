@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "kind": "spool-console-engine-bundle",
   "engineVersion": "1.1.2",
-  "engineCommitSha": "497aa9b7580a9889f3e40d66f5b706fdaa2d5aff",
-  "generatedAt": "2026-10-23T10:32:41.448Z",
+  "engineCommitSha": "c9f829938423efdbf15f39d40bde2c2c1c9d3694",
+  "generatedAt": "2026-10-23T13:39:47.277Z",
   "aggregateSha256": "72f72fca67e9a0b0a283361d9957dbabf9e0dc6ec4e62bb087012bfddbb305ac",
   "capabilityAggregateSha256": "7929cf93a367e14a7f47ec8a2dea1564041c060136e23093e5e6f49a867ba109",
   "files": {

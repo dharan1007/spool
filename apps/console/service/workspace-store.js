@@ -142,7 +142,7 @@ export class WorkspaceStore {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)`),
       getMigration: this.db.prepare('SELECT * FROM migration_index WHERE migration_id = ?'),
       updateMigrationStatus: this.db.prepare('UPDATE migration_index SET last_status = ?, last_state = ?, updated_at = ? WHERE migration_id = ?'),
-      updateMigrationPlan: this.db.prepare('UPDATE migration_index SET plan_json = ?, dry_run_json = COALESCE(?, dry_run_json), approval_json = COALESCE(?, approval_json), updated_at = ? WHERE migration_id = ?'),
+      updateMigrationPlan: this.db.prepare('UPDATE migration_index SET plan_json = COALESCE(?, plan_json), dry_run_json = COALESCE(?, dry_run_json), approval_json = COALESCE(?, approval_json), updated_at = ? WHERE migration_id = ?'),
       updateMigrationDesign: this.db.prepare('UPDATE migration_index SET plan_input_json = ?, target_schema_json = ?, mapping_json = ?, mapping_revision = ?, plan_revision = ?, updated_at = ? WHERE migration_id = ?'),
       listMigrations: this.db.prepare(`SELECT migration_id, workspace_id, name, target_path, table_name, last_status, last_state, created_at, updated_at
         FROM migration_index

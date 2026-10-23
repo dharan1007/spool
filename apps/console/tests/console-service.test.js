@@ -48,7 +48,7 @@ test("console service creates migration through engine path", async () => {
   const plan = await svc.plan(record.migrationId);
   assert.equal(plan.planId, plan.planId);
   const dry = await svc.dryRun(record.migrationId);
-  assert.equal(dry.validRows, 2);
+  assert.equal(dry.dryRun.validRows, 2);
   store.close();
   svc.closeAll();
 });

@@ -24,17 +24,41 @@ const mappingEntry = z.object({
   expr
 }).strict();
 
+const sourceColumn = z.object({
+  name: z.string().min(1).max(256),
+  inferredType: z.string().max(32),
+  nullable: z.boolean(),
+  sampleNulls: z.number().int().nonnegative().optional(),
+  sampleDistinct: z.number().int().nonnegative().optional(),
+  samples: z.array(z.string().max(4096)).max(3).optional(),
+  warnings: z.array(z.object({
+    code: z.string().max(64),
+    message: z.string().max(1024)
+  }).strict()).max(16).optional(),
+  basis: z.enum(['sample', 'exact']).optional()
+}).strict();
+
+const profileWarning = z.object({
+  code: z.string().max(64),
+  message: z.string().max(1024),
+  column: z.string().max(256).optional()
+}).strict();
+
 const sourceProfile = z.object({
   path,
   name: z.string().min(1).max(512),
   sizeBytes: z.number().int().nonnegative(),
   rowCount: z.number().int().nonnegative(),
+  rowCountBasis: z.enum(['exact', 'sample']).optional(),
   sourceFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/),
-  columns: z.array(z.object({
-    name: z.string().min(1).max(256),
-    inferredType: z.string().max(32),
-    nullable: z.boolean()
-  }).strict()).min(1)
+  headers: z.array(z.string().min(1).max(256)).min(1).optional(),
+  columns: z.array(sourceColumn).min(1),
+  sampleRows: z.number().int().nonnegative().optional(),
+  sampleBasis: z.string().max(32).optional(),
+  sampleLimit: z.number().int().nonnegative().optional(),
+  maxSourceBytes: z.number().int().nonnegative().optional(),
+  warnings: z.array(profileWarning).max(256).optional(),
+  inspectedAt: z.string().max(64).optional()
 }).strict();
 
 const destination = z.object({

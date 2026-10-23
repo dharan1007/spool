@@ -1,0 +1,40 @@
+
+{
+  "harness": "spool-console-ipc-v1",
+  "appRoot": "C:\\temp\\spool-console\\apps\\console",
+  "engineCommitSha": "c9f829938423efdbf15f39d40bde2c2c1c9d3694",
+  "verifyRelease": {
+    "verified": true,
+    "release": "1.1.2",
+    "commitSha": "c9f829938423efdbf15f39d40bde2c2c1c9d3694",
+    "capabilities": 49
+  },
+  "sourceRowCount": 40,
+  "destinationTables": [
+    "customers"
+  ],
+  "workspace": "ok",
+  "migrationId": "mig_460aaed6-7d4c-466b-941d-985b5651b4f4",
+  "dryRun": {
+    "migrationId": "mig_460aaed6-7d4c-466b-941d-985b5651b4f4",
+    "planId": "sha256:333618cf2e69ec7703c28187747ae803f77b4af90672bf235603b2fc76123271",
+    "sourceSnapshotId": "sha256:3d54865979b9bc033337181477de0c352d054cb40a2bb19d9e9a0dae977d82d1",
+    "targetContractId": "sha256:06978c14b445120bccfb0d99158b3d894c267b0f60294c7a7677fc0103e6d9a9",
+    "processedRows": 40,
+    "validRows": 40,
+    "invalidRows": 0,
+    "violations": []
+  },
+  "approvalId": "sha256:3a3af84b48e8ce0319a93977c2597cf242ae85c02af159c8f98fb0b90ce0e2f9",
+  "executeStatus": "COMPLETE",
+  "receipt": {
+    "receiptId": "sha256:a34a053a9b91c1572443d752ada2b65a8ca71d0c44f8f3716c81f54afc1f31d5",
+    "verificationStatus": "VERIFIED",
+    "writtenRows": 40,
+    "rejectedRows": 0
+  },
+  "targetRows": 40,
+  "historyStatus": "COMPLETE",
+  "evidenceVerified": true,
+  "unknownOpRejected": "CONSOLE_VALIDATION_FAILED"
+}
