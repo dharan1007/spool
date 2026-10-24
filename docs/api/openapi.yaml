@@ -1,0 +1,97 @@
+openapi: 3.1.0
+info:
+  title: SPOOL Enterprise REST API v2
+  version: 2.0.0
+  description: Cryptographically verified data migration platform REST API
+paths:
+  /v2/health:
+    get:
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Server is alive
+  /v2/ready:
+    get:
+      summary: Readiness probe
+      responses:
+        '200':
+          description: Server is ready to accept migrations
+        '503':
+          description: Not ready
+  /v2/metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        '200':
+          description: Prometheus exposition format
+  /v2/migrations:
+    post:
+      summary: Create a new migration
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '201':
+          description: Migration created successfully
+    get:
+      summary: List migrations
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: List of migrations
+  /v2/migrations/{id}:
+    get:
+      summary: Get migration status and details
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Migration record
+  /v2/migrations/{id}/plan:
+    post:
+      summary: Generate migration plan
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+  /v2/migrations/{id}/dry-run:
+    post:
+      summary: Execute migration dry-run
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+  /v2/migrations/{id}/approve:
+    post:
+      summary: Approve migration
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+  /v2/migrations/{id}/execute:
+    post:
+      summary: Execute migration
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+  /v2/migrations/{id}/receipt:
+    get:
+      summary: Get verified migration receipt
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key

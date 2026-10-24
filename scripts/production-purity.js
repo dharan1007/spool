@@ -20,6 +20,7 @@ const PATTERNS = Object.freeze([
 ]);
 
 const ALLOWLIST = Object.freeze([
+  { pattern: 'sleep-sync', file: 'src/daemon/scheduler.js', justification: 'Task execution interval timer; cron scheduler, not evidence synchronization.' },
   { pattern: 'sleep-sync', file: 'src/xlsx-worker-client.js', signature: "timer = setTimeout(() => finish(new Error('XLSX background processing exceeded its 5-minute safety limit.')), timeoutMs);", justification: 'Five-minute hard deadline terminates a stalled XLSX parser Worker and rejects the source; it never advances migration state or declares success.' },
   { pattern: 'sleep-sync', file: 'src/app.js', justification: 'Browser toast/object-URL timers; UI scheduling, never evidence synchronization.' },
   { pattern: 'sleep-sync', file: 'src/runtime/cooperative-yield.js', signature: 'else await new Promise(resolve => globalThis.setTimeout(resolve, 0));', justification: 'Cooperatively yields bounded CSV scanning and exact ZIP checksums to browser events; data, CRC and durable completion are verified independently of elapsed waiting.' },

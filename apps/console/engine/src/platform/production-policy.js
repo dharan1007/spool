@@ -9,7 +9,7 @@ import { fail, SpoolError } from '../core/errors.js';
 export const PRODUCTION_POLICY = Object.freeze({
   version: 1, release: '1.1.2',
   matrixSha256: 'fd7af7c0b383d2f8c318897e95f741cd3242eb08642c3746f5a0cb49e599630a',
-  target: 'sqlite', source: 'filesystem', maxSourceBytes: 256 * 1024 * 1024
+  target: 'sqlite', source: 'filesystem', maxSourceBytes: 10 * 1024 * 1024 * 1024
 });
 const instances = new WeakSet();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

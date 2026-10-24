@@ -1,0 +1,37 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Active Migrations",
+      "type": "stat",
+      "targets": [{ "expr": "sum(spool_migrations_active)" }]
+    },
+    {
+      "title": "Migrations Total by Status",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum by (status) (rate(spool_migrations_total[5m]))" }]
+    },
+    {
+      "title": "Rows Written Rate",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(spool_rows_written_total[5m]))" }]
+    },
+    {
+      "title": "Batch Duration (p95)",
+      "type": "timeseries",
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(spool_batch_duration_seconds_bucket[5m])))" }]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["spool", "migration", "data"],
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "SPOOL Enterprise Migration Operations"
+}
