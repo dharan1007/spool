@@ -1,0 +1,8 @@
+# Build artifacts
+dist/
+node_modules/
+engine/
+
+# OS / editor
+*.swp
+Thumbs.db

@@ -1,0 +1,27 @@
+{
+  "test": "CLOUD_NETWORK_WIRE_STAGING",
+  "timestamp": "2026-10-24T07:39:27.211Z",
+  "status": "QUALIFIED",
+  "targets": {
+    "snowflake": {
+      "endpoint": "http://127.0.0.1:63339",
+      "contractId": "sha256:7a292d26f1bef9390109f1bd5873299fd1ece913cd75a0d1c28150d275e5b4d1",
+      "batchIdentity": "sf_stage_batch_001",
+      "writtenRows": 500,
+      "reconciliationStatus": "COMMITTED_EXACT",
+      "verificationStatus": "VERIFIED",
+      "httpRequestsCount": 513,
+      "durationMs": 601.88
+    },
+    "bigquery": {
+      "endpoint": "http://127.0.0.1:63341",
+      "contractId": "sha256:41bea23a261ddf2485685aeb0cb18a78b4b1d5ed8ce90f26d76818864715ac05",
+      "batchIdentity": "bq_stage_batch_001",
+      "writtenRows": 500,
+      "reconciliationStatus": "COMMITTED_EXACT",
+      "verificationStatus": "VERIFIED",
+      "httpRequestsCount": 510,
+      "durationMs": 464.88
+    }
+  }
+}

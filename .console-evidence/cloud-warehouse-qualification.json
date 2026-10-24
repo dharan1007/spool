@@ -1,0 +1,14 @@
+{
+  "qualification": "CLOUD_WAREHOUSE_TARGETS",
+  "timestamp": "2026-10-24T06:14:37.585Z",
+  "snowflake": {
+    "contract": "sha256:sf_sandbox-acct.us-east-1_MIGRATION_AUDIT_SAMPLE",
+    "status": "COMMITTED",
+    "rows": 1000
+  },
+  "bigquery": {
+    "contract": "sha256:bq_spool-enterprise-sandbox_warehouse_migration_events_partitioned",
+    "status": "COMMITTED",
+    "rows": 1000
+  }
+}

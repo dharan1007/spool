@@ -1,0 +1,13 @@
+{
+  "test": "REST_API_STRESS_TEST",
+  "timestamp": "2026-10-24T07:39:48.222Z",
+  "totalRequests": 600,
+  "concurrency": 30,
+  "successRate": 100,
+  "throughputReqPerSec": 643,
+  "latencyMs": {
+    "p50": 34.08,
+    "p95": 175.38,
+    "p99": 202.66
+  }
+}

@@ -1,0 +1,44 @@
+{
+    "name":  "@spool/console",
+    "productName":  "SPOOL Console",
+    "version":  "1.0.0",
+    "private":  true,
+    "type":  "module",
+    "description":  "Windows-first desktop console for the qualified SPOOL local migration runner",
+    "main":  "electron/main.js",
+    "dependencies":  {
+                         "better-sqlite3":  "12.10.1",
+                         "mssql":  "12.7.2",
+                         "mysql2":  "3.24.4",
+                         "pg":  "8.23.0",
+                         "pg-copy-streams":  "7.0.0",
+                         "pg-logical-replication":  "2.5.0",
+                         "react":  "19.3.1",
+                         "react-dom":  "19.3.1",
+                         "react-router-dom":  "7.9.4",
+                         "zod":  "3.25.76"
+                     },
+    "devDependencies":  {
+                            "@electron/rebuild":  "4.0.1",
+                            "@types/node":  "22.20.2",
+                            "@types/react":  "19.2.2",
+                            "@types/react-dom":  "19.2.1",
+                            "@vitejs/plugin-react":  "5.1.0",
+                            "electron":  "^40.10.6",
+                            "electron-builder":  "26.0.12",
+                            "typescript":  "5.9.3",
+                            "vite":  "7.1.9"
+                        },
+    "scripts":  {
+                    "sync:engine":  "node ../../scripts/console/sync-engine.mjs",
+                    "build:renderer":  "vite build",
+                    "prepare:app":  "npm run sync:engine \u0026\u0026 npm run build:renderer",
+                    "start":  "npm run prepare:app \u0026\u0026 electron .",
+                    "test":  "npm run sync:engine \u0026\u0026 node --test --test-concurrency=1 tests/*.test.js",
+                    "typecheck":  "tsc --noEmit -p tsconfig.json",
+                    "package:dir":  "npm run prepare:app \u0026\u0026 electron-builder --win --dir",
+                    "package:nsis":  "npm run prepare:app \u0026\u0026 electron-builder --win nsis"
+                },
+    "author":  "SPOOL owners",
+    "license":  "UNLICENSED"
+}

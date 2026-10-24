@@ -1,0 +1,13 @@
+apiVersion: v2
+name: spool-enterprise
+description: Helm chart for SPOOL Enterprise Data Migration Platform
+type: application
+version: 1.0.0
+appVersion: "2.0.0"
+keywords:
+  - data-migration
+  - etl
+  - database
+  - verification
+maintainers:
+  - name: SPOOL Platform Engineering

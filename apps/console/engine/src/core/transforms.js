@@ -1,0 +1,137 @@
+import { fail } from './errors.js';
+import { parseDeterministicDate, parseDeterministicLocalDateTime } from './deterministic-date.js';
+import { parseDeterministicNumber } from './locale-number.js';
+
+const OPS = new Set([
+  'field', 'literal', 'copy', 'trim', 'lowercase', 'uppercase', 'split', 'join', 'coalesce',
+  'cast_string', 'cast_number', 'cast_boolean', 'parse_date', 'parse_local_datetime', 'format_date', 'regex_replace',
+  'enum_map', 'multiply', 'divide', 'round', 'concat', 'conditional'
+]);
+
+function isUnsafeRegex(pattern) {
+  if (typeof pattern !== 'string' || pattern.length > 256) return true;
+  return /\((?:[^()]|\\.)*[+*](?:[^()]|\\.)*\)[+*{]/.test(pattern) || /(\.\*){2,}|(\.\+){2,}/.test(pattern);
+}
+
+export function validateExpr(expr, options = {}, depth = 0) {
+  const maxDepth = options.maxDepth ?? 20;
+  if (depth > maxDepth) fail('EXPR_TOO_DEEP', `Expression depth exceeds ${maxDepth}`);
+  if (!expr || typeof expr !== 'object' || Array.isArray(expr)) fail('INVALID_EXPR', 'Transform expression must be an object');
+  if (!OPS.has(expr.op)) fail('UNKNOWN_OPERATOR', `Unknown operator ${expr.op}`);
+  const child = value => validateExpr(value, options, depth + 1);
+  switch (expr.op) {
+    case 'field':
+    case 'copy':
+      if (typeof expr.name !== 'string' || !expr.name) fail('INVALID_FIELD', 'field/copy requires a name');
+      break;
+    case 'literal': break;
+    case 'trim': case 'lowercase': case 'uppercase': case 'cast_string': case 'cast_number': case 'cast_boolean': case 'parse_date': case 'parse_local_datetime': case 'round':
+      child(expr.value); break;
+    case 'format_date':
+      child(expr.value); if (typeof expr.format !== 'string') fail('INVALID_FORMAT', 'format_date requires format'); break;
+    case 'regex_replace':
+      child(expr.value); if (isUnsafeRegex(expr.pattern)) fail('UNSAFE_REGEX', 'Regex pattern rejected by safety policy'); break;
+    case 'enum_map':
+      child(expr.value); if (!expr.map || typeof expr.map !== 'object' || Array.isArray(expr.map)) fail('INVALID_ENUM_MAP', 'enum_map requires an object map'); break;
+    case 'multiply': case 'divide':
+      child(expr.left); child(expr.right); break;
+    case 'split':
+      child(expr.value); if (typeof expr.separator !== 'string') fail('INVALID_SEPARATOR', 'split requires separator'); break;
+    case 'join':
+      if (!Array.isArray(expr.values)) fail('INVALID_VALUES', 'join requires values'); expr.values.forEach(child); break;
+    case 'coalesce': case 'concat':
+      if (!Array.isArray(expr.values) || expr.values.length === 0) fail('INVALID_VALUES', `${expr.op} requires values`); expr.values.forEach(child); break;
+    case 'conditional':
+      child(expr.if); child(expr.then); child(expr.else); break;
+    default: break;
+  }
+  return expr;
+}
+
+const isEmptyValue = value => value === null || value === undefined || String(value).trim() === '';
+const asNullableNumber = value => isEmptyValue(value) ? null : parseDeterministicNumber(value);
+
+export function evaluateExpr(expr, row) {
+  switch (expr.op) {
+    case 'field': case 'copy': return row?.[expr.name];
+    case 'literal': return expr.value;
+    case 'trim': return String(evaluateExpr(expr.value, row) ?? '').trim();
+    case 'lowercase': return String(evaluateExpr(expr.value, row) ?? '').toLowerCase();
+    case 'uppercase': return String(evaluateExpr(expr.value, row) ?? '').toUpperCase();
+    case 'cast_string': return String(evaluateExpr(expr.value, row) ?? '');
+    case 'cast_number': {
+      const value = evaluateExpr(expr.value, row);
+      return isEmptyValue(value) ? null : parseDeterministicNumber(value);
+    }
+    case 'cast_boolean': {
+      const value = evaluateExpr(expr.value, row);
+      if (isEmptyValue(value)) return null;
+      const v = String(value).trim().toLowerCase();
+      if (['true', '1', 'yes', 'y'].includes(v)) return true;
+      if (['false', '0', 'no', 'n'].includes(v)) return false;
+      fail('INVALID_BOOLEAN', `Cannot convert ${v} to boolean`);
+    }
+    case 'parse_date': return parseDeterministicDate(evaluateExpr(expr.value, row));
+    case 'parse_local_datetime': return parseDeterministicLocalDateTime(evaluateExpr(expr.value, row));
+    case 'format_date': {
+      const iso = parseDeterministicDate(evaluateExpr(expr.value, row));
+      if (iso === null) fail('INVALID_DATE', 'Cannot format empty date');
+      if (expr.format === 'YYYY-MM-DD') return iso.slice(0, 10);
+      if (expr.format === 'ISO') return iso;
+      fail('UNSUPPORTED_DATE_FORMAT', `Unsupported date format ${expr.format}`);
+    }
+    case 'regex_replace': return String(evaluateExpr(expr.value, row) ?? '').replace(new RegExp(expr.pattern, expr.flags ?? 'g'), expr.replacement ?? '');
+    case 'enum_map': {
+      const key = String(evaluateExpr(expr.value, row));
+      if (!Object.hasOwn(expr.map, key)) fail('UNMAPPED_ENUM', `No enum mapping for ${key}`);
+      return expr.map[key];
+    }
+    case 'multiply': {
+      const left = asNullableNumber(evaluateExpr(expr.left, row));
+      const right = asNullableNumber(evaluateExpr(expr.right, row));
+      if (left === null || right === null) return null;
+      return left * right;
+    }
+    case 'divide': {
+      const numerator = asNullableNumber(evaluateExpr(expr.left, row));
+      const denominator = asNullableNumber(evaluateExpr(expr.right, row));
+      if (numerator === null || denominator === null) return null;
+      if (denominator === 0) fail('DIVIDE_BY_ZERO', 'Division by zero');
+      return numerator / denominator;
+    }
+    case 'round': {
+      const value = asNullableNumber(evaluateExpr(expr.value, row));
+      return value === null ? null : Math.round(value);
+    }
+    case 'split': return String(evaluateExpr(expr.value, row) ?? '').split(expr.separator);
+    case 'join': return expr.values.map(v => evaluateExpr(v, row)).join(expr.separator ?? '');
+    case 'coalesce': {
+      for (const item of expr.values) { const v = evaluateExpr(item, row); if (v !== null && v !== undefined && v !== '') return v; }
+      return null;
+    }
+    case 'concat': return expr.values.map(v => String(evaluateExpr(v, row) ?? '')).join('');
+    case 'conditional': return evaluateExpr(expr.if, row) ? evaluateExpr(expr.then, row) : evaluateExpr(expr.else, row);
+    default: fail('UNKNOWN_OPERATOR', `Unknown operator ${expr.op}`);
+  }
+}
+
+export function compileMapping(entries, options = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) fail('EMPTY_MAPPING', 'Mapping requires at least one target');
+  const seen = new Set();
+  const normalized = entries.map(entry => {
+    if (!entry || typeof entry.target !== 'string' || !entry.target) fail('INVALID_TARGET', 'Mapping target must be a non-empty string');
+    if (seen.has(entry.target)) fail('DUPLICATE_TARGET', `Duplicate mapping target ${entry.target}`);
+    seen.add(entry.target);
+    validateExpr(entry.expr, options);
+    return structuredClone(entry);
+  });
+  return {
+    entries: normalized,
+    targets: normalized.map(x => x.target),
+    mapRow(row) {
+      const out = Object.create(null);
+      for (const entry of normalized) out[entry.target] = evaluateExpr(entry.expr, row);
+      return { ...out };
+    }
+  };
+}

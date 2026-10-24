@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "kind": "spool-console-requirement-register",
+  "generatedAt": "2026-10-23",
+  "requirements": [
+    { "id": "R1", "title": "Real Windows desktop application", "status": "SATISFIED", "evidence": [".console-evidence/packaged-window.png"] },
+    { "id": "R2", "title": "Migrations execute through SpoolCommandService", "status": "SATISFIED", "evidence": ["apps/console/tests/full-journey.test.js", ".console-evidence/ipc-harness.json"] },
+    { "id": "R3", "title": "No second parser/planner/executor", "status": "SATISFIED", "evidence": ["apps/console/service/source-discovery.js", "apps/console/service/sqlite-catalog.js"] },
+    { "id": "R4", "title": "CSV to existing ordinary SQLite table, INSERT-only", "status": "SATISFIED", "evidence": [".console-evidence/ipc-harness.json"] },
+    { "id": "R5", "title": "256 MiB source ceiling", "status": "SATISFIED", "evidence": ["apps/console/service/source-discovery.js"] },
+    { "id": "R6", "title": "Unsupported capabilities surfaced as unavailable", "status": "SATISFIED", "evidence": ["apps/console/service/system-service.js"] },
+    { "id": "R7", "title": "Wizard covers full journey", "status": "SATISFIED", "evidence": [".console-evidence/packaged-window.png"] },
+    { "id": "R8", "title": "Approval key via safeStorage, never exposed", "status": "SATISFIED", "evidence": ["apps/console/electron/key-store.js"] },
+    { "id": "R9", "title": "Duplicate-run guard", "status": "SATISFIED", "evidence": ["apps/console/tests/full-journey.test.js"] },
+    { "id": "R10", "title": "Source unchanged re-verification", "status": "SATISFIED", "evidence": ["apps/console/tests/full-journey.test.js"] },
+    { "id": "R11", "title": "Evidence export/verify/tamper rejection", "status": "SATISFIED", "evidence": ["apps/console/tests/full-journey.test.js"] },
+    { "id": "R12", "title": "Engine bundle release binding verified at boot", "status": "SATISFIED", "evidence": [".console-evidence/ipc-harness.json"] },
+    { "id": "R13", "title": "Sanitized error envelopes", "status": "SATISFIED", "evidence": ["apps/console/service/errors.js"] },
+    { "id": "R14", "title": "Contract-validated IPC surface", "status": "SATISFIED", "evidence": [".console-evidence/ipc-harness.json"] },
+    { "id": "R15", "title": "Workspace model", "status": "SATISFIED", "evidence": ["apps/console/service/workspace-store.js"] },
+    { "id": "R16", "title": "Recipes/drafts without auto-authorization", "status": "SATISFIED", "evidence": ["apps/console/service/recipes.js"] },
+    { "id": "R17", "title": "History/events/transitions/receipt surfaces", "status": "SATISFIED", "evidence": [".console-evidence/ipc-harness.json"] },
+    { "id": "R18", "title": "Diagnostics and sanitized support bundle", "status": "SATISFIED", "evidence": ["apps/console/service/diagnostics.js"] },
+    { "id": "R19", "title": "Offline, zero-cost, no telemetry", "status": "SATISFIED", "evidence": ["apps/console/electron/security.js"] },
+    { "id": "R20", "title": "Real signing certificate installers", "status": "NOT_EXECUTED", "reason": "no code signing certificate available in this environment; documented in PACKAGING.md and PRODUCTION_GATES.md" },
+    { "id": "R21", "title": "GitHub Actions or paid CI", "status": "NOT_APPLICABLE", "reason": "zero-cost constraint; no workflows were added" },
+    { "id": "R22", "title": "Root conformance suite for external databases", "status": "NOT_EXECUTED", "reason": "external database servers unavailable in this environment; 64 tests self-skip in the baseline run" }
+  ]
+}

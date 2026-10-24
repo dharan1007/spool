@@ -6,9 +6,9 @@ const DEFAULT_HIGH_WATER_MARK = 64 * 1024;
 
 function validateOptions(options) {
   const maxCellLength = options.maxCellLength ?? 1024 * 1024;
-  const maxRows = options.maxRows ?? 1_000_000;
-  const maxColumns = options.maxColumns ?? 1000;
   const maxInputBytes = options.maxInputBytes ?? Number.MAX_SAFE_INTEGER;
+  const maxColumns = options.maxColumns ?? 1000;
+  const maxRows = options.maxRows ?? (maxInputBytes > 256 * 1024 * 1024 ? 500_000_000 : 1_000_000);
   const highWaterMark = options.highWaterMark ?? DEFAULT_HIGH_WATER_MARK;
   for (const [name, value] of Object.entries({ maxCellLength, maxRows, maxColumns, maxInputBytes, highWaterMark })) {
     if (!Number.isSafeInteger(value) || value <= 0) fail('INVALID_CSV_LIMIT', `${name} must be a positive safe integer`);
@@ -36,10 +36,11 @@ function toObject(headers, cells, rowIndex) {
   return out;
 }
 
-async function* iterateCsv(path, options = {}) {
+async function* iterateCsv(pathOrStream, options = {}) {
   const limits = validateOptions(options);
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  const stream = createReadStream(path, { highWaterMark: limits.highWaterMark });
+  const isPath = typeof pathOrStream === 'string';
+  const stream = isPath ? createReadStream(pathOrStream, { highWaterMark: limits.highWaterMark }) : pathOrStream;
   let bytes = 0;
   let headers = null;
   let rowIndex = 0;
@@ -167,7 +168,7 @@ async function* iterateCsv(path, options = {}) {
     // Match parseCsv: a final blank record is ignored.
     pendingBlank = false;
   } finally {
-    stream.destroy();
+    if (isPath) stream.destroy();
   }
 }
 

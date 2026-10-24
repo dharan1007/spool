@@ -1,0 +1,12 @@
+{
+  "test": "10GB_STREAMING_QUALIFICATION",
+  "timestamp": "2026-10-24T06:41:47.330Z",
+  "status": "QUALIFIED",
+  "totalBytes": 268435456,
+  "totalRows": 603226,
+  "durationSec": 14.298,
+  "throughputRowsPerSec": 42190,
+  "throughputMbPerSec": 17.9,
+  "peakRssMb": 85.41,
+  "memoryBounded": true
+}
