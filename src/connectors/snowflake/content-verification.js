@@ -20,12 +20,31 @@ export async function verifySnowflakeContent({ targetRef, expectedRows, targetSc
       ORDER BY ${orderCols}
     `);
 
-    const actualRows = res.rows || [];
+    const rawRows = res.rows || [];
+    // Normalize keys to match targetSchema names (case-insensitive mapping)
+    const nameMap = new Map(targetSchema.map(f => [f.name.toUpperCase(), f.name]));
+    const actualRows = rawRows.map(r => {
+      const normalized = {};
+      for (const [k, v] of Object.entries(r)) {
+        const canonical = nameMap.get(k.toUpperCase()) || k;
+        normalized[canonical] = typeof v === 'string' && !isNaN(v) && v.trim() !== '' && !v.includes('-') ? Number(v) : v;
+      }
+      return normalized;
+    });
+
+    const normalizedExpected = expectedRows.map(r => {
+      const normalized = {};
+      for (const [k, v] of Object.entries(r)) {
+        const canonical = nameMap.get(k.toUpperCase()) || k;
+        normalized[canonical] = v;
+      }
+      return normalized;
+    });
 
     return verifyContentProjection({
       primaryKey,
       columns: targetSchema.map(f => f.name),
-      expectedRows,
+      expectedRows: normalizedExpected,
       actualRows,
       targetContractId
     });
