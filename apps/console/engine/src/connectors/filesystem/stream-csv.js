@@ -36,10 +36,11 @@ function toObject(headers, cells, rowIndex) {
   return out;
 }
 
-async function* iterateCsv(path, options = {}) {
+async function* iterateCsv(pathOrStream, options = {}) {
   const limits = validateOptions(options);
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  const stream = createReadStream(path, { highWaterMark: limits.highWaterMark });
+  const isPath = typeof pathOrStream === 'string';
+  const stream = isPath ? createReadStream(pathOrStream, { highWaterMark: limits.highWaterMark }) : pathOrStream;
   let bytes = 0;
   let headers = null;
   let rowIndex = 0;
@@ -167,7 +168,7 @@ async function* iterateCsv(path, options = {}) {
     // Match parseCsv: a final blank record is ignored.
     pendingBlank = false;
   } finally {
-    stream.destroy();
+    if (isPath) stream.destroy();
   }
 }
 

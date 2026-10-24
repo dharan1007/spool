@@ -44,6 +44,7 @@ const ALLOWLIST = Object.freeze([
   { pattern: 'sleep-sync', file: 'scripts/qualify-sqlite-production.js', signature: 'while (Date.now() <= lease.expires_at_ms) await new Promise(resolve => setTimeout(resolve, 100));', justification: 'Waits for native SQLite lease expiry read from the target before actual process restart/takeover; success requires row and ledger assertions.' },
   { pattern: 'sleep-sync', file: 'scripts/qualify-postgres-materialization.js', justification: 'Peak-RSS sampler interval (unref timer) for load measurement; observability, not synchronization.' },
   { pattern: 'sleep-sync', file: 'scripts/qualify-10gb-stream.js', justification: 'Peak-RSS sampler interval for 10GB streaming qualification; observability, not synchronization.' },
+  { pattern: 'sleep-sync', file: 'scripts/qualify-10gb-virtual-stream.js', justification: 'Peak-RSS sampler interval for 10GB streaming qualification; observability, not synchronization.' },
   { pattern: 'sleep-sync', file: 'src/connectors/postgres/reference.js', justification: 'Bounded WAL LSN-advance wait with an explicit deadline for CDC recovery tests; wait loop only, never evidence.' },
   { pattern: 'not-implemented', file: 'scripts/production-purity.js', justification: 'Pattern vocabulary defining this gate itself, not an unimplemented path.' },
   { pattern: 'dummy-data', file: 'scripts/production-purity.js', justification: 'Pattern vocabulary defining this gate itself, not dummy data.' },

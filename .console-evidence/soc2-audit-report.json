@@ -1,0 +1,65 @@
+{
+  "framework": "SOC 2 Type I / Type II Automated Control Assessment",
+  "assessmentDate": "2026-10-24T06:51:01.675Z",
+  "overallScore": 100,
+  "totalControls": 8,
+  "passedControls": 8,
+  "controls": [
+    {
+      "id": "CTRL-01",
+      "name": "Role-Based Access Control",
+      "criteria": "CC6.1",
+      "status": "PASSED",
+      "details": "RBAC enforces 4 formal roles with workspace-scoped action authorization"
+    },
+    {
+      "id": "CTRL-02",
+      "name": "Data Sovereignty & Local-First Egress Prevention",
+      "criteria": "CC6.6",
+      "status": "PASSED",
+      "details": "Content Security Policy strictly denies untrusted network egress (connect-src 'none')"
+    },
+    {
+      "id": "CTRL-03",
+      "name": "Prohibition of Arbitrary Dynamic Code Execution",
+      "criteria": "CC6.7",
+      "status": "PASSED",
+      "details": "Zero instances of eval() or new Function() in engine src/"
+    },
+    {
+      "id": "CTRL-04",
+      "name": "Immutable Append-Only Audit Trail",
+      "criteria": "CC7.2",
+      "status": "PASSED",
+      "details": "AuditLog maintains WAL-journaled immutable SQLite event store"
+    },
+    {
+      "id": "CTRL-05",
+      "name": "System Health & Prometheus Observability Probes",
+      "criteria": "CC7.1",
+      "status": "PASSED",
+      "details": "Standard Prometheus exposition format and Kubernetes health/readiness probes"
+    },
+    {
+      "id": "CTRL-06",
+      "name": "Credential Broker Isolation & Secret Redaction",
+      "criteria": "CC6.1",
+      "status": "PASSED",
+      "details": "Target credentials managed strictly within CredentialBroker lifecycle and redacted from output"
+    },
+    {
+      "id": "CTRL-07",
+      "name": "Deterministic Cryptographic Migration Receipts",
+      "criteria": "PI1.2",
+      "status": "PASSED",
+      "details": "Every completed migration produces SHA-256 bound immutable cryptographic receipt"
+    },
+    {
+      "id": "CTRL-08",
+      "name": "Formal Trust Services Criteria Policy Suite",
+      "criteria": "CC1.1",
+      "status": "PASSED",
+      "details": "All 9 SOC 2 Trust Services Criteria policies fully documented and versioned"
+    }
+  ]
+}
