@@ -1,0 +1,21 @@
+{
+  "repository": "spool",
+  "contractVersion": "A-G/1",
+  "updatedAt": "2026-09-14",
+  "note": "No PRODUCTION claims without external benchmark + real-workload evidence (Rules A, D, F). Spool has benchmarks/run.js; migrate its suites into benchmarks/manifests + results/ evidence format.",
+  "capabilities": [
+    {
+      "id": "csv-sqlite-runner",
+      "title": "Verified CSV-to-SQLite migration runner",
+      "status": "EXPERIMENTAL",
+      "evidence": "Conformance + security tests present; public-dataset / real-instance benchmark evidence must be cited before PRODUCTION.",
+      "nextEvidence": "benchmarks/manifests/spool-reference.json"
+    },
+    {
+      "id": "multi-tenant-hostile-execution",
+      "title": "Shared multi-tenant hostile-code execution",
+      "status": "UNSUPPORTED",
+      "evidence": "Explicit non-goal without process/VM isolation boundary."
+    }
+  ]
+}
