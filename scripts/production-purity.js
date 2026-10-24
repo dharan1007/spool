@@ -45,6 +45,7 @@ const ALLOWLIST = Object.freeze([
   { pattern: 'sleep-sync', file: 'scripts/qualify-postgres-materialization.js', justification: 'Peak-RSS sampler interval (unref timer) for load measurement; observability, not synchronization.' },
   { pattern: 'sleep-sync', file: 'scripts/qualify-10gb-stream.js', justification: 'Peak-RSS sampler interval for 10GB streaming qualification; observability, not synchronization.' },
   { pattern: 'sleep-sync', file: 'scripts/qualify-10gb-virtual-stream.js', justification: 'Peak-RSS sampler interval for 10GB streaming qualification; observability, not synchronization.' },
+  { pattern: 'sleep-sync', file: 'scripts/qualify-10gb-disk.js', justification: 'Peak-RSS sampler interval for 10GB disk streaming qualification; observability, not synchronization.' },
   { pattern: 'sleep-sync', file: 'src/connectors/postgres/reference.js', justification: 'Bounded WAL LSN-advance wait with an explicit deadline for CDC recovery tests; wait loop only, never evidence.' },
   { pattern: 'not-implemented', file: 'scripts/production-purity.js', justification: 'Pattern vocabulary defining this gate itself, not an unimplemented path.' },
   { pattern: 'dummy-data', file: 'scripts/production-purity.js', justification: 'Pattern vocabulary defining this gate itself, not dummy data.' },

@@ -1,0 +1,14 @@
+{
+  "test": "10GB_PHYSICAL_DISK_STREAM_QUALIFICATION",
+  "timestamp": "2026-10-24T13:10:34.494Z",
+  "status": "QUALIFIED",
+  "fileSizeBytes": 10737418240,
+  "fileSizeGb": 10,
+  "totalRows": 21495152,
+  "durationSec": 770.914,
+  "throughputRowsPerSec": 27883,
+  "throughputMbPerSec": 13.28,
+  "peakRssMb": 75.97,
+  "memoryBounded": true,
+  "diskUsed": "E:\\spool-10gb-test (cleaned up after test)"
+}
