@@ -6,9 +6,9 @@ const DEFAULT_HIGH_WATER_MARK = 64 * 1024;
 
 function validateOptions(options) {
   const maxCellLength = options.maxCellLength ?? 1024 * 1024;
-  const maxRows = options.maxRows ?? 1_000_000;
-  const maxColumns = options.maxColumns ?? 1000;
   const maxInputBytes = options.maxInputBytes ?? Number.MAX_SAFE_INTEGER;
+  const maxColumns = options.maxColumns ?? 1000;
+  const maxRows = options.maxRows ?? (maxInputBytes > 256 * 1024 * 1024 ? 500_000_000 : 1_000_000);
   const highWaterMark = options.highWaterMark ?? DEFAULT_HIGH_WATER_MARK;
   for (const [name, value] of Object.entries({ maxCellLength, maxRows, maxColumns, maxInputBytes, highWaterMark })) {
     if (!Number.isSafeInteger(value) || value <= 0) fail('INVALID_CSV_LIMIT', `${name} must be a positive safe integer`);

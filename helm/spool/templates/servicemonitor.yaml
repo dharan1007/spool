@@ -1,0 +1,16 @@
+{{- if .Values.metrics.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: spool-enterprise
+  labels:
+    app.kubernetes.io/name: spool-enterprise
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spool-enterprise
+  endpoints:
+    - port: http
+      path: /v2/metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+{{- end }}
