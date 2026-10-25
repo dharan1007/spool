@@ -95,6 +95,46 @@ function createMockBigQueryClient() {
     query: async (sql, binds = []) => {
       const trimmed = sql.trim().toUpperCase();
 
+      if (trimmed.startsWith('/* SPOOL_BIGQUERY_ATOMIC_V2 */')) {
+        assert.match(sql, /BEGIN TRANSACTION/);
+        assert.match(sql, /DELETE FROM [^;]+ WHERE FALSE/);
+        assert.match(sql, /COMMIT TRANSACTION/);
+        const [batchIdentity, , expectedHash, expectedCount, expectedMigration, expectedPlan] = binds;
+        const [ledgerId, migrationId, planId, rowCount, payloadHash, fencingToken] = binds.slice(-6);
+        assert.equal(batchIdentity, ledgerId);
+        assert.equal(expectedHash, payloadHash);
+        assert.equal(expectedCount, rowCount);
+        assert.equal(expectedMigration, migrationId);
+        assert.equal(expectedPlan, planId);
+        const earlier = ledger.get(batchIdentity);
+        if (earlier) {
+          assert.equal(earlier.payload_hash, payloadHash);
+          assert.equal(earlier.commit_protocol, 'SPOOL_ATOMIC_V2');
+          return { rows: [] };
+        }
+        let pos = 6;
+        if (sql.includes('expires_at_ms > UNIX_MILLIS')) {
+          const resource = binds[pos++];
+          const suppliedToken = binds[pos++];
+          if (Number(leases.get(resource)?.fencing_token) !== Number(suppliedToken)) {
+            throw new Error('STALE_FENCE');
+          }
+        }
+        const rowValues = binds.slice(pos, -6);
+        const stagedRows = [];
+        for (let i = 0; i < Number(rowCount); i++) {
+          stagedRows.push({ id: rowValues[2 * i], val: rowValues[2 * i + 1] });
+        }
+        assert.equal(rowValues.length, 2 * Number(rowCount));
+        for (const row of stagedRows) tables.set(row.id, row);
+        ledger.set(batchIdentity, {
+          batch_identity: batchIdentity, migration_id: migrationId, plan_id: planId,
+          row_count: Number(rowCount), payload_hash: payloadHash, fencing_token: Number(fencingToken),
+          commit_protocol: 'SPOOL_ATOMIC_V2', committed_at: new Date().toISOString()
+        });
+        return { rows: [] };
+      }
+
       if (trimmed.includes('INFORMATION_SCHEMA.COLUMNS')) {
         return {
           rows: [
@@ -253,7 +293,7 @@ test('BigQuery Full Connector Lifecycle: Preflight, Commit, Reconcile, Content V
     planId: 'plan_bq_001',
     rows
   });
-  assert.equal(commitRes.status, 'COMMITTED');
+  assert.equal(commitRes.status, 'COMMITTED_EXACT');
   assert.equal(commitRes.writtenRows, 2);
 
   // 3. Crash recovery reconciliation
@@ -293,5 +333,5 @@ test('BigQuery Full Connector Lifecycle: Preflight, Commit, Reconcile, Content V
     rows: [],
     fencingToken: 5
   });
-  assert.equal(validFenceRes.status, 'COMMITTED');
+  assert.equal(validFenceRes.status, 'COMMITTED_EXACT');
 });
