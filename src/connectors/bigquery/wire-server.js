@@ -51,6 +51,13 @@ export class BigQueryWireServer {
               const queryParams = body.queryParameters || [];
               const paramValues = queryParams.map(p => p.parameterValue?.value ?? p);
 
+              // Simulated atomic BigQuery multi-statement transaction for local tests only.
+              // This does NOT constitute live-provider transaction qualification.
+              if (upperSql.startsWith('/* SPOOL_BIGQUERY_ATOMIC_V2 */')) {
+                this.#applyAtomicBatch(sql, paramValues);
+                return this.#sendSuccess(res, [], []);
+              }
+
               // 1. Information Schema
               if (upperSql.includes('INFORMATION_SCHEMA.COLUMNS')) {
                 const targetTable = paramValues[0];
@@ -95,6 +102,7 @@ export class BigQueryWireServer {
                       { name: 'migration_id', type: 'STRING' },
                       { name: 'row_count', type: 'INTEGER' },
                       { name: 'payload_hash', type: 'STRING' },
+                      { name: 'commit_protocol', type: 'STRING' },
                       { name: 'committed_at', type: 'TIMESTAMP' }
                     ], [{
                       f: [
@@ -102,6 +110,7 @@ export class BigQueryWireServer {
                         { v: entry.migration_id },
                         { v: String(entry.row_count) },
                         { v: entry.payload_hash },
+                        { v: entry.commit_protocol ?? null },
                         { v: entry.committed_at }
                       ]
                     }]);
@@ -111,6 +120,7 @@ export class BigQueryWireServer {
                     { name: 'migration_id', type: 'STRING' },
                     { name: 'row_count', type: 'INTEGER' },
                     { name: 'payload_hash', type: 'STRING' },
+                    { name: 'commit_protocol', type: 'STRING' },
                     { name: 'committed_at', type: 'TIMESTAMP' }
                   ], []);
                 }
@@ -196,6 +206,69 @@ export class BigQueryWireServer {
         resolve(`http://${host}:${this.port}`);
       });
       this.server.on('error', reject);
+    });
+  }
+
+
+  #applyAtomicBatch(sql, params) {
+    // Implement the same all-or-nothing *observable* contract for local wire tests.
+    // The SQL must contain the actual transaction and serialized ledger lock.
+    if (!/BEGIN TRANSACTION;/i.test(sql) || !/DELETE FROM [^;]+ WHERE FALSE;/i.test(sql) ||
+        !/COMMIT TRANSACTION;/i.test(sql) || !/ROLLBACK TRANSACTION;/i.test(sql)) {
+      throw new Error('UNSAFE_BIGQUERY_SCRIPT');
+    }
+    const [batchIdentity, checkIdentity, checkHash, checkRowCount, checkMigration, checkPlan] = params;
+    const [writtenIdentity, migrationId, planId, rowCount, payloadHash, fencingToken] = params.slice(-6);
+    if (batchIdentity !== checkIdentity || batchIdentity !== writtenIdentity ||
+        checkHash !== payloadHash || Number(checkRowCount) !== Number(rowCount) ||
+        checkMigration !== migrationId || checkPlan !== planId) {
+      throw new Error('SPOOL_LEDGER_CONFLICT');
+    }
+    const existing = this.ledger.get(batchIdentity);
+    if (existing) {
+      if (existing.payload_hash !== payloadHash || existing.row_count !== Number(rowCount) ||
+          existing.migration_id !== migrationId || existing.plan_id !== planId ||
+          existing.commit_protocol !== 'SPOOL_ATOMIC_V2') {
+        throw new Error('SPOOL_LEDGER_CONFLICT');
+      }
+      return;
+    }
+    let pos = 6;
+    if (sql.includes('expires_at_ms > UNIX_MILLIS')) {
+      const resource = params[pos++];
+      const requestedToken = Number(params[pos++]);
+      const activeToken = this.leases.get(resource);
+      if (Number(activeToken) !== requestedToken) throw new Error('STALE_FENCE');
+      if (sql.includes('AND owner = ?')) pos++;
+    }
+    const data = params.slice(pos, -6);
+    const count = Number(rowCount);
+    const targetEntry = [...this.tables.entries()].find(([key]) =>
+      sql.includes('INSERT INTO ' + String.fromCharCode(96) + key + String.fromCharCode(96) + ' ('));
+    if (count && !targetEntry) throw new Error('UNKNOWN_TARGET_TABLE');
+    let nextRows = [];
+    if (count) {
+      const [key] = targetEntry;
+      const columns = this.schemas.get(key) ?? [];
+      const colNames = columns.map(c => c.column_name);
+      const match = sql.match(/INSERT INTO \`[^\`]+\` \(([^)]+)\) VALUES /i);
+      const selectedColumns = match ? match[1].split(',').map(x => x.trim().replaceAll(String.fromCharCode(96), '')) : [];
+      if (selectedColumns.length < 1 || data.length !== selectedColumns.length * count ||
+          selectedColumns.some(name => !colNames.includes(name))) throw new Error('INVALID_TRANSACTIONAL_PAYLOAD');
+      nextRows = Array.from({ length: count }, (_, n) =>
+        Object.fromEntries(selectedColumns.map((name, col) => [name, data[n * selectedColumns.length + col]])));
+    } else if (data.length) {
+      throw new Error('INVALID_TRANSACTIONAL_PAYLOAD');
+    }
+    // Publish target rows and commit ledger together, never independently.
+    if (count) {
+      const [key] = targetEntry;
+      this.tables.set(key, [...(this.tables.get(key) ?? []), ...nextRows]);
+    }
+    this.ledger.set(batchIdentity, {
+      batch_identity: batchIdentity, migration_id: migrationId, plan_id: planId,
+      row_count: count, payload_hash: payloadHash, fencing_token: Number(fencingToken),
+      commit_protocol: 'SPOOL_ATOMIC_V2', committed_at: new Date().toISOString()
     });
   }
 
