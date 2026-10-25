@@ -8,11 +8,27 @@ export function normalizeBigQueryRef(ref = {}) {
   const tableId = String(ref.tableId || '').trim();
   const location = ref.location ? String(ref.location).trim() : 'US';
   const endpoint = ref.endpoint ? String(ref.endpoint).trim().replace(/\/$/, '') : (process.env.BIGQUERY_ENDPOINT || null);
-  const token = ref.token ? String(ref.token).trim() : (process.env.BIGQUERY_TOKEN || 'spool-bigquery-wire-token');
+  const token = ref.token ? String(ref.token).trim() : (process.env.BIGQUERY_TOKEN || null);
 
   if (!projectId) fail('INVALID_BIGQUERY_CONFIG', 'BigQuery projectId is required');
   if (!datasetId) fail('INVALID_BIGQUERY_CONFIG', 'BigQuery datasetId is required');
   if (!tableId) fail('INVALID_BIGQUERY_CONFIG', 'BigQuery tableId is required');
+  // Identifiers cannot be query parameters. Reject delimiter, control and SQL syntax.
+  if (!/^[A-Za-z0-9][A-Za-z0-9:.-]*$/.test(projectId) ||
+      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(datasetId) ||
+      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(tableId)) {
+    fail('INVALID_BIGQUERY_IDENTIFIER', 'Unsafe or unsupported BigQuery project, dataset or table identifier');
+  }
+  if (endpoint) {
+    let parsed;
+    try { parsed = new URL(endpoint); } catch { fail('INVALID_BIGQUERY_ENDPOINT', 'Invalid BigQuery endpoint'); }
+    if (!['127.0.0.1', '::1', 'localhost'].includes(parsed.hostname)) {
+      fail('INVALID_BIGQUERY_ENDPOINT', 'Custom BigQuery wire endpoints are restricted to local test interfaces');
+    }
+    if (!ref.token && !process.env.BIGQUERY_TOKEN) {
+      fail('BIGQUERY_TOKEN_REQUIRED', 'Explicit test-endpoint bearer token is required');
+    }
+  }
 
   return Object.freeze({
     connector: 'bigquery',
@@ -41,7 +57,7 @@ export async function withBigQueryClient({ targetRef, credentialBroker, mockClie
     const client = {
       query: async (sqlText, params = []) => {
         const queryParameters = params.map(p => ({
-          parameterType: { type: typeof p === 'number' ? 'INT64' : 'STRING' },
+          parameterType: { type: typeof p === 'boolean' ? 'BOOL' : (typeof p === 'number' ? (Number.isSafeInteger(p) ? 'INT64' : 'FLOAT64') : 'STRING') },
           parameterValue: { value: String(p) }
         }));
 
@@ -64,6 +80,12 @@ export async function withBigQueryClient({ targetRef, credentialBroker, mockClie
         }
 
         const data = await res.json();
+        if (data.jobComplete !== true) {
+          fail('BIGQUERY_JOB_INCOMPLETE', 'Query job did not complete; do not interpret submission as a committed write');
+        }
+        if (data.errors?.length) {
+          fail('BIGQUERY_QUERY_FAILED', 'BigQuery reported a query job error');
+        }
         const fields = data.schema?.fields || [];
         const rows = (data.rows || []).map(r => {
           const obj = {};
