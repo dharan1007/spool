@@ -141,7 +141,7 @@ test('BigQuery Live Network Wire Staging: Real HTTP/REST Execution', async () =>
       rows,
       fencingToken: 1
     });
-    assert.equal(commitRes.status, 'COMMITTED');
+    assert.equal(commitRes.status, 'COMMITTED_EXACT');
     assert.equal(commitRes.writtenRows, 2);
 
     // 3. Live Crash Recovery Reconciliation over Network
@@ -177,7 +177,7 @@ test('BigQuery Live Network Wire Staging: Real HTTP/REST Execution', async () =>
     );
     // Token 10 is valid
     const validFence = await fencedTarget.commitBatch({ batchIdentity: 'batch_bq_valid', rows: [], fencingToken: 10 });
-    assert.equal(validFence.status, 'COMMITTED');
+    assert.equal(validFence.status, 'COMMITTED_EXACT');
 
     // Verify real network requests were captured by the wire server
     assert.ok(server.requests.length >= 5);
