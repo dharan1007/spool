@@ -121,7 +121,9 @@ export class BigQueryTarget {
     if (typeof batchIdentity !== 'string' || !batchIdentity || !Array.isArray(rows)) {
       fail('INVALID_BATCH_INPUT', 'batchIdentity and an array of rows are required');
     }
-    if (!migrationId || !planId) fail('INVALID_BATCH_INPUT', 'migrationId and planId are required');
+    if (rows.length && (!migrationId || !planId)) fail('INVALID_BATCH_INPUT', 'Non-empty batches require migrationId and planId');
+    const effectiveMigrationId = migrationId || 'unknown';
+    const effectivePlanId = planId || 'unknown';
     if (rows.length > 500) fail('BIGQUERY_BATCH_TOO_LARGE', 'Atomic BigQuery batches are limited to 500 rows');
     const evidence = this.describeBatch({ rows });
     const columns = rows.length ? Object.keys(rows[0]) : [];
@@ -155,7 +157,7 @@ export class BigQueryTarget {
       const leaseTable = `\`${this.targetRef.projectId}.${METADATA_DATASET}.${LEASE_TABLE}\``;
       const params = [
         batchIdentity,
-        batchIdentity, evidence.payloadHash, evidence.rowCount, migrationId, planId
+        batchIdentity, evidence.payloadHash, evidence.rowCount, effectiveMigrationId, effectivePlanId
       ];
       let fenceClause = '';
       if (this.requireFencing) {
@@ -174,7 +176,7 @@ export class BigQueryTarget {
         rowsSql = `INSERT INTO ${targetTable} (${safeColumns.join(', ')}) VALUES ${placeholders};`;
         params.push(...values);
       }
-      params.push(batchIdentity, migrationId, planId, evidence.rowCount, evidence.payloadHash, fencingToken);
+      params.push(batchIdentity, effectiveMigrationId, effectivePlanId, evidence.rowCount, evidence.payloadHash, fencingToken);
       // One BigQuery query job, NOT separate autocommit INSERT statements.
       // DELETE WHERE FALSE forces transactional table-level conflict detection
       // for concurrent insert-only transactions (per BigQuery documentation).
@@ -210,7 +212,7 @@ END;`;
       // An ambiguous transport failure must propagate; never retry individual rows.
       await client.query(sql, params);
       const recovered = await this.reconcileTargetCommit({
-        batchIdentity, migrationId, planId, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash
+        batchIdentity, migrationId: effectiveMigrationId, planId: effectivePlanId, rowCount: evidence.rowCount, payloadHash: evidence.payloadHash
       });
       if (recovered.status !== 'COMMITTED_EXACT') {
         fail('TARGET_COMMIT_UNPROVEN', 'BigQuery transaction did not produce matching atomic commit evidence', {
