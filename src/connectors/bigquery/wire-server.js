@@ -100,6 +100,7 @@ export class BigQueryWireServer {
                     return this.#sendSuccess(res, [
                       { name: 'batch_identity', type: 'STRING' },
                       { name: 'migration_id', type: 'STRING' },
+                      { name: 'plan_id', type: 'STRING' },
                       { name: 'row_count', type: 'INTEGER' },
                       { name: 'payload_hash', type: 'STRING' },
                       { name: 'commit_protocol', type: 'STRING' },
@@ -108,6 +109,7 @@ export class BigQueryWireServer {
                       f: [
                         { v: entry.batch_identity },
                         { v: entry.migration_id },
+                        { v: entry.plan_id ?? null },
                         { v: String(entry.row_count) },
                         { v: entry.payload_hash },
                         { v: entry.commit_protocol ?? null },
@@ -118,6 +120,7 @@ export class BigQueryWireServer {
                   return this.#sendSuccess(res, [
                     { name: 'batch_identity', type: 'STRING' },
                     { name: 'migration_id', type: 'STRING' },
+                    { name: 'plan_id', type: 'STRING' },
                     { name: 'row_count', type: 'INTEGER' },
                     { name: 'payload_hash', type: 'STRING' },
                     { name: 'commit_protocol', type: 'STRING' },
