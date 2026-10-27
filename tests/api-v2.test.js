@@ -172,6 +172,41 @@ test('API v2 transport: probes, authentication, host rebinding, origin and RBAC 
   assert.equal(deniedCreate.body.error.code, 'ENTERPRISE_VALIDATION_FAILED'); // root passes RBAC, body validation fails first
 });
 
+test('API v2 organization provisioning: root-only, validated, usable for workspaces', async t => {
+  const f = await fixture(t);
+  const { port } = f;
+
+  const missingName = await rawRequest({ port, path: '/v2/organizations', method: 'POST', headers: bearerHeaders, body: {} });
+  assert.equal(missingName.status, 422);
+  assert.equal(missingName.body.error.code, 'ENTERPRISE_CONFIG_INVALID');
+
+  const created = await rawRequest({ port, path: '/v2/organizations', method: 'POST', headers: bearerHeaders, body: { name: '  Provisioned Org  ' } });
+  assert.equal(created.status, 201);
+  assert.ok(created.body.result.organizationId.startsWith('org_'));
+  assert.equal(created.body.result.name, 'Provisioned Org');
+
+  const key = await rawRequest({
+    port, path: `/v2/workspaces/${f.wsA.workspaceId}/apikeys`, method: 'POST',
+    headers: bearerHeaders, body: { principalId: 'principal-a', role: 'operator' }
+  });
+  assert.equal(key.status, 201);
+  const denied = await rawRequest({
+    port, path: '/v2/organizations', method: 'POST',
+    headers: { 'x-api-key': key.body.apiKey }, body: { name: 'Not Allowed' }
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.body.error.code, 'FORBIDDEN');
+
+  // The provisioned organization is immediately usable for workspace creation.
+  await mkdir(join(f.root, 'provisioned-ws'));
+  const workspace = await rawRequest({
+    port, path: '/v2/workspaces', method: 'POST', headers: bearerHeaders,
+    body: { organizationId: created.body.result.organizationId, name: 'Provisioned', directory: join(f.root, 'provisioned-ws') }
+  });
+  assert.equal(workspace.status, 201);
+  assert.equal(workspace.body.result.organizationId, created.body.result.organizationId);
+});
+
 test('API keys are workspace-pinned and enforced; full real-engine lifecycle completes and verifies target rows', async t => {
   const f = await fixture(t);
   const { port, registry, wsA, wsB, targetA, derivedTargetSchema } = f;

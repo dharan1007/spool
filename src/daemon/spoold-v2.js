@@ -198,6 +198,17 @@ export function createSpoolDaemonV2({
       return json(response, 200, { ok: true, result });
     }
 
+    // POST /v2/organizations — create an organization (platform root only).
+    // A fresh deployment has no organization, and every workspace belongs to
+    // one, so without this route the root principal could never provision a
+    // usable workspace through the API.
+    if (request.method === 'POST' && pathname === '/v2/organizations') {
+      if (principal.kind !== 'root' || !registry) fail('FORBIDDEN', 'Only the platform root with a registry may manage organizations');
+      const body = await readJsonBody(request, maxBodyBytes);
+      const organization = registry.createOrganization(body.name);
+      return json(response, 201, { ok: true, result: organization });
+    }
+
     // POST /v2/workspaces — create a workspace (platform root only).
     if (request.method === 'POST' && pathname === '/v2/workspaces') {
       if (principal.kind !== 'root' || !registry) fail('FORBIDDEN', 'Only the platform root with a registry may manage workspaces');
@@ -459,6 +470,7 @@ export function createSpoolDaemonV2({
 export function routeLabel(pathname) {
   if (pathname === '/v2/health' || pathname === '/v2/ready' || pathname === '/v2/metrics') return pathname;
   if (pathname === '/v2/migrations') return '/v2/migrations';
+  if (pathname === '/v2/organizations') return '/v2/organizations';
   if (/^\/v2\/migrations\/[^/]+\/?$/.test(pathname)) return '/v2/migrations/:id';
   if (/^\/v2\/workspaces\//.test(pathname)) return '/v2/workspaces/:id';
   return '/other';
