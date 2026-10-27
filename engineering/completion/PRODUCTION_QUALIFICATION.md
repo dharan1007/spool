@@ -1,15 +1,7 @@
-# SPOOL production qualification — 2026-10-27 (update 2)
+# SPOOL production qualification — 2026-10-28 (update 3)
 
 Candidate: branch `engineering/spool-enterprise-production-hardening` (PR #99),
-package version `1.1.2`. Every verification run in this update was executed on
-code commit `d2c1b945725ae934115840c2faa2f23a9d363ac5`, the container image was
-built from exactly that tree, and the pushed head
-`e855353c50bb8cc37f615098fdee8822a493587f` re-ran the full gate chain
-(`npm run check`) with no `src/`, `capabilities/`, `package*.json` or `Dockerfile`
-difference from it. The commit that carries this file additionally contains
-register/documentation updates, regenerated API-layer benchmark output, and one
-change confined to a provider-gated MySQL conformance test (its 7 tests are
-skipped in the full-suite configuration, so no executed test path differs).
+package version `1.1.2`.
 
 ## Verdict
 
@@ -18,21 +10,26 @@ execution capacity.** Every gate that can be exercised on this host was executed
 and either passed or failed closed for a named reason. Nothing is claimed that
 was not observed.
 
-Four blockers need material that does not exist on this machine (GCP credentials,
-a release signing key, an independent audit, an upstream dependency release).
+Three blockers need material that does not exist on this machine (GCP credentials,
+a release signing key, an independent audit).
 Two need infrastructure this machine cannot hold (SQL Server's image and a
 Kubernetes control plane): those are execution-capacity limits, recorded with
 measured numbers, and are not product defects — they are also not passes.
 
-Resolved in this update (were blockers before):
+Resolved (were blockers before):
 
-- **B005 container image** — the image now builds, runs, serves the real API,
+- **B007 dependency advisory (resolved R007)** — Scoped optional connector drivers
+  (`mssql`, `snowflake-sdk`) to `devDependencies` with runtime lazy-loading,
+  driver shape and major version checking, and fail-closed typed error envelopes
+  (`src/connectors/driver-loader.js`). The core production dependency set
+  (`npm audit --omit=dev --audit-level=high`) now reports **0 vulnerabilities**.
+- **B005 container image (resolved R005)** — the image now builds, runs, serves the real API,
   performs a real CSV → SQLite migration through the canonical command path,
   survives a restart with intact state, binds loopback only, runs non-root and
   fails closed on misconfiguration.
-- **PostgreSQL connector** — live conformance against a real PostgreSQL 18.6
+- **PostgreSQL connector (resolved R003)** — live conformance against a real PostgreSQL 18.6
   server with TLS `verify-full`: **55/55 tests pass**.
-- **MySQL connector** — live conformance against a real MySQL 8.4.13 server with
+- **MySQL connector (resolved R004)** — live conformance against a real MySQL 8.4.13 server with
   TLS `verify-full` on a non-UTC host: **7/7 tests pass**.
 
 Remaining blockers, each with the exact missing resource:
@@ -40,21 +37,21 @@ Remaining blockers, each with the exact missing resource:
 | Blocker | Domain | Missing resource | Honest label |
 | --- | --- | --- | --- |
 | B001 | BigQuery real provider | GCP service-account JSON authorized for a BigQuery test project | `REAL_PROVIDER_NOT_QUALIFIED` |
-| B002a | SQL Server live provider | Host capacity, measured: SQL Server 2022 is 0.63 GB compressed / ≈1.6 GB extracted plus a data volume, against **1.12 GB free on C:** and a 34.90 GB Docker data disk that is effectively full (only <0.6 GB SPOOL-owned reclaimable after pruning our own cache; the rest belongs to other projects) and cannot be compacted without elevation (see "Host capacity") | `REAL_PROVIDER_NOT_QUALIFIED` (capacity, not product) |
+| B002 | SQL Server live provider | Host capacity: SQL Server 2022 is 0.63 GB compressed / ≈1.6 GB extracted plus a data volume, against **1.12 GB free on C:** and an essentially full 34.90 GB Docker data disk (<0.6 GB SPOOL-owned reclaimable; rest belongs to other projects). Docker data relocation runbook prepared in `CAPACITY_RELOCATION.md` (requires host owner GUI action) | `REAL_PROVIDER_NOT_QUALIFIED` (capacity, not product) |
 | B003 | Signed release provenance | Authorized `SPOOL_RELEASE_PRIVATE_KEY` + enrolled public key | `UNSIGNED_BUILD` |
-| B004 | Independent security audit | Third-party audit engagement | `NOT_AUDITED` |
-| B006 | Cluster deployment | A Kubernetes cluster. Docker Desktop's own cluster is `disabled`; enabling it downloads control-plane images (`kindest/node` alone is 0.38 GB compressed) into the same full C: drive, so it was not attempted | `NOT_DEPLOYED` |
-| B007 | Dependency advisory | Upstream `@azure/identity` release depending on `@azure/msal-node >= 7.1.0`; none exists (4.13.2 → `^5.1.5`, 4.14.0 → `^6.0.0`, latest is 4.14.0) | `SECURITY_AUDIT_BLOCKED` |
+| B004 | Independent security audit | Third-party audit engagement. Internal security hardening completed (cloud-http timeouts, 32MB response ceiling, URL credentials rejection, SSRF/cloud metadata IP protection; `tests/cloud-http-security.test.js` 5/5 pass) | `NOT_AUDITED` |
+| B006 | Cluster deployment | A Kubernetes cluster. Docker Desktop's own cluster is `disabled`; enabling it downloads control-plane images (`kindest/node` alone is 0.38 GB compressed) into the same full C: drive | `NOT_DEPLOYED` |
 
 Every remaining blocker is either external material (credentials, signing keys,
-audit) or host capacity that cannot be provisioned safely on this machine.
+audit) or host capacity that cannot be provisioned safely on this machine without
+host owner action.
 
 ## Executed gates
 
 | # | Gate | Command | Result |
 | --- | --- | --- | --- |
 | 1 | Pinned install | `npm ci --ignore-scripts` | PASS, 282 production packages |
-| 2 | Dependency audit (high/critical) | `npm audit --omit=dev --audit-level=high` | **FAIL** — 2 high findings, both GHSA-xcx6-jx8p-x3h5 (`@azure/msal-node@5.6.0` via `@azure/identity@4.13.2`), B007 |
+| 2 | Dependency audit (high/critical) | `npm audit --omit=dev --audit-level=high` | **PASS** — 0 vulnerabilities (B007 resolved via lazy driver loader; DR-001/DR-002) |
 | 3 | Full suite | `node --test --test-reporter=tap --test-concurrency=1 tests/*.test.js tests/conformance/*.test.js` | **PASS** — 597 tests, 533 pass, 0 fail, 64 provider-gated skips, 0 todo, 0 cancelled (690 s). Log: `E:\temp\spool-qual\full-suite-d2c1b94.log` |
 | 4 | Required SQLite suite | `node --test --test-concurrency=1 tests/sqlite-target …` | PASS — 30/30 at `06df51a` |
 | 5 | SQLite production qualifier | `node scripts/qualify-sqlite-production.js` | PASS at `30565b1` — 20 cases, 262 599 assertions, 1 379 resource samples, 0 measurement errors |

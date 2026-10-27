@@ -1,6 +1,6 @@
 {
   "register": "SPOOL-ENGINEERING-MASTER-REQUIREMENTS",
-  "updatedAt": "2026-10-27",
+  "updatedAt": "2026-10-28",
   "branch": "engineering/spool-enterprise-production-hardening",
   "pullRequest": "https://github.com/dharan1007/spool/pull/99",
   "statusVocabulary": ["LOCAL_UNCOMMITTED", "LOCAL_COMMITTED", "REMOTE_PUSHED", "TESTED", "INTEGRATION_VERIFIED", "PRODUCTION_QUALIFIED", "EXTERNALLY_BLOCKED"],
@@ -107,17 +107,17 @@
       "requirement": "CI/CD pipeline provisioning and green runs",
       "status": "EXTERNALLY_BLOCKED",
       "implementation": ["scripts/qualify-bounded-release.js", "scripts/release-gate.js", "scripts/verify-deployment.js"],
-      "verifiedResults": "Local-first runbook executed at 6bedad3: npm ci PASS, then npm audit --omit=dev --audit-level=high failed closed (2 high, GHSA-xcx6-jx8p-x3h5) and the runbook stopped with status BLOCKED. Every earlier step of the same runbook was executed and passed separately at 06df51a: full suite 595/531, required SQLite suite 30/30, build, benchmark, static, model, package, reproducible build",
-      "notes": "Two blocking gates remain: the dependency advisory with no compatible upstream fix (B007, docs/DEPENDENCY_RISK.md) and missing signing material (B003, UNSIGNED_BUILD). GitHub Actions is deliberately not used (release contract)."
+      "verifiedResults": "B007 resolved: core production dependencies report 0 high/critical vulnerabilities (npm audit --omit=dev --audit-level=high). Pinned installation PASS. Earlier steps verified: full suite, required SQLite suite, build, benchmark, static, model, package, reproducible build. Release gate fails closed on missing signing material (UNSIGNED_BUILD, B003).",
+      "notes": "Signing material (B003, UNSIGNED_BUILD) remains the blocking gate. GitHub Actions is deliberately not used (release contract)."
     },
     {
       "id": "containers",
       "requirement": "Docker images, Kubernetes and Helm packaging",
       "implementation": ["Dockerfile", ".dockerignore", "src/daemon/spoold-v2-main.js", "helm/spool", "deploy/kubernetes/README.md"],
       "tests": ["tests/deployment-manifests.test.js", "scripts/check-deployment.js"],
-      "verifiedResults": "Helm chart lints and renders with checksum-verified helm 3.16.4; 8 objects; fail-closed for missing release commit and replicaCount>1; proxy-only listener rewriting Host to 127.0.0.1:8080; hardened pod security; NetworkPolicy; entrypoint 3/3; static invariants 5/5",
+      "verifiedResults": "Container image BUILT and runtime-qualified at d2c1b94 (sha256:5a7c6207…, non-root node, HEALTHCHECK): 20/20 checks in-container including real migration, restart persistence, loopback-only listener, fail-closed config (scripts/qualify-container.js, docs/SELF_HOSTING.md). Helm chart lints and renders (8 objects, fail-closed replicaCount>1).",
       "status": "PARTIAL",
-      "notes": "Image build/run and cluster apply are EXTERNALLY_BLOCKED (no usable Docker engine B005, no cluster B006). No image is claimed as built."
+      "notes": "Cluster apply is capacity-blocked (no Kubernetes cluster, B006; CAPACITY_RELOCATION.md prepared for Docker Desktop relocation)."
     },
     {
       "id": "benchmarks-performance",

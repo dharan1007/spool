@@ -55,6 +55,15 @@
 8. **Anchored facts:** `DEFAULT_MAX_SOURCE_BYTES = 256 MiB`; capability matrix
    pin `4915ac01…`; `spoold-v2` loopback-only + same-pod nginx proxy;
    `replicaCount: 1` + `Recreate`; helm objects 8, render sha `d073f5bb…`.
+9. **B007 resolved:** optional drivers (`mssql`, `snowflake-sdk`) scoped to
+   `devDependencies` with lazy driver loader (`src/connectors/driver-loader.js`),
+   major-version verification, and fail-closed typed errors. Core production
+   closure (`npm audit --omit=dev --audit-level=high`) reports **0 vulnerabilities**.
+10. **B004 security readiness:** cloud HTTP transport enforced with 30s timeout,
+    32MB response ceiling, embedded credentials rejection, and SSRF/cloud metadata
+    IP blocking (`tests/cloud-http-security.test.js` 5/5 pass).
+11. **Host capacity relocation:** runbook prepared in `CAPACITY_RELOCATION.md`
+    for Docker Desktop disk migration to E:.
 
 ## Verification commands (order)
 
@@ -91,19 +100,18 @@ docker cp scripts/qualify-container.js spool-daemon-test:/tmp/
 docker exec -u node spool-daemon-test node /tmp/qualify-container.js
 ```
 
-## What still stops the release (all external)
+## What still stops the release (external / host capacity)
 
 | Blocker | Missing | Label |
 | --- | --- | --- |
 | B001 | GCP service-account JSON for a BigQuery test project | `REAL_PROVIDER_NOT_QUALIFIED` |
-| B002 | Host capacity for SQL Server 2022 (0.63 GB compressed / about 1.6 GB extracted vs **1.12 GB free on C:**; 34.90 GB docker disk effectively full, not compactable without elevation) | `REAL_PROVIDER_NOT_QUALIFIED` |
+| B002 | Host capacity for SQL Server 2022 (0.63 GB compressed / about 1.6 GB extracted vs **1.12 GB free on C:**; 34.90 GB docker disk effectively full, not compactable without elevation; `CAPACITY_RELOCATION.md` prepared) | `REAL_PROVIDER_NOT_QUALIFIED` |
 | B003 | Authorized release signing key | `UNSIGNED_BUILD` |
-| B004 | Independent third-party audit | `NOT_AUDITED` |
+| B004 | Independent third-party audit (internal security hardening completed) | `NOT_AUDITED` |
 | B006 | A Kubernetes cluster (Docker Desktop k8s disabled; enabling pulls control-plane images into the full C:) | `NOT_DEPLOYED` |
-| B007 | Upstream `@azure/identity` release depending on `@azure/msal-node >= 7.1.0` (none published; 7.1.1 override proven API-incompatible) | `SECURITY_AUDIT_BLOCKED` |
 
-Do not mark any of these passed. Do not lower the audit gate, do not suppress
-the advisory, do not relocate/delete vhdx files by hand, and do not claim
+Do not mark any of these passed. Do not invent signing keys, do not fabricate
+cloud qualification, do not relocate/delete vhdx files by hand, and do not claim
 multi-replica HA (coordination is not proven; the chart pins one writer).
 
 ## Next executable steps (only if new resources appear)

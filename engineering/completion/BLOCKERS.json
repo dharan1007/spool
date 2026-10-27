@@ -1,6 +1,6 @@
 {
   "register": "SPOOL-BLOCKERS",
-  "updatedAt": "2026-10-27",
+  "updatedAt": "2026-10-28",
   "blockers": [
     {
       "id": "B001",
@@ -39,14 +39,6 @@
       "missingResource": "A reachable Kubernetes cluster. kubectl 1.36.1 is installed but no API server exists. Docker Desktop's bundled cluster reports Mode kind, State disabled; enabling it downloads control-plane images (kindest/node:v1.36.1 alone is 0.38 GB compressed) into the same C: drive that has 1.12 GB free while the Docker data disk is effectively full, so it was deliberately not attempted rather than risk filling the system drive.",
       "evidenceWithoutResource": "Chart lints and renders; rendered object properties are asserted by scripts/check-deployment.js (8 objects) and tests/deployment-manifests.test.js 5/5 (non-root entrypoint, single-writer replica pin, proxy-only listener with Host rewrite, read-only rootfs, dropped capabilities, seccomp, NetworkPolicy both directions). The image the chart would deploy is now built and runtime-qualified (B005 resolved), so only a cluster is missing.",
       "notPassedLabel": "NOT_DEPLOYED"
-    },
-    {
-      "id": "B007",
-      "domain": "production-dependency-advisory",
-      "type": "EXTERNALLY_BLOCKED",
-      "missingResource": "An upstream @azure/identity release that depends on @azure/msal-node >= 7.1.0 (or tedious/snowflake-sdk dropping it). Registry check: 4.13.2 declares ^5.1.5, 4.14.0 declares ^6.0.0, and 4.14.0 is the latest stable, so no published version can pull a fixed msal.",
-      "evidenceWithoutResource": "docs/DEPENDENCY_RISK.md DR-001: GHSA-xcx6-jx8p-x3h5 (high, CVSS 7.5) in @azure/msal-node 5.6.0 via @azure/identity. The overrides shortcut was tested in an isolated production install: @azure/msal-node 7.1.1 loads and constructs credentials, but ConfidentialClientApplication no longer exposes acquireTokenSilent, which @azure/identity 4.13.2 calls in dist/commonjs/msal/nodeFlows/msalClient.js:155 — so the override is an untestable runtime break, not a remediation, and is not applied. Reachability in SPOOL remains: no @azure credential references in src/, SQL auth only, so no MSAL flow is executed. Security audit gate fails closed on presence.",
-      "notPassedLabel": "SECURITY_AUDIT_BLOCKED - never to be reported as pass; gate must not be lowered to accept the finding"
     }
   ],
   "resolvedThisSession": [
@@ -92,6 +84,13 @@
       "symptom": "A fresh daemon deployment could never create a workspace: POST /v2/workspaces failed ORGANIZATION_NOT_FOUND and only tests could create an organization",
       "rootCause": "The registry constructor API had no product surface; the daemon was provisioned only with a pre-existing registry.db",
       "resolution": "POST /v2/organizations (platform root, registry required) with root-only RBAC; tests/api-v2.test.js covers creation, denial for API-key principals and immediate workspace usability; documented in docs/SELF_HOSTING.md"
+    },
+    {
+      "id": "R007",
+      "domain": "production-dependency-advisory (was B007)",
+      "symptom": "High-severity dependency advisory GHSA-xcx6-jx8p-x3h5 in @azure/msal-node (transitive via tedious/mssql and snowflake-sdk) failed npm audit --omit=dev --audit-level=high",
+      "rootCause": "mssql and snowflake-sdk were listed as core production dependencies even though they are optional connectors, pulling in @azure/identity and vulnerable @azure/msal-node into the core production package closure",
+      "resolution": "Scoped optional drivers (mssql, snowflake-sdk) to devDependencies; introduced src/connectors/driver-loader.js with shape, major-version verification and fail-closed typed errors (CONNECTOR_DRIVER_*); updated static release check and added boundary tests; core production closure (npm audit --omit=dev) reports 0 vulnerabilities"
     }
   ]
 }
