@@ -49,7 +49,7 @@
     "browserStudio": "PASS at e855353 against the dist built from that commit (artifact root df77ec64…): 6 routes, 25000 rows (24955 valid / 45 invalid), phase COMPLETE, WebMCP tool surface, recovery PASS, explicit Studio workflow PASS, 0 runtime exceptions, 0 failed network loads; earlier 3 consecutive runs at 06df51a also PASS",
     "releaseGate": "FAILED CLOSED UNSIGNED_BUILD at e855353 after reproducible build PASS (df77ec64..., 133 artifacts) - BLOCKERS B003",
     "securityAudit": "FAIL at d2c1b94 - 2 high GHSA-xcx6-jx8p-x3h5 (@azure/msal-node 5.6.0 via @azure/identity 4.13.2); msal 7.1.1 override proven API-incompatible (acquireTokenSilent removed) - BLOCKERS B007 / docs/DEPENDENCY_RISK.md",
-    "candidateVerdict": "NO-GO / EXTERNALLY BLOCKED - see engineering/completion/PRODUCTION_QUALIFICATION.md and BLOCKERS B001/B002/B003/B004/B006/B007"
+    "candidateVerdict": "NO-GO - EXTERNALLY BLOCKED, plus host execution-capacity limits for SQL Server live qualification (B002) and cluster deployment (B006). External material: BigQuery credentials (B001), release signing keys (B003), independent audit (B004), upstream MSAL release (B007). See engineering/completion/PRODUCTION_QUALIFICATION.md."
   },
   "externalBlocks": "See BLOCKERS.json: BigQuery credentials (B001), SQL Server live host capacity (B002), release signing keys (B003), independent audit (B004), Kubernetes cluster capacity (B006), upstream MSAL advisory (B007)",
   "remainingWork": "See REMAINING_TASKS.json T008-T011, T014, T016"

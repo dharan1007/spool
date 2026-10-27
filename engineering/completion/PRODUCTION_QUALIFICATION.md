@@ -13,9 +13,16 @@ skipped in the full-suite configuration, so no executed test path differs).
 
 ## Verdict
 
-**NO-GO / EXTERNALLY BLOCKED.** Every gate that can be exercised on this host
-was executed and either passed or failed closed for a named reason. Nothing is
-claimed that was not observed.
+**NO-GO — EXTERNALLY BLOCKED, with two gates additionally blocked by host
+execution capacity.** Every gate that can be exercised on this host was executed
+and either passed or failed closed for a named reason. Nothing is claimed that
+was not observed.
+
+Four blockers need material that does not exist on this machine (GCP credentials,
+a release signing key, an independent audit, an upstream dependency release).
+Two need infrastructure this machine cannot hold (SQL Server's image and a
+Kubernetes control plane): those are execution-capacity limits, recorded with
+measured numbers, and are not product defects — they are also not passes.
 
 Resolved in this update (were blockers before):
 
