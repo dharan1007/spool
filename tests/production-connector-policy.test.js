@@ -49,7 +49,8 @@ async function fixture(qualification = false) {
     mappingRevision: 1, writeStrategy: { mode: 'insert', batchSize: 1 }, verification: { checks: ['row_accounting', 'ledger_complete'] },
     risk: { level: 'medium', approvals: ['target_write'] }, capabilityAssumptions: { source: { snapshotBinding: true }, target: { transactions: true, atomicBatchLedger: true, reconcileAfterCrash: true, fencing: true } }
   } };
-  return { root, path, options, request, service, async close() { service.close(); await rm(root, { recursive: true, force: true }); } };
+  return { root, path, options, request, service, async close() { service.close(); // maxRetries rides out transient Windows EBUSY/EPERM on freshly-closed SQLite sidecars; a genuine leaked handle still fails after retries.
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } };
 }
 
 evidenceTest('production permits only approved SQLite INSERT through the canonical lifecycle', async () => {
@@ -77,7 +78,17 @@ evidenceTest('production denies every experimental target before discovery, appr
   try {
     a.throws(() => f.service.targetConnectors, denial);
     a.throws(() => f.service.sourceCoordinator, denial);
-    await a.rejects(() => SpoolCommandService.create({ ...f.options, maxSourceBytes: 257 * 1024 * 1024 }), denial);
+    // The shipped bounded release reviews production sources up to 10 GiB
+    // (PRODUCTION_POLICY.maxSourceBytes); configuring within that ceiling is
+    // legal, exceeding it is denied at create. The earlier 256 MiB expectation
+    // here predates the reviewed 1.1.2 ceiling and used to mask its own
+    // failure: the denial never happened, the not-rejected service leaked its
+    // open state DB handle, and the teardown EBUSY replaced the assertion
+    // error with a misleading one.
+    a.equal(PRODUCTION_POLICY.maxSourceBytes, 10 * 1024 * 1024 * 1024);
+    const withinCeiling = await SpoolCommandService.create({ ...f.options, maxSourceBytes: 257 * 1024 * 1024 });
+    withinCeiling.close();
+    await a.rejects(() => SpoolCommandService.create({ ...f.options, maxSourceBytes: PRODUCTION_POLICY.maxSourceBytes + 1 }), denial);
     await a.rejects(() => SpoolCommandService.create({ ...f.options, release: { ...f.options.release, version: 'unmatched' } }), error => error.code === 'RELEASE_IDENTITY_REQUIRED');
     for (const connector of ['postgres', 'mysql', 'mssql', 'unknown']) {
       const request = structuredClone(f.request); request.planInput.targetRef.connector = connector;
@@ -154,7 +165,7 @@ evidenceTest('qualification rejects missing opt-in, a different run binding and 
     const alias = join(f.options.sourceRoot, 'alias.csv'); await link(outsideSource, alias);
     const request = structuredClone(f.request); request.planInput.sourceRef.path = alias;
     await a.rejects(() => f.service.inspect(request), error => error.code === 'QUALIFICATION_ROOT_INVALID');
-  } finally { await f.close(); await rm(other, { recursive: true, force: true }); }
+  } finally { await f.close(); await rm(other, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
 evidenceTest('run-bound qualification is checked again before each real target batch', async () => {

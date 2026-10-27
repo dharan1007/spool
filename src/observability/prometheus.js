@@ -1,4 +1,5 @@
 // Zero-dependency standard Prometheus metrics exposition format implementation
+import { fail } from '../core/errors.js';
 
 class Metric {
   constructor(name, help, type, labelNames = []) {
@@ -65,43 +66,95 @@ export class Gauge extends Metric {
   }
 }
 
+function extendSampleKey(key, extraLabel) {
+  // Merges a quantile/le label into an existing series label set, keeping the
+  // extend label last per the exposition format rules.
+  if (!key) return `{${extraLabel}}`;
+  return key.replace(/\}$/, `,${extraLabel}}`);
+}
+
 export class Histogram extends Metric {
   constructor(options) {
     super(options.name, options.help, 'histogram', options.labelNames);
-    this.buckets = options.buckets ?? [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60];
-    this.counts = new Map(); // key -> bucket counts
-    this.sums = new Map();
+    this.buckets = [...(options.buckets ?? [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60])].sort((a, b) => a - b);
+    if (this.buckets.some(le => !Number.isFinite(le) || le <= 0) || this.buckets.some(le => !Number.isSafeInteger(le) && !Number.isSafeInteger(Math.round(le * 1e15)))) {
+      fail('INVALID_METRIC_BUCKETS', 'Histogram buckets must be positive finite numbers');
+    }
+    this._series = new Map(); // labelKey -> { bucketCounts, sum, count }
   }
 
   observe(labels = {}, value) {
-    const key = this.formatLabels(labels);
-    const curSum = this.sums.get(key) ?? 0;
-    this.sums.set(key, curSum + value);
-
-    const bucketCounts = this.counts.get(key) ?? new Array(this.buckets.length).fill(0);
-    for (let i = 0; i < this.buckets.length; i++) {
-      if (value <= this.buckets[i]) {
-        bucketCounts[i]++;
-      }
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      fail('INVALID_METRIC_VALUE', 'Histogram observations must be non-negative finite numbers');
     }
-    this.counts.set(key, bucketCounts);
+    const key = this.formatLabels(labels);
+    let series = this._series.get(key);
+    if (!series) {
+      series = { bucketCounts: new Array(this.buckets.length).fill(0), sum: 0, count: 0 };
+      this._series.set(key, series);
+    }
+    // Prometheus cumulative semantics: every bucket whose upper bound >= value
+    // counts the observation; observations above the largest finite bucket are
+    // still accounted and represented by the mandatory +Inf bucket.
+    for (let i = 0; i < this.buckets.length; i++) {
+      if (value <= this.buckets[i]) series.bucketCounts[i] += 1;
+    }
+    series.sum += value;
+    series.count += 1;
   }
 
   render() {
-    if (this.sums.size === 0) return '';
+    if (this._series.size === 0) return '';
     let out = `# HELP ${this.name} ${this.help}\n# TYPE ${this.name} ${this.type}\n`;
-    for (const [key, sum] of this.sums.entries()) {
-      const bucketCounts = this.counts.get(key) ?? [];
-      let totalCount = 0;
+    for (const [key, series] of this._series.entries()) {
       for (let i = 0; i < this.buckets.length; i++) {
-        totalCount = bucketCounts[i];
-        const leLabels = key ? key.replace(/\}$/, `,le="${this.buckets[i]}"}`) : `{le="${this.buckets[i]}"}`;
-        out += `${this.name}_bucket${leLabels} ${totalCount}\n`;
+        out += `${this.name}_bucket${extendSampleKey(key, `le="${this.buckets[i]}"`)} ${series.bucketCounts[i]}\n`;
       }
-      const infLabels = key ? key.replace(/\}$/, `,le="+Inf"}`) : `{le="+Inf"}`;
-      out += `${this.name}_bucket${infLabels} ${totalCount}\n`;
-      out += `${this.name}_sum${key} ${sum}\n`;
-      out += `${this.name}_count${key} ${totalCount}\n`;
+      out += `${this.name}_bucket${extendSampleKey(key, 'le="+Inf"')} ${series.count}\n`;
+      out += `${this.name}_sum${key} ${series.sum}\n`;
+      out += `${this.name}_count${key} ${series.count}\n`;
+    }
+    return out;
+  }
+}
+
+export class Summary extends Metric {
+  constructor(options) {
+    super(options.name, options.help, 'summary', options.labelNames);
+    this._series = new Map(); // labelKey -> { sortedValues, sum, count }
+  }
+
+  observe(labels = {}, value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      fail('INVALID_METRIC_VALUE', 'Summary observations must be finite numbers');
+    }
+    const key = this.formatLabels(labels);
+    let series = this._series.get(key);
+    if (!series) {
+      series = { values: [], sum: 0, count: 0 };
+      this._series.set(key, series);
+    }
+    series.values.push(value);
+    series.sum += value;
+    series.count += 1;
+  }
+
+  #quantile(values, q, defaultIfEmpty) {
+    if (values.length === 0) return defaultIfEmpty;
+    const index = Math.ceil(q * values.length) - 1;
+    return values[Math.max(0, Math.min(index, values.length - 1))];
+  }
+
+  render() {
+    if (this._series.size === 0) return '';
+    let out = `# HELP ${this.name} ${this.help}\n# TYPE ${this.name} ${this.type}\n`;
+    for (const [key, series] of this._series.entries()) {
+      const sorted = [...series.values].sort((a, b) => a - b);
+      for (const [q, p] of [[0.5, 50], [0.9, 90], [0.95, 95], [0.99, 99]]) {
+        out += `${this.name}${extendSampleKey(key, `quantile="${q}"`)} ${this.#quantile(sorted, p / 100, series.values[0])}\n`;
+      }
+      out += `${this.name}_sum${key} ${series.sum}\n`;
+      out += `${this.name}_count${key} ${series.count}\n`;
     }
     return out;
   }
