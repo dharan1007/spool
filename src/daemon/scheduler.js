@@ -60,7 +60,15 @@ export class MigrationScheduler {
 
   async #tick(id, migrationFactory, requiredRole) {
     try {
-      const activeLease = this.leaseStore?.getActiveLease ? this.leaseStore.getActiveLease() : null;
+      let activeLease = null;
+      if (typeof this.leaseStore?.getActiveLease === 'function') {
+        activeLease = this.leaseStore.getActiveLease();
+      } else if (typeof this.leaseStore?.current === 'function') {
+        const c = this.leaseStore.current('scheduler:staging');
+        if (c && Number(c.expiresAtMs) > Date.now()) {
+          activeLease = c;
+        }
+      }
       if (activeLease) {
         this.#audit('scheduled.migration.lease_skipped', id, 'LEASE_EXISTS', {
           leaseResource: activeLease.resource ?? null

@@ -129,6 +129,9 @@ export class EnterpriseRegistry {
         ORDER BY lower(w.name)`),
       insertMembership: this.db.prepare('INSERT INTO memberships (workspace_id, principal_id, role, created_at) VALUES (?, ?, ?, ?)'),
       getMembership: this.db.prepare('SELECT * FROM memberships WHERE workspace_id = ? AND principal_id = ?'),
+      listMemberships: this.db.prepare('SELECT * FROM memberships WHERE workspace_id = ? ORDER BY principal_id'),
+      deleteMembership: this.db.prepare('DELETE FROM memberships WHERE workspace_id = ? AND principal_id = ?'),
+      updateMembership: this.db.prepare('UPDATE memberships SET role = ? WHERE workspace_id = ? AND principal_id = ?'),
       insertApiKey: this.db.prepare('INSERT INTO api_keys (key_hash, key_id, principal_id, workspace_id, role, issued_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, NULL)'),
       getApiKeyByHash: this.db.prepare('SELECT * FROM api_keys WHERE key_hash = ?'),
       revokeApiKey: this.db.prepare('UPDATE api_keys SET revoked_at = ? WHERE key_id = ? AND revoked_at IS NULL'),
@@ -232,6 +235,51 @@ export class EnterpriseRegistry {
     const row = this.q.getMembership.get(workspaceId, principalId);
     if (!row) return null;
     return Object.freeze({ workspaceId: row.workspace_id, principalId: row.principal_id, role: row.role });
+  }
+
+  listMemberships(workspaceId) {
+    this.#assertOpen();
+    this.getWorkspace(workspaceId);
+    const rows = this.q.listMemberships.all(workspaceId);
+    return rows.map(r => Object.freeze({
+      workspaceId: r.workspace_id,
+      principalId: r.principal_id,
+      role: r.role,
+      createdAt: r.created_at
+    }));
+  }
+
+  removeMembership(workspaceId, principalId) {
+    this.#assertOpen();
+    this.getWorkspace(workspaceId);
+    const res = this.q.deleteMembership.run(workspaceId, principalId);
+    if (res.changes === 0) fail('NOT_FOUND', 'Membership not found');
+    this.recordActivity({
+      category: 'workspace',
+      actor: 'spool:root',
+      workspaceId,
+      code: 'MEMBERSHIP_REMOVED',
+      detail: { principalId },
+      severity: 'info'
+    });
+    return Object.freeze({ workspaceId, principalId, removed: true });
+  }
+
+  updateMembershipRole(workspaceId, principalId, role) {
+    this.#assertOpen();
+    this.getWorkspace(workspaceId);
+    if (!ROLES.has(role)) fail('ENTERPRISE_CONFIG_INVALID', `Role must be one of ${[...ROLES].join(', ')}`);
+    const res = this.q.updateMembership.run(role, workspaceId, principalId);
+    if (res.changes === 0) fail('NOT_FOUND', 'Membership not found');
+    this.recordActivity({
+      category: 'workspace',
+      actor: 'spool:root',
+      workspaceId,
+      code: 'MEMBERSHIP_ROLE_UPDATED',
+      detail: { principalId, role },
+      severity: 'info'
+    });
+    return Object.freeze({ workspaceId, principalId, role });
   }
 
   // ---------- api keys ----------

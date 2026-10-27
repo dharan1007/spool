@@ -1,7 +1,7 @@
 {
   "test": "REST_API_LAYERED_BENCHMARK",
   "note": "Transport and registry benchmarks only; migration EXECUTION throughput is qualified by real-engine suites, not request-rate sampling.",
-  "timestamp": "2026-10-27T07:49:31.376Z",
+  "timestamp": "2026-10-27T09:23:10.192Z",
   "benchmarks": [
     {
       "label": "transport-probes",
@@ -10,14 +10,14 @@
       "successful": 300,
       "failed": 0,
       "successRatePct": 100,
-      "durableSeconds": 0.522,
-      "requestsPerSecond": 575,
+      "durableSeconds": 0.536,
+      "requestsPerSecond": 560,
       "latencyMs": {
-        "min": 28.93,
-        "p50": 40.11,
-        "p95": 111.42,
-        "p99": 131.77,
-        "max": 134.07
+        "min": 28.54,
+        "p50": 40.25,
+        "p95": 112.66,
+        "p99": 134.63,
+        "max": 137.07
       }
     },
     {
@@ -27,14 +27,14 @@
       "successful": 300,
       "failed": 0,
       "successRatePct": 100,
-      "durableSeconds": 0.391,
-      "requestsPerSecond": 768,
+      "durableSeconds": 0.398,
+      "requestsPerSecond": 754,
       "latencyMs": {
-        "min": 24.39,
-        "p50": 36.89,
-        "p95": 46.1,
-        "p99": 46.47,
-        "max": 46.49
+        "min": 26.35,
+        "p50": 37.35,
+        "p95": 48.15,
+        "p99": 48.72,
+        "max": 48.81
       }
     },
     {
@@ -44,14 +44,14 @@
       "successful": 300,
       "failed": 0,
       "successRatePct": 100,
-      "durableSeconds": 0.024,
-      "requestsPerSecond": 12307,
+      "durableSeconds": 0.027,
+      "requestsPerSecond": 10994,
       "latencyMs": {
         "min": 0.12,
-        "p50": 2.21,
-        "p95": 2.67,
-        "p99": 3.09,
-        "max": 3.8
+        "p50": 2.22,
+        "p95": 4.48,
+        "p99": 4.86,
+        "max": 4.95
       }
     }
   ]

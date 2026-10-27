@@ -4,8 +4,8 @@
   "workingDirectory": "C:\\temp\\spool-console",
   "branch": "engineering/spool-enterprise-production-hardening",
   "baseCommit": "38370a6da3004202edd82bd5f2b9d6dca1f0f63d",
-  "remoteHeadAtRegisterTime": "38370a6da3004202edd82bd5f2b9d6dca1f0f63d (PR #99 head)",
-  "pushedCommitSha": "PENDING_PUSH",
+  "remoteHeadAtRegisterTime": "27bb735a515123975d684bf77d215b1b0045a4af (verified via git ls-remote after push)",
+  "pushedCommitSha": "27bb735a515123975d684bf77d215b1b0045a4af",
   "supersedes": {
     "previousSessionStash": "stash@{0}: recovery-checkpoint-20261027-uncommitted-session-work (INTENTIONALLY NOT APPLIED WHOLE — its BigQuery rewrite is superseded by PR #99 canonical SPOOL_ATOMIC_V2; also preserved as diff at C:\\Users\\dhara\\AppData\\Local\\Temp\\opencode\\recovery-20261027b-stash.diff)"
   },
@@ -26,7 +26,7 @@
     "fullNpmTest": "574 total: 510 pass, 0 fail, 0 cancelled, 64 provider-gated skips, 0 todo",
     "staticCheck": "PASS",
     "build": "PASS (65/65 self-tests, dist built)",
-    "npmRunCheck": "RUNNING in background at register time; expected terminal state: UNSIGNED_BUILD fail-closed (no signing material)"
+    "npmRunCheck": "completed 2026-10-27: embedded FULL npm test 574/510 pass/0 fail/64 provider-gated skips/0 todo; check:model PASS; release-gate ran build-dist (65/65 self-tests), benchmarks, static-check, pre-sign verify-release-chain and reproducible-build-evidence (two independent builds, identical artifact root sha 3648daec483ebb34661dc2f9ca1edc87ebbdab4abdc34eee058e5719f6d125b9, reproducible=true, 130 artifacts, binding SHA 38370a6) then failed CLOSED with UNSIGNED_BUILD — the honest by-design terminal state without signing material (BLOCKERS B003); script exit code 1"
   },
   "externalBlocks": "See BLOCKERS.json (BigQuery/PG/MySQL/MSSQL real-provider credentials, release signing keys, independent audit)",
   "remainingWork": "See REMAINING_TASKS.json T004-T016"

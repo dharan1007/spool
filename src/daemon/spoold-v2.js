@@ -79,6 +79,7 @@ export function createSpoolDaemonV2({
   token = null,
   allowedOrigins = [],
   maxBodyBytes = 1024 * 1024,
+  rateLimitPerMinute = 2000,
   host = '127.0.0.1'
 } = {}) {
   if (!orchestrator || typeof orchestrator.createMigration !== 'function') {
@@ -96,6 +97,25 @@ export function createSpoolDaemonV2({
   }
   const originSet = new Set(allowedOrigins);
   let listeningPort = null;
+  const rateLimitBuckets = new Map();
+
+  function checkRateLimit(principalKey) {
+    const now = Date.now();
+    const windowStart = now - 60000;
+    let timestamps = rateLimitBuckets.get(principalKey);
+    if (!timestamps) {
+      timestamps = [];
+      rateLimitBuckets.set(principalKey, timestamps);
+    }
+    // Prune expired
+    while (timestamps.length > 0 && timestamps[0] < windowStart) {
+      timestamps.shift();
+    }
+    if (timestamps.length >= rateLimitPerMinute) {
+      fail('RATE_LIMIT_EXCEEDED', 'Rate limit exceeded; please wait before retrying');
+    }
+    timestamps.push(now);
+  }
 
   // Resolve the authenticated principal: platform root via bearer token,
   // enterprise principals via workspace-pinned API keys.
@@ -211,6 +231,57 @@ export function createSpoolDaemonV2({
         hash
       });
       return json(response, 201, { ok: true, result: issued, apiKey: key });
+    }
+
+    // DELETE /v2/apikeys/{keyId} — revoke an API key.
+    const apiKeyRevokeMatch = pathname.match(/^\/v2\/apikeys\/([^/]+)$/);
+    if (apiKeyRevokeMatch && (request.method === 'DELETE' || request.method === 'POST')) {
+      if (principal.kind !== 'root' || !registry) fail('FORBIDDEN', 'Only the platform root with a registry may revoke API keys');
+      const revoked = registry.revokeApiKey(apiKeyRevokeMatch[1]);
+      return json(response, 200, { ok: true, result: revoked });
+    }
+
+    // Memberships CRUD routes:
+    // GET /v2/workspaces/{id}/memberships
+    // POST /v2/workspaces/{id}/memberships
+    // DELETE /v2/workspaces/{id}/memberships/{principalId}
+    const membershipsMatch = pathname.match(/^\/v2\/workspaces\/([^/]+)\/memberships$/);
+    const membershipMemberMatch = pathname.match(/^\/v2\/workspaces\/([^/]+)\/memberships\/([^/]+)$/);
+
+    if (membershipsMatch && request.method === 'GET') {
+      if (!registry) fail('NOT_FOUND', 'Registry not enabled');
+      const wsId = membershipsMatch[1];
+      if (principal.kind !== 'root' && (principal.workspaceId !== wsId || principal.role !== 'admin')) {
+        fail('FORBIDDEN', 'Only workspace admins or platform root may list memberships');
+      }
+      const list = registry.listMemberships(wsId);
+      return json(response, 200, { ok: true, result: list });
+    }
+
+    if (membershipsMatch && request.method === 'POST') {
+      if (!registry) fail('NOT_FOUND', 'Registry not enabled');
+      const wsId = membershipsMatch[1];
+      if (principal.kind !== 'root' && (principal.workspaceId !== wsId || principal.role !== 'admin')) {
+        fail('FORBIDDEN', 'Only workspace admins or platform root may manage memberships');
+      }
+      const body = await readJsonBody(request, maxBodyBytes);
+      const added = registry.addMembership({
+        workspaceId: wsId,
+        principalId: body.principalId,
+        role: body.role
+      });
+      return json(response, 201, { ok: true, result: added });
+    }
+
+    if (membershipMemberMatch && request.method === 'DELETE') {
+      if (!registry) fail('NOT_FOUND', 'Registry not enabled');
+      const wsId = membershipMemberMatch[1];
+      const targetPrincipal = membershipMemberMatch[2];
+      if (principal.kind !== 'root' && (principal.workspaceId !== wsId || principal.role !== 'admin')) {
+        fail('FORBIDDEN', 'Only workspace admins or platform root may remove memberships');
+      }
+      const res = registry.removeMembership(wsId, targetPrincipal);
+      return json(response, 200, { ok: true, result: res });
     }
 
     // GET /v2/workspaces/{id}/activity — audit activity for a workspace.
@@ -335,12 +406,15 @@ export function createSpoolDaemonV2({
         return json(response, 401, { ok: false, error: { code: 'UNAUTHORIZED', message: 'Missing or invalid authentication credentials' } });
       }
 
+      checkRateLimit(`${principal.kind}:${principal.principalId}`);
+
       await dispatch(request, response, url.pathname, principal);
       status = response.statusCode;
     } catch (error) {
       const envelope = toErrorEnvelope(error);
       const code = envelope.code;
       if (code === 'REQUEST_TOO_LARGE') status = 413;
+      else if (code === 'RATE_LIMIT_EXCEEDED') status = 429;
       else if (code === 'INVALID_JSON') status = 400;
       else if (code === 'INTERNAL_ERROR') status = 500;
       else if (code === 'MIGRATION_NOT_FOUND' || code === 'WORKSPACE_NOT_FOUND' || code === 'ORGANIZATION_NOT_FOUND' || code === 'API_KEY_NOT_FOUND' || code === 'TABLE_NOT_AVAILABLE' || code === 'NOT_FOUND') status = 404;

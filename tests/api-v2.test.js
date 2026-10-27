@@ -418,3 +418,112 @@ test('registry isolation guarantees: listMigrations is workspace-scoped and unkn
   assert.equal(registry.resolveApiKeyHash('deadbeef'.repeat(8)), null);
   assert.throws(() => registry.getWorkspace('ws_missing'), /WORKSPACE_NOT_FOUND/);
 });
+
+test('API v2 membership CRUD and key revocation routes', async t => {
+  const f = await fixture(t);
+  const { port, wsA } = f;
+
+  // Root can list memberships
+  const list1 = await rawRequest({
+    port,
+    path: `/v2/workspaces/${wsA.workspaceId}/memberships`,
+    headers: bearerHeaders
+  });
+  assert.equal(list1.status, 200);
+  assert.ok(Array.isArray(list1.body.result));
+  assert.ok(list1.body.result.length >= 1);
+
+  // Add a new membership via POST
+  const addRes = await rawRequest({
+    port,
+    path: `/v2/workspaces/${wsA.workspaceId}/memberships`,
+    method: 'POST',
+    headers: bearerHeaders,
+    body: { principalId: 'new-operator-user', role: 'operator' }
+  });
+  assert.equal(addRes.status, 201);
+  assert.equal(addRes.body.result.principalId, 'new-operator-user');
+  assert.equal(addRes.body.result.role, 'operator');
+
+  // Verify it appears in the list
+  const list2 = await rawRequest({
+    port,
+    path: `/v2/workspaces/${wsA.workspaceId}/memberships`,
+    headers: bearerHeaders
+  });
+  assert.equal(list2.status, 200);
+  assert.ok(list2.body.result.some(m => m.principalId === 'new-operator-user'));
+
+  // Delete the membership via DELETE
+  const delRes = await rawRequest({
+    port,
+    path: `/v2/workspaces/${wsA.workspaceId}/memberships/new-operator-user`,
+    method: 'DELETE',
+    headers: bearerHeaders
+  });
+  assert.equal(delRes.status, 200);
+  assert.equal(delRes.body.result.removed, true);
+
+  // Issue a key and revoke it via the DELETE /v2/apikeys/{keyId} route
+  const issued = await rawRequest({
+    port,
+    path: `/v2/workspaces/${wsA.workspaceId}/apikeys`,
+    method: 'POST',
+    headers: bearerHeaders,
+    body: { principalId: 'key-to-revoke-user', role: 'viewer' }
+  });
+  assert.equal(issued.status, 201);
+  const keyId = issued.body.result.keyId;
+  const keySecret = issued.body.apiKey;
+
+  // Key works before revocation
+  const preRevoke = await rawRequest({
+    port,
+    path: '/v2/migrations',
+    headers: { 'x-api-key': keySecret }
+  });
+  assert.equal(preRevoke.status, 200);
+
+  // Revoke via DELETE endpoint
+  const revokeRes = await rawRequest({
+    port,
+    path: `/v2/apikeys/${keyId}`,
+    method: 'DELETE',
+    headers: bearerHeaders
+  });
+  assert.equal(revokeRes.status, 200);
+  assert.equal(revokeRes.body.result.revoked, true);
+
+  // Key fails with 401 after revocation
+  const postRevoke = await rawRequest({
+    port,
+    path: '/v2/migrations',
+    headers: { 'x-api-key': keySecret }
+  });
+  assert.equal(postRevoke.status, 401);
+});
+
+test('API v2 sliding-window rate limiting returns 429 when threshold exceeded', async t => {
+  const f = await fixture(t);
+  const { registry, orchestrator } = f;
+  const daemon = createSpoolDaemonV2({
+    orchestrator,
+    registry,
+    token: TOKEN,
+    rateLimitPerMinute: 3
+  });
+  const address = await daemon.listen(0);
+  const port = address.port;
+  t.after(() => daemon.close());
+
+  // 3 requests should succeed
+  for (let i = 0; i < 3; i++) {
+    const res = await rawRequest({ port, path: '/v2/migrations', headers: bearerHeaders });
+    assert.equal(res.status, 200);
+  }
+
+  // 4th request within the same minute should be rejected with 429
+  const throttled = await rawRequest({ port, path: '/v2/migrations', headers: bearerHeaders });
+  assert.equal(throttled.status, 429);
+  assert.equal(throttled.body.error.code, 'RATE_LIMIT_EXCEEDED');
+});
