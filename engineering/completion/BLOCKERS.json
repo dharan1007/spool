@@ -12,10 +12,11 @@
     },
     {
       "id": "B002",
-      "domain": "postgres/mysql/mssql-connectors",
-      "type": "EXTERNALLY_BLOCKED",
-      "missingResource": "Dockerized or remote database provider endpoints with credentials for conformance qualification",
-      "notPassedLabel": "REAL_PROVIDER_NOT_QUALIFIED"
+      "domain": "mssql-connector-live-qualification",
+      "type": "ENVIRONMENT_CAPACITY",
+      "missingResource": "Host capacity to run SQL Server 2022 for Linux. Measured on 2026-10-27: C: has 1.12 GB free; the Docker data disk (docker_data.vhdx) is 34.90 GB against a 64 GB ceiling and its contents are essentially full (docker system df: 25.97 GB images of which 15.6 GB belongs to other projects, 2.061 GB containers of which 1.95 GB belongs to other projects, 2.26 GB volumes of which 396 MB is reclaimable, 3.435 GB build cache with 79 MB reclaimable after pruning). The SQL Server 2022 image is 0.63 GB compressed / about 1.6 GB extracted plus a writable data volume. After pruning our own build cache there is still under 0.6 GB of SPOOL-owned space, so the pull would need ~1.6 GB of vhdx growth into ~1.1 GB of host free space. Compaction needs elevation (diskpart/Optimize-VHD) and relocating the data root is a Docker Desktop GUI/admin operation; deleting other projects' images and manual vhdx moves are out of bounds.",
+      "alreadyQualified": "PostgreSQL 18.6 (TLS verify-full) 55/55 and MySQL 8.4.13 (TLS verify-full, non-UTC host) 7/7 conformance suites now pass live — see resolvedThisSession R003/R004. The SQL Server connector remains covered only by its provider-gated suite plus static verification that it defaults to encrypt=true with trustServerCertificate=false (src/connectors/mssql/connection.js:47-50).",
+      "notPassedLabel": "REAL_PROVIDER_NOT_QUALIFIED — capacity-blocked, not a product defect"
     },
     {
       "id": "B003",
@@ -32,27 +33,19 @@
       "notPassedLabel": "NOT_AUDITED"
     },
     {
-      "id": "B005",
-      "domain": "container-image-build",
-      "type": "EXTERNALLY_BLOCKED",
-      "missingResource": "A stable Docker engine plus host disk headroom. The client (29.8.2) is installed and `docker desktop stop/start` did bring the daemon up (server 29.8.2) long enough to list 38 images, report `docker system df` and begin `docker build --check` (which pulled docker/dockerfile:1), but the daemon then failed again mid-build with 'Docker Desktop is unable to start'. The Docker data vhdx is 34.15 GB on C:, which has 1.28 GB free, so an image build would also risk exhausting the host system drive.",
-      "evidenceWithoutResource": "Dockerfile, .dockerignore and helm/spool render-verified with helm 3.16.4 (checksum-verified download), scripts/check-deployment.js PASS with 8 objects and both fail-closed paths. Dockerfile lint via the real builder was attempted: `docker build --check .` loaded the build definition and pulled docker/dockerfile:1 successfully before the daemon died, so the file is parseable by BuildKit but no image was produced.",
-      "notPassedLabel": "IMAGE_NOT_BUILT"
-    },
-    {
       "id": "B006",
       "domain": "cluster-deployment",
-      "type": "EXTERNALLY_BLOCKED",
-      "missingResource": "A reachable Kubernetes cluster (kubectl 1.36.1 is installed but no API server) and a helm binary on PATH for repeat runs (this run used a checksum-verified helm 3.16.4 at a temporary path)",
-    "evidenceWithoutResource": "Chart lints and renders; rendered object properties are asserted by scripts/check-deployment.js and tests/deployment-manifests.test.js. Docker Desktop was restarted during this session and its daemon came up briefly, but it died again mid-operation, so no cluster could be provisioned either (no kind/k3s/minikube installed).",
+      "type": "ENVIRONMENT_CAPACITY",
+      "missingResource": "A reachable Kubernetes cluster. kubectl 1.36.1 is installed but no API server exists. Docker Desktop's bundled cluster reports Mode kind, State disabled; enabling it downloads control-plane images (kindest/node:v1.36.1 alone is 0.38 GB compressed) into the same C: drive that has 1.12 GB free while the Docker data disk is effectively full, so it was deliberately not attempted rather than risk filling the system drive.",
+      "evidenceWithoutResource": "Chart lints and renders; rendered object properties are asserted by scripts/check-deployment.js (8 objects) and tests/deployment-manifests.test.js 5/5 (non-root entrypoint, single-writer replica pin, proxy-only listener with Host rewrite, read-only rootfs, dropped capabilities, seccomp, NetworkPolicy both directions). The image the chart would deploy is now built and runtime-qualified (B005 resolved), so only a cluster is missing.",
       "notPassedLabel": "NOT_DEPLOYED"
     },
     {
       "id": "B007",
       "domain": "production-dependency-advisory",
       "type": "EXTERNALLY_BLOCKED",
-      "missingResource": "An upstream @azure/identity release that depends on @azure/msal-node >= 7.1.0 (or tedious/snowflake-sdk dropping it); 4.13.2, 4.14.0 and 4.15.0-beta.1 all declare ^6.0.0, i.e. inside the affected range",
-      "evidenceWithoutResource": "docs/DEPENDENCY_RISK.md DR-001: GHSA-xcx6-jx8p-x3h5 (high, CVSS 7.5) in @azure/msal-node 5.6.0 via @azure/identity; no compatible upgrade exists and npm audit fix cannot leave the parent range. Reachability: SPOOL never invokes an MSAL authorization-code flow (zero @azure credential references in src/); mssql uses SQL auth and does not load MSAL, snowflake-sdk loads it eagerly but SPOOL passes no authenticator. Security audit gate executed at commit 6bedad3 and failed closed (qualification.json status BLOCKED).",
+      "missingResource": "An upstream @azure/identity release that depends on @azure/msal-node >= 7.1.0 (or tedious/snowflake-sdk dropping it). Registry check: 4.13.2 declares ^5.1.5, 4.14.0 declares ^6.0.0, and 4.14.0 is the latest stable, so no published version can pull a fixed msal.",
+      "evidenceWithoutResource": "docs/DEPENDENCY_RISK.md DR-001: GHSA-xcx6-jx8p-x3h5 (high, CVSS 7.5) in @azure/msal-node 5.6.0 via @azure/identity. The overrides shortcut was tested in an isolated production install: @azure/msal-node 7.1.1 loads and constructs credentials, but ConfidentialClientApplication no longer exposes acquireTokenSilent, which @azure/identity 4.13.2 calls in dist/commonjs/msal/nodeFlows/msalClient.js:155 — so the override is an untestable runtime break, not a remediation, and is not applied. Reachability in SPOOL remains: no @azure credential references in src/, SQL auth only, so no MSAL flow is executed. Security audit gate fails closed on presence.",
       "notPassedLabel": "SECURITY_AUDIT_BLOCKED - never to be reported as pass; gate must not be lowered to accept the finding"
     }
   ],
@@ -70,6 +63,35 @@
       "symptom": "Drill reported EBUSY unlink of live/registry.db instead of its real failure",
       "rootCause": "The cleanup block ran before handles were closed, so the Windows EBUSY from an open registry replaced the genuine assertion error (the workspace directory had not been created)",
       "resolution": "Handles are tracked and closed in the finally before cleanup, the workspace directory is created up front, and the drill now reports real failures; 12 checks pass"
+    },
+    {
+      "id": "R003",
+      "domain": "postgres-connector-live-qualification",
+      "symptom": "PostgreSQL 18.6 schema-migration conformance failed 5/5 live tests with UNMANAGED_CONSTRAINT BLOCKING entries",
+      "rootCause": "PostgreSQL 18 catalogues NOT NULL as pg_constraint (contype 'n'); the planner treated every non-primary constraint as unmanaged, so any NOT NULL column blocked add-column/cast/drop/PK migrations",
+      "resolution": "diffPostgresSchema skips 'n' (nullability is already in the column contract) and still blocks real unmanaged constraints; live PostgreSQL 18.6 conformance 55/55 with TLS verify-full; unit regression in tests/schema-migration.test.js"
+    },
+    {
+      "id": "R004",
+      "domain": "mysql-connector-live-qualification",
+      "symptom": "MySQL source conformance returned 2026-02-28T23:36:07Z for a stored 2026-03-01 05:06:07 DATETIME on an IST host",
+      "rootCause": "DATETIME has no offset and mysql2 parsed it in the host process timezone, so migrated values shifted by the host offset (5h30m)",
+      "resolution": "mysqlConnectionConfig pins timezone 'Z'; live MySQL 8.4.13 source+target conformance 7/7 on the non-UTC host with TLS verify-full",
+      "followUp": "A repeat run against the same server exposed a non-idempotent test reset: it recreated only the data table, so the durable spool_batch_ledger/spool_execution_leases evidence from the previous run made the replay look like a ledger mismatch. The reset now deletes only that table's ledger and lease rows; 7/7 passes on a dirty server too, with no assertion relaxed."
+    },
+    {
+      "id": "R005",
+      "domain": "container-image (was B005)",
+      "symptom": "Image build repeatedly failed because the Docker engine died mid-build with 0.25-1.3 GB free on C:",
+      "rootCause": "Host disk exhaustion, not a Docker or Dockerfile defect: reclaiming temp/update caches restored the engine, and the build then completed with cache hits",
+      "resolution": "Image built at d2c1b94 (sha256:5a7c6207…, 532 642 879 B, non-root node, HEALTHCHECK), real HTTP lifecycle 20/20 checks in-container, restart persistence, kernel-level loopback-only listener, fail-closed config exits; scripts/qualify-container.js + docs/SELF_HOSTING.md runbook"
+    },
+    {
+      "id": "R006",
+      "domain": "enterprise-api-organization-provisioning",
+      "symptom": "A fresh daemon deployment could never create a workspace: POST /v2/workspaces failed ORGANIZATION_NOT_FOUND and only tests could create an organization",
+      "rootCause": "The registry constructor API had no product surface; the daemon was provisioned only with a pre-existing registry.db",
+      "resolution": "POST /v2/organizations (platform root, registry required) with root-only RBAC; tests/api-v2.test.js covers creation, denial for API-key principals and immediate workspace usability; documented in docs/SELF_HOSTING.md"
     }
   ]
 }

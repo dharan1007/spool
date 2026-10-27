@@ -4,39 +4,120 @@
 **PR:** https://github.com/dharan1007/spool/pull/99 (base `38370a6`)
 **Registers:** always read the other JSONs in this directory first; they are the source of truth. Do not rederive from session history.
 
+## Current candidate
+
+- Code commit verified by this batch: `d2c1b945725ae934115840c2faa2f23a9d363ac5`
+- Container image built from that exact tree: `spool-daemon:d2c1b94`,
+  `sha256:5a7c62073ca9d0cfe5b8f72c70cddd472034b2ce3eaaa0568cd0804f0863b9ea`
+- Verdict: **NO-GO / EXTERNALLY BLOCKED** — only external material or host
+  capacity remains (see `PRODUCTION_QUALIFICATION.md` and `BLOCKERS.json`).
+
 ## What is DONE and verified (do not redo)
 
-1. **Full suite green:** `npm test` → 574 tests, 510 pass, 0 fail, 0 cancelled, 0 todo, **64 skipped** — all 64 skips are live-provider conformance gates (`skip: !enabled` in `tests/conformance/*.test.js` for postgres/mysql/mssql + CDC/repair/soak suites; provider credentials absent → BLOCKERS B002). Counts reconcile exactly.
-2. **Enterprise API v2 complete and TESTED:** `src/enterprise/registry.js` (SQLite STRICT multi-tenant store), `src/enterprise/orchestrator.js` (real-engine lifecycle, release pin `1.1.2`, root principal `spool:root`), `src/daemon/spoold-v2.js` (REST v2, RBAC, isolation, probes, metrics). `tests/api-v2.test.js` 4/4. Facts: key issuance provisions membership; cross-workspace existence collapses to `MIGRATION_NOT_FOUND` (404); duplicate execute replays via the engine's idempotent path (`replay: true`, no double writes); source mutation after approval → 409 `SOURCE_MODIFIED` with zero target rows; claimed-schema drift → 422 `TARGET_CONTRACT_DRIFT`.
-3. **EBUSY root cause RESOLVED** (see TEST_RESULTS.json): the 256 MiB expectation predated the reviewed 10 GiB pinned ceiling; un-denied create leaked its state DB handle and the finally-rm EBUSY masked the assertion error. Test now aligned + teardown hardened with `fs.rm maxRetries`.
-4. **Release gate fail-closed verified:** `src/release/gate.js` (injectable decision logic) + thin CLI wrapper `scripts/release-gate.js`. `tests/release-contract.test.js` 5/5 proves UNSIGNED_BUILD throw after all qualification steps and the signed path (sign + double verify with shared parity evidence). Without `SPOOL_RELEASE_PRIVATE_KEY`, `npm run check` terminates non-zero at UNSIGNED_BUILD **by verified design**.
-5. **Metrics/scheduler:** observability 5/5, scheduler 6/6.
-6. **BigQuery:** SPOOL_ATOMIC_V2 canonical (PR #99) — atomic-recovery 5/5 re-verified. Real-provider qualification blocked (B001).
-7. **Benchmarks honestly labeled** (`.console-evidence/api-stress-results.json`): transport/auth/registry layers only; engine execution throughput is qualified by real-engine suites, never by request-rate sampling.
+1. **Container image (B005, was blocked):** builds, runs non-root (`node`,
+   uid 1000), serves the real API, and passes **20/20** in-container acceptance
+   checks (`scripts/qualify-container.js`): health/ready/metrics, 401/421/400,
+   organization + workspace + API-key provisioning, real CSV → SQLite migration
+   (plan → dry-run 5/5 → approve → execute `COMPLETE` → receipt → verification →
+   5 durable rows). Restart keeps the migration `COMPLETE` and the rows intact;
+   the listener is loopback-only (`/proc/net/tcp` `0100007F:1F90`, `ECONNREFUSED`
+   on eth0); `/app` is not writable; `Privileged=false`, no `CapAdd`; missing
+   token / bad commit / bad source ceiling each exit 1 with
+   `INVALID_DAEMON_CONFIG`. Runbook: `docs/SELF_HOSTING.md`.
+2. **PostgreSQL live qualification:** PostgreSQL 18.6, TLS `verify-full`,
+   **55/55** conformance tests in 15 files (source, database source, target,
+   content verification, metadata concurrency, schema migration, mutations,
+   bulk COPY, repair, command source/recovery, reference recovery/soak, workers,
+   CDC). Log: `E:\temp\spool-qual\pg-conformance-final.log`.
+3. **MySQL live qualification:** MySQL 8.4.13, TLS `verify-full`, non-UTC host,
+   **7/7** (repeatable on a database already carrying evidence). Log:
+   `E:\temp\spool-qual\mysql-conformance-d2c1b94.log`.
+4. **Two real connector defects fixed by live qualification:** PG 18 catalogues
+   NOT NULL as `pg_constraint` (`contype='n'`) which blocked every constrained
+   schema migration; MySQL `DATETIME` was parsed in the host timezone (IST
+   shifted values by 5 h 30 m). Regressions in `tests/schema-migration.test.js`
+   (11/11) and the live MySQL suite.
+5. **Enterprise API v2 (7/7) including root-only `POST /v2/organizations`** —
+   without it a fresh deployment could never create a workspace. Documented and
+   covered (root allowed, API-key principal denied, org immediately usable).
+6. **Full suite, build, benchmark, static check, model check, package verify,
+   backup/restore drill, browser Studio 3×, Helm render:** see
+   `PRODUCTION_QUALIFICATION.md` gate table (commit-labelled).
+7. **Release gate fail-closed:** `UNSIGNED_BUILD` without signing material —
+   verified design, not a defect (B003).
+8. **Anchored facts:** `DEFAULT_MAX_SOURCE_BYTES = 256 MiB`; capability matrix
+   pin `4915ac01…`; `spoold-v2` loopback-only + same-pod nginx proxy;
+   `replicaCount: 1` + `Recreate`; helm objects 8, render sha `d073f5bb…`.
 
 ## Verification commands (order)
 
-```bash
-npm ci --ignore-scripts   # only if node_modules missing
-npm test                  # last verified: 574/510/0/64sk/0, 410s
-npm run build             # last verified: PASS
-node scripts/static-check.js  # last verified: PASS
-npm run check             # ends UNSIGNED_BUILD (fail-closed) without signing keys — that IS the honest outcome
+```powershell
+cd C:\temp\spool-console
+npm ci --ignore-scripts          # only if node_modules missing
+$env:TEMP='E:\temp\spool-qual'; $env:TMP='E:\temp\spool-qual'
+node --test --test-reporter=tap --test-concurrency=1 tests/*.test.js tests/conformance/*.test.js
+node scripts/static-check.js
+npm run build
+npm run benchmark
+npm run pack:verify
+node scripts/release-gate.js     # ends UNSIGNED_BUILD (fail-closed) without keys
 ```
 
-## NEXT executable steps (in order)
+Live provider runs (containers `spool-pg`, `spool-mysql`, local CA at
+`E:\temp\spool-qual\pg-certs\ca.crt`):
 
-1. If `npm run check` background result shows failures **other than** the terminal UNSIGNED_BUILD, fix them first (it runs the full suite again).
-2. Commit in coherent checkpoints (suggested split):
-   - `release gate: injectable decision module, fail-closed signing rule verified` → `scripts/release-gate.js`, `src/release/gate.js`, `tests/release-contract.test.js`
-   - `enterprise API v2: registry/orchestrator/daemon, metrics+scheduler+test hardening, EBUSY root-cause fix` → rest of src+tests+`.console-evidence/api-stress-results.json`
-   - `engineering registers: completion state for enterprise hardening batch` → `engineering/completion/*`, `AGENTS.md`
-3. Push branch (updates PR #99); verify the new SHA via git ls-remote / GitHub API; record it in CURRENT_STATE.json `pushedCommitSha` (was PENDING_PUSH at last update).
-4. Continue REMAINING_TASKS.json T004 (distributed scheduling audit: lease durability across restart + multi-process contention test) and onward T005–T016.
-5. At every durable checkpoint: update registers, commit, push. Never relabel an externally blocked qualification as passed; use EXTERNALLY_BLOCKED with the missing resource named.
+```powershell
+$env:NODE_EXTRA_CA_CERTS='E:\temp\spool-qual\pg-certs\ca.crt'
+$env:SPOOL_TEST_POSTGRES_ENDPOINT='postgres://127.0.0.1:55432?sslmode=verify-full'
+$env:SPOOL_TEST_POSTGRES_DATABASE='spooltest'; $env:SPOOL_TEST_POSTGRES_USER='spooltest'
+$env:SPOOL_TEST_PG_PASSWORD='spooltest-pg-secret-1'
+node --test --test-concurrency=1 tests/conformance/postgres-*.test.js
+
+$env:SPOOL_TEST_MYSQL_ENDPOINT='mysql://127.0.0.1:53306?sslmode=verify-full'
+$env:SPOOL_TEST_MYSQL_DATABASE='spooltest'; $env:SPOOL_TEST_MYSQL_USER='spooltest'
+$env:SPOOL_TEST_MYSQL_PASSWORD='mysql-secret-1'
+node --test --test-concurrency=1 tests/conformance/mysql-*.test.js
+
+docker build -t spool-daemon:local .
+docker run -d --name spool-daemon-test -v spool-state:/var/lib/spool `
+  -e SPOOL_DAEMON_TOKEN=<32+ bytes> -e SPOOL_APPROVAL_SIGNING_KEY=<32+ bytes> `
+  -e SPOOL_RELEASE_COMMIT_SHA=$(git rev-parse HEAD) spool-daemon:local
+docker cp scripts/qualify-container.js spool-daemon-test:/tmp/
+docker exec -u node spool-daemon-test node /tmp/qualify-container.js
+```
+
+## What still stops the release (all external)
+
+| Blocker | Missing | Label |
+| --- | --- | --- |
+| B001 | GCP service-account JSON for a BigQuery test project | `REAL_PROVIDER_NOT_QUALIFIED` |
+| B002 | Host capacity for SQL Server 2022 (0.63 GB compressed / ≈1.6 GB extracted vs **1.37 GB free on C:**; 34.15 GB docker disk not compactable without elevation) | `REAL_PROVIDER_NOT_QUALIFIED` |
+| B003 | Authorized release signing key | `UNSIGNED_BUILD` |
+| B004 | Independent third-party audit | `NOT_AUDITED` |
+| B006 | A Kubernetes cluster (Docker Desktop k8s disabled; enabling pulls control-plane images into the full C:) | `NOT_DEPLOYED` |
+| B007 | Upstream `@azure/identity` release depending on `@azure/msal-node >= 7.1.0` (none published; 7.1.1 override proven API-incompatible) | `SECURITY_AUDIT_BLOCKED` |
+
+Do not mark any of these passed. Do not lower the audit gate, do not suppress
+the advisory, do not relocate/delete vhdx files by hand, and do not claim
+multi-replica HA (coordination is not proven; the chart pins one writer).
+
+## Next executable steps (only if new resources appear)
+
+1. SQL Server available (or ≥4 GB free on the Docker drive): add
+   `tests/conformance/mssql-*` live evidence exactly like the PG/MySQL runs
+   (TLS verify-full, non-UTC host) and rerun `npm test`.
+2. Certificates/cluster: `kubectl apply` the rendered chart, then run the
+   daemon readiness + migration lifecycle in-cluster; record `K8S_DEPLOYED`
+   with the real object list and pod evidence.
+3. Signing key / GCP credentials / audit report: rerun the gate and replace the
+   corresponding blocker with observed evidence.
+4. Always: update registers, commit, push, verify SHA with `git ls-remote`.
 
 ## Environment notes
 
-- Shell: `cmd /c "cd /d C:\temp\spool-console && ..."`; avoid `head/tail/grep/||/$_` in `powershell -Command`; for long tool output pipe to a file and read it.
-- Recovery artifacts preserved at `C:\Users\dhara\AppData\Local\Temp\opencode\` (recovery-20261027b-*.diff etc.).
-- Autopilot controller for future runs: `C:\temp\spool-controller\Start-SPOOL-Autopilot.ps1 -Repo "C:\temp\spool-console" -MaxRuns 3`.
+- PowerShell 5.1: no `&&`; ASCII only; commit messages from a BOM-less file.
+- C: is effectively full (≈1.3 GiB). Keep `TEMP`/`TMP` and
+  `SPOOL_QUALIFICATION_EVIDENCE_ROOT` on `E:`.
+- Do not prune other projects' images (15.6 GB reclaimable belongs to
+  supabase/nirnay). Only SPOOL-owned tags may be removed.
+- Never run a qualification while editing tracked files; commit first, then run.

@@ -24,6 +24,7 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 
 ## PostgreSQL
 
+- Live conformance verified against PostgreSQL 18.6 with `sslmode=verify-full` (source, target, schema migration, mutations, bulk COPY, repair, CDC, recovery, workers): all 55 conformance tests pass. The performance profile below was measured on 17.6 and is not re-measured for 18.
 - Sources stream one table per snapshot under `REPEATABLE READ`; tables require a primary key for keyset traversal.
 - Whole-database snapshots share one exported MVCC snapshot token across sessions; the exporting transaction must stay open while joiners read.
 - Targets require pre-created ordinary or partitioned tables with a primary key for verification.
@@ -42,16 +43,17 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 - Type changes are allowed without approval only for total casts to `text`; every other type change, and every column drop, is destructive and requires a bound approval carrying the `postgres:schema-migrate-destructive` effect against the migration source contract.
 - Migration applies run fenced inside a single transaction: any step failure rolls the whole plan back with no ledger row, and out-of-band contract drift refuses the apply with a structured report.
 - Replays never take the fencing lease: an applied plan whose recorded contract still matches live returns `ALREADY_APPLIED` from a read-only probe.
-- Column defaults, secondary indexes, triggers, rules and non-PK constraints are never auto-migrated; their presence fails planning closed as unmanaged objects.
+- Column defaults, secondary indexes, triggers, rules and non-PK constraints are never auto-migrated; their presence fails planning closed as unmanaged objects. Primary-key and NOT NULL constraints are not unmanaged: they are part of the declared column contract (PostgreSQL 18 catalogues NOT NULL in `pg_constraint`, and that row is ignored rather than treated as an unmanaged object).
 - DDL steps run under the connector statement timeout; large-table rewrites beyond that budget are rejected, not retried.
 - The connector checks destructive-approval binding (migration, effect, source contract, expiry); approval signature verification stays with the service layer.
 
 ## MySQL
 
+- Live conformance verified against MySQL 8.4.13 with `sslmode=verify-full` on a non-UTC host (source snapshot, target fenced batches with ledger evidence, stale-writer refusal, contract drift, filesystem-to-MySQL migration): all 7 conformance tests pass.
 - Sources read one table per session under `REPEATABLE READ` with a consistent snapshot; tables require a primary key. Snapshots are single-session: there is no cross-session snapshot export.
-- Sources must run as least-privilege readers; `DATETIME` values arrive as `Date`, `DECIMAL`/`BIGINT` arrive as strings.
+- Sources must run as least-privilege readers; `DATETIME` values arrive as `Date` interpreted in UTC (`timezone: 'Z'` on the connection, so a non-UTC host does not shift migrated values), `DECIMAL`/`BIGINT` arrive as strings.
 - Targets require pre-created ordinary tables. No read-after-write verification, repair execution or bulk writes.
-- Metadata tables (`spool_batch_ledger`, `spool_execution_leases`) live in the target database.
+- Metadata tables (`spool_batch_ledger`, `spool_execution_leases`) live in the target database. They are durable per target database, so replaying the same batch identity against an already-populated ledger is reported as already committed rather than written twice.
 
 ## SQL Server
 

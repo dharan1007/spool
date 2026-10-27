@@ -5,10 +5,11 @@
   "branch": "engineering/spool-enterprise-production-hardening",
   "baseCommit": "38370a6da3004202edd82bd5f2b9d6dca1f0f63d",
   "remoteHeadAtRegisterTime": "PENDING_FINAL_BATCH (this register batch is committed and pushed after the last verification run; the exact SHA is verified with git ls-remote and recorded in the handover message)",
-  "pushedCommitSha": "06df51aadb6626124a21df313dbbf035b9e1a64d (verified code head; the register/evidence commit that follows is documentation-only)",
+  "pushedCommitSha": "d2c1b945725ae934115840c2faa2f23a9d363ac5 (code verified by every run in this batch; the container image was built from exactly this tree). The evidence commit that carries this register adds registers/docs, regenerated API-layer benchmark output and a provider-gated MySQL test reset; the pushed head is verified with git ls-remote and reported in the handover.",
   "environmentConstraints": {
-    "systemDriveFreeBytes": "1427013632 (C: 1.33 GiB free; below the SQLite qualifier's mandatory 10 GiB preflight)",
-    "qualificationVolume": "E: NTFS 424 GiB free — qualification fixtures and evidence must run with TEMP/TMP and SPOOL_QUALIFICATION_EVIDENCE_ROOT on E:",
+    "systemDriveFreeBytes": "1200000000 (C: about 1.12 GiB free; below the SQLite qualifier's mandatory 10 GiB preflight and too small for the SQL Server image or Docker Desktop Kubernetes control-plane images)",
+    "dockerDisk": "34.90 GB docker_data.vhdx (64 GB ceiling), contents effectively full: 25.97 GB images (15.6 GB other projects), 2.061 GB containers (1.95 GB other projects), 2.26 GB volumes, 3.435 GB build cache (79 MB reclaimable after pruning our own cache); compaction requires elevation (diskpart/Optimize-VHD), relocation is a Docker Desktop GUI/admin operation; manual vhdx moves are out of bounds",
+    "qualificationVolume": "E: NTFS 421 GiB free — qualification fixtures and evidence must run with TEMP/TMP and SPOOL_QUALIFICATION_EVIDENCE_ROOT on E:",
     "python": "C:\\Users\\dhara\\AppData\\Local\\Programs\\Python\\Python311\\python.exe (psutil 7.0.0 present); `python` resolves there first, WindowsApps alias also on PATH"
   },
   "supersedes": {
@@ -21,20 +22,25 @@
     "Rewritten tests: api-v2 (4 tests), api-stress (layered honest benchmark), observability, scheduler, release-contract, production-connector-policy (EBUSY root-cause fix)"
   ],
   "verificationState": {
-    "apiV2": "6/6 TESTED",
+    "apiV2": "7/7 TESTED at d2c1b94 (adds root-only POST /v2/organizations: creation, API-key denial, immediate workspace usability)",
     "apiStress": "1/1 TESTED (layered benchmark; transport 572 rps, authenticated 771 rps, registry reads 11604 rps — labeled per layer)",
-    "bigqueryAtomicRecovery": "5/5 TESTED",
+    "bigqueryAtomicRecovery": "5/5 TESTED (emulator/local contract only; B001)",
     "releaseContract": "6/6 TESTED (fail-closed unsigned gate + signed path proven via injectable gate; benchmark evidence honours SPOOL_BENCHMARK_OUTPUT_DIR)",
     "productionConnectorPolicy": "8/8 TESTED (EBUSY root cause resolved)",
     "observability": "5/5 TESTED",
     "scheduler": "6/6 TESTED + scheduler-distributed-lease 1/1",
-    "fullNpmTest": "595 total: 531 pass, 0 fail, 0 cancelled, 64 provider-gated skips, 0 todo (652.0s, run at 06df51a with SPOOL_BENCHMARK_OUTPUT_DIR redirected; tree clean afterwards)",
+    "fullNpmTest": "597 tests / 533 pass / 0 fail / 64 provider-gated skips / 0 todo / 0 cancelled at d2c1b94 in 690 s (log E:\\temp\\spool-qual\\full-suite-d2c1b94.log)",
+    "schemaMigrationUnit": "11/11 TESTED at d2c1b94 (PG 18 NOT NULL constraints skipped, real unmanaged constraints still block)",
+    "postgresLiveConformance": "55/55 PASS at d2c1b94 against PostgreSQL 18.6 with sslmode=verify-full: source, database source, target, content verification, metadata concurrency, schema migration, mutations, bulk COPY, repair, command source/recovery, reference recovery/soak, workers, CDC. Found and fixed the PG 18 NOT NULL catalog defect.",
+    "mysqlLiveConformance": "7/7 PASS at d2c1b94 against MySQL 8.4.13 with sslmode=verify-full on a non-UTC host: source snapshot, snapshot isolation, target fenced batches, ledger evidence, filesystem-to-MySQL migration. Found and fixed the DATETIME host-timezone defect.",
+    "containerImage": "BUILT at d2c1b94 — docker build exit 0, sha256:5a7c62073ca9d0cfe5b8f72c70cddd472034b2ce3eaaa0568cd0804f0863b9ea, 532642879 B, User=node, entrypoint node src/daemon/spoold-v2-main.js, HEALTHCHECK 15s/3s/10s/3",
+    "containerAcceptance": "PASS 20/20 checks in-container: health/ready/metrics, 401/421/400 fail-closed transport, organization+workspace+API key provisioning, real CSV->SQLite migration through plan/dry-run/approve/execute/receipt/verification, 5 durable rows verified; restart kept state COMPLETE and rows intact; loopback-only listener proven via ECONNREFUSED on eth0 and /proc/net/tcp 0100007F:1F90; non-root uid 1000, /app not writable, Privileged=false, no CapAdd; misconfiguration exits 1 with INVALID_DAEMON_CONFIG",
     "measurementEvidence": "5/5 TESTED — readResourceSummary never throws; missing/malformed/zero-sample/error summaries all fail closed",
     "sqliteSustainedQualification": "PASS at 30565b1 — 262599 assertions, 20 cases, 1379 resource samples, peak tree working set 350306304 B, peak fixture disk 1167401270 B, 0 measurement errors",
     "backupRestore": "drill PASS (12 checks; registry 31 rows WAL, target 500 rows WAL, restore parity, tampered backup rejected) + tests/backup-restore.test.js 4/4",
     "deploymentRender": "PASS — helm v3.16.4 lint clean, 8 objects, render sha256 d073f5bb…, fail-closed proven for missing release commit and replicaCount>1",
     "daemonEntrypoint": "3/3 TESTED",
-    "staticCheck": "PASS at 06df51a (21 required artifacts, stable SQLite runtime, no source-network primitives, JS syntax valid)",
+    "staticCheck": "PASS at d2c1b94 (21 required artifacts, stable SQLite runtime, no source-network primitives, JS syntax valid)",
     "build": "PASS at 06df51a - 65/65 self-tests, dist built as same-origin ES modules, artifact root bf9cbbf6404297b33134a838fd9419f6b6c559b94ddf1e28ff5e556b44fefae4, 133 artifacts",
     "npmRunCheck": "completed 2026-10-27 at commit 38370a6: embedded FULL npm test 574/510 pass/0 fail/64 provider-gated skips/0 todo; check:model PASS; release-gate ran build-dist (65/65 self-tests), benchmarks, static-check, pre-sign verify-release-chain and reproducible-build-evidence (two independent builds, identical artifact root sha 3648daec483ebb34661dc2f9ca1edc87ebbdab4abdc34eee058e5719f6d125b9, reproducible=true, 130 artifacts, binding SHA 38370a6) then failed CLOSED with UNSIGNED_BUILD — the honest by-design terminal state without signing material (BLOCKERS B003); script exit code 1",
     "boundedReleaseQualification": "EXTERNALLY_BLOCKED at 6bedad3: dependency_install PASS, security_audit FAIL (2 high GHSA-xcx6-jx8p-x3h5 in @azure/msal-node 5.6.0), runbook stopped by design; evidence in TEST_RESULTS runs[scripts/qualify-bounded-release.js] and BLOCKERS B007",
@@ -42,9 +48,9 @@
     "modelAndPackage": "check-svmp-model PASS (counterexamples detected), pack:verify PASS at 06df51a",
     "browserStudio": "PASS 3 consecutive real-Chrome runs at 06df51a (6 routes, 25000 rows, WebMCP, 0 exceptions, 0 failed loads); smoke render race fixed at scripts/browser-smoke.py:261,264",
     "releaseGate": "FAILED CLOSED UNSIGNED_BUILD at 06df51a after reproducible build PASS (bf9cbbf6..., 133 artifacts) - BLOCKERS B003",
-    "securityAudit": "FAIL at 6bedad3 - 2 high GHSA-xcx6-jx8p-x3h5 - BLOCKERS B007 / docs/DEPENDENCY_RISK.md",
-    "candidateVerdict": "NOT PRODUCTION READY - see engineering/completion/PRODUCTION_QUALIFICATION.md and BLOCKERS B001-B007"
+    "securityAudit": "FAIL at d2c1b94 - 2 high GHSA-xcx6-jx8p-x3h5 (@azure/msal-node 5.6.0 via @azure/identity 4.13.2); msal 7.1.1 override proven API-incompatible (acquireTokenSilent removed) - BLOCKERS B007 / docs/DEPENDENCY_RISK.md",
+    "candidateVerdict": "NO-GO / EXTERNALLY BLOCKED - see engineering/completion/PRODUCTION_QUALIFICATION.md and BLOCKERS B001/B002/B003/B004/B006/B007"
   },
-  "externalBlocks": "See BLOCKERS.json (BigQuery/PG/MySQL/MSSQL real-provider credentials, release signing keys, independent audit)",
-  "remainingWork": "See REMAINING_TASKS.json T004-T016"
+  "externalBlocks": "See BLOCKERS.json: BigQuery credentials (B001), SQL Server live host capacity (B002), release signing keys (B003), independent audit (B004), Kubernetes cluster capacity (B006), upstream MSAL advisory (B007)",
+  "remainingWork": "See REMAINING_TASKS.json T008-T011, T014, T016"
 }

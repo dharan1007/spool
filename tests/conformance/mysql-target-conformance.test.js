@@ -65,6 +65,18 @@ async function reset(table) {
   try {
     await connection.query(`DROP TABLE IF EXISTS \`${table}\``);
     await connection.query(`CREATE TABLE \`${table}\` (id INT PRIMARY KEY, name VARCHAR(64) NOT NULL)`);
+    // The target database carries the durable SPOOL ledger and leases, so a
+    // second run against the same server would see this migration's batches as
+    // already committed. Reset only this table's evidence so the suite is
+    // repeatable without weakening any assertion. The metadata tables may not
+    // exist on the first run yet.
+    for (const statement of [
+      [`DELETE FROM \`spool_batch_ledger\` WHERE target_table = ?`, [table]],
+      [`DELETE FROM \`spool_execution_leases\` WHERE resource LIKE ?`, [`%${table}%`]]
+    ]) {
+      try { await connection.query(statement[0], statement[1]); }
+      catch (error) { if (error.code !== 'ER_NO_SUCH_TABLE' && error.code !== 'ER_BAD_FIELD_ERROR') throw error; }
+    }
   } finally { await connection.end(); }
 }
 
