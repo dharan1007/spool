@@ -1,0 +1,33 @@
+{
+  "register": "SPOOL-CURRENT-STATE",
+  "updatedAt": "2026-10-27",
+  "workingDirectory": "C:\\temp\\spool-console",
+  "branch": "engineering/spool-enterprise-production-hardening",
+  "baseCommit": "38370a6da3004202edd82bd5f2b9d6dca1f0f63d",
+  "remoteHeadAtRegisterTime": "38370a6da3004202edd82bd5f2b9d6dca1f0f63d (PR #99 head)",
+  "pushedCommitSha": "PENDING_PUSH",
+  "supersedes": {
+    "previousSessionStash": "stash@{0}: recovery-checkpoint-20261027-uncommitted-session-work (INTENTIONALLY NOT APPLIED WHOLE — its BigQuery rewrite is superseded by PR #99 canonical SPOOL_ATOMIC_V2; also preserved as diff at C:\\Users\\dhara\\AppData\\Local\\Temp\\opencode\\recovery-20261027b-stash.diff)"
+  },
+  "uncommittedWorkRecovered": [
+    "Prometheus histogram/summary corrections (src/observability/prometheus.js)",
+    "Scheduler hardening: insecure auto-approve scheduleInterval removed; scheduleWithLease staging only (src/daemon/scheduler.js)",
+    "Enterprise API v2: src/enterprise/registry.js + src/enterprise/orchestrator.js + rewritten src/daemon/spoold-v2.js",
+    "Rewritten tests: api-v2 (4 tests), api-stress (layered honest benchmark), observability, scheduler, release-contract, production-connector-policy (EBUSY root-cause fix)"
+  ],
+  "verificationState": {
+    "apiV2": "4/4 TESTED",
+    "apiStress": "1/1 TESTED (layered benchmark; transport 572 rps, authenticated 771 rps, registry reads 11604 rps — labeled per layer)",
+    "bigqueryAtomicRecovery": "5/5 TESTED",
+    "releaseContract": "5/5 TESTED (fail-closed unsigned gate + signed path proven via injectable gate)",
+    "productionConnectorPolicy": "8/8 TESTED (EBUSY root cause resolved)",
+    "observability": "5/5 TESTED",
+    "scheduler": "6/6 TESTED",
+    "fullNpmTest": "574 total: 510 pass, 0 fail, 0 cancelled, 64 provider-gated skips, 0 todo",
+    "staticCheck": "PASS",
+    "build": "PASS (65/65 self-tests, dist built)",
+    "npmRunCheck": "RUNNING in background at register time; expected terminal state: UNSIGNED_BUILD fail-closed (no signing material)"
+  },
+  "externalBlocks": "See BLOCKERS.json (BigQuery/PG/MySQL/MSSQL real-provider credentials, release signing keys, independent audit)",
+  "remainingWork": "See REMAINING_TASKS.json T004-T016"
+}

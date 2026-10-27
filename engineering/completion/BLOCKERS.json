@@ -1,0 +1,44 @@
+{
+  "register": "SPOOL-BLOCKERS",
+  "updatedAt": "2026-10-27",
+  "blockers": [
+    {
+      "id": "B001",
+      "domain": "bigquery-real-provider",
+      "type": "EXTERNALLY_BLOCKED",
+      "missingResource": "GCP service-account credentials (GOOGLE_APPLICATION_CREDENTIALS / service-account JSON) authorized for a BigQuery test project",
+      "evidenceWithoutResource": "SPOOL_ATOMIC_V2 semantics, recovery, fencing and rollback proven against the emulator/local contract in tests/bigquery-atomic-recovery.test.js 5/5",
+      "notPassedLabel": "REAL_PROVIDER_NOT_QUALIFIED — must never be labeled passed"
+    },
+    {
+      "id": "B002",
+      "domain": "postgres/mysql/mssql-connectors",
+      "type": "EXTERNALLY_BLOCKED",
+      "missingResource": "Dockerized or remote database provider endpoints with credentials for conformance qualification",
+      "notPassedLabel": "REAL_PROVIDER_NOT_QUALIFIED"
+    },
+    {
+      "id": "B003",
+      "domain": "release-signing",
+      "type": "EXTERNALLY_BLOCKED",
+      "missingResource": "Authorized SPOOL_RELEASE_PRIVATE_KEY / release signing material held outside engineer machines",
+      "notPassedLabel": "UNSIGNED_BUILD — gate fails closed by verified design"
+    },
+    {
+      "id": "B004",
+      "domain": "independent-audit",
+      "type": "EXTERNALLY_BLOCKED",
+      "missingResource": "Independent third-party security audit engagement",
+      "notPassedLabel": "NOT_AUDITED"
+    }
+  ],
+  "resolvedThisSession": [
+    {
+      "id": "R001",
+      "domain": "tests/production-connector-policy.test.js",
+      "symptom": "EBUSY/EPERM unlink spool-policy-* state.db(-shm) teardown failure recurring in subtest 2",
+      "rootCause": "Assertion drift masked by leaked handle: the 257MiB create was legal under the reviewed 10GiB ceiling, the failed a.rejects leaked the created service's open state DB handle, and the finally rm EBUSY replaced the real assertion error",
+      "resolution": "Test aligned to the pinned policy bound; legal create explicitly closed; teardown uses fs.rm maxRetries; 8/8 across repeated runs"
+    }
+  ]
+}

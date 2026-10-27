@@ -1,0 +1,24 @@
+{
+  "register": "SPOOL-REMAINING-TASKS",
+  "updatedAt": "2026-10-27",
+  "branch": "engineering/spool-enterprise-production-hardening",
+  "orderedTasks": [
+    { "id": "T001", "task": "Reconcile FULL `npm test` exact counts (total/passed/failed/skipped/cancelled/todo) into TEST_RESULTS.json", "status": "IN_PROGRESS", "next": "Await background suite; update register with real numbers" },
+    { "id": "T002", "task": "Run `npm run build`, then `npm run check` (npm test + check:model + release-gate). Release gate is fail-closed unsigned (UNSIGNED_BUILD) without signing material — record honest outcome", "status": "PENDING" },
+    { "id": "T003", "task": "Inspect final diff, commit coherent verified checkpoint(s) on engineering/spool-enterprise-production-hardening and push to remote (updates PR #99); verify SHA on GitHub", "status": "PENDING" },
+    { "id": "T004", "task": "Distributed scheduling audit: prove scheduler lease durability across restart and multiple concurrent processes (two-process lease contention test); fix or document single-writer assumption", "status": "PENDING" },
+    { "id": "T005", "task": "Enterprise API deepening: per-workspace membership CRUD routes, key rotation, audit retention policy, rate limits", "status": "PENDING" },
+    { "id": "T006", "task": "Desktop first-run onboarding + installed-application qualification with rendered-app test evidence", "status": "PENDING" },
+    { "id": "T007", "task": "Browser Studio: security and end-to-end test passes (browser-smoke when environment permits)", "status": "PENDING" },
+    { "id": "T008", "task": "CI/CD pipeline (local-first; no GitHub Actions per release contract) — reproducible qualification runbook execution and evidence", "status": "PENDING" },
+    { "id": "T009", "task": "Docker images, Kubernetes manifests and Helm chart with values provenance", "status": "PENDING" },
+    { "id": "T010", "task": "Connector conformance matrix expansion (postgres/mysql/mssql/BigQuery real-provider qualification where credentials exist; otherwise EXTERNALLY_BLOCKED registers)", "status": "PENDING" },
+    { "id": "T011", "task": "CDC, repair, cutover verification for lifecycle-required connectors", "status": "PENDING" },
+    { "id": "T012", "task": "Backup/DR drill runbook with restore evidence", "status": "PENDING" },
+    { "id": "T013", "task": "Threat model update covering enterprise registry/API/orchestrator attack surface (docs/THREAT_MODEL.md)", "status": "PENDING" },
+    { "id": "T014", "task": "Signed release artifacts with authorized keys (EXTERNALLY_BLOCKED until material supplied); reproducible build evidence", "status": "PENDING" },
+    { "id": "T015", "task": "Full 49-capability matrix re-evaluation with honest statuses; update capability docs", "status": "PENDING" },
+    { "id": "T016", "task": "Production deployment qualification (final release candidate passes all mandatory gates or precise EXTERNAL blockers recorded)", "status": "PENDING" }
+  ],
+  "acceptanceGate": "PRODUCTION_READY only when the exact final release candidate passes every mandatory engineering, security, migration-correctness, application, infrastructure, operational and release gate, with valid provider/external qualifications — or precise EXTERNALLY_BLOCKED records for unavailable material"
+}

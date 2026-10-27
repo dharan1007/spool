@@ -1,0 +1,26 @@
+{
+  "register": "SPOOL-COMPLETION-TEST-RESULTS",
+  "updatedAt": "2026-10-27",
+  "branch": "engineering/spool-enterprise-production-hardening",
+  "baseCommit": "38370a6da3004202edd82bd5f2b9d6dca1f0f63d",
+  "runs": [
+    { "suite": "tests/api-v2.test.js", "command": "node --test tests/api-v2.test.js", "tests": 4, "pass": 4, "fail": 0, "skipped": 0, "cancelled": 0, "todo": 0, "durationMs": 26191.98, "verification": "TESTED", "timestamp": "2026-10-27" },
+    { "suite": "tests/api-stress.test.js", "command": "node --test tests/api-stress.test.js", "tests": 1, "pass": 1, "fail": 0, "skipped": 0, "cancelled": 0, "todo": 0, "durationMs": 2259.67, "verification": "TESTED", "timestamp": "2026-10-27", "benchmarks": { "transport-probes": { "requestsPerSecond": 572, "requests": 300, "concurrency": 30 }, "authenticated-api-lists": { "requestsPerSecond": 771, "requests": 300, "concurrency": 30 }, "orchestrator-registry-reads": { "requestsPerSecond": 11604, "requests": 300, "concurrency": 30 }, "note": "Each figure labeled for exactly its layer; NOT migration execution throughput" } },
+    { "suite": "tests/bigquery-atomic-recovery.test.js", "command": "node --test tests/bigquery-atomic-recovery.test.js", "tests": 5, "pass": 5, "fail": 0, "skipped": 0, "cancelled": 0, "todo": 0, "verification": "TESTED", "timestamp": "2026-10-27" },
+    { "suite": "tests/release-contract.test.js", "command": "node --test tests/release-contract.test.js", "tests": 5, "pass": 5, "fail": 0, "skipped": 0, "cancelled": 0, "todo": 0, "verification": "TESTED", "timestamp": "2026-10-27" },
+    { "suite": "tests/production-connector-policy.test.js", "command": "node --test tests/production-connector-policy.test.js", "tests": 8, "pass": 8, "fail": 0, "skipped": 0, "cancelled": 0, "todo": 0, "durationMs": 23397.84, "verification": "TESTED", "timestamp": "2026-10-27" },
+    { "suite": "tests/observability.test.js", "command": "node --test tests/observability.test.js", "tests": 5, "pass": 5, "fail": 0, "skipped": 0, "cancelled": 0, "todo": 0, "verification": "TESTED", "timestamp": "2026-10-27" },
+    { "suite": "tests/scheduler.test.js", "command": "node --test tests/scheduler.test.js", "tests": 6, "pass": 6, "fail": 0, "skipped": 0, "cancelled": 0, "todo": 0, "verification": "TESTED", "timestamp": "2026-10-27" },
+    { "suite": "scripts/static-check.js", "command": "node scripts/static-check.js", "outcome": "PASS (21 required artifacts, stable SQLite runtime, no source-network primitives, JS syntax valid)", "verification": "TESTED", "timestamp": "2026-10-27" },
+    { "suite": "npm run build", "command": "npm run build", "outcome": "PASS — dist built; build self-tests 65/65 pass 0 fail 0 skipped 0 todo", "verification": "TESTED", "timestamp": "2026-10-27" },
+    { "suite": "FULL npm test", "command": "npm test", "tests": 574, "pass": 510, "fail": 0, "cancelled": 0, "skipped": 64, "todo": 0, "durationMs": 410747.48, "verification": "TESTED", "timestamp": "2026-10-27", "skipCharacterization": "All 64 skips are live-provider-gated conformance tests using { skip: !enabled } (tests/conformance/*.test.js): PostgreSQL family incl. CDC/repair/cutover/soak (34 catalog+PG-command-CDC related), SQL Server (8), MySQL (7): gated on provider endpoint env + credentials (e.g. MSSQL_TEST_ENABLED, SPOOL_TEST_MSSQL_PASSWORD, postgres test DSN). Provider credentials not configured in this environment — recorded in BLOCKERS.json B002. Skips are by-design honest absence, never fabricated passes." }
+  ],
+  "e.busyRootCause": {
+    "originalSymptom": "tests/production-connector-policy.test.js subtest 2 failed with EBUSY unlink state.db-shm at teardown",
+    "rootCause": "Test asserted PRODUCTION_CAPABILITY_DENIED for a create with maxSourceBytes=257MiB, but the reviewed pinned policy ceiling is 10 GiB (PRODUCTION_POLICY.maxSourceBytes). The create legitimately succeeded; the assertion threw while the created-but-never-closed service leaked its open RunStore SQLite handle; the finally-block rm then failed EBUSY and REPLACED the original assertion error, masking the real cause every run.",
+    "probeEvidence": "Bare-node replication of the exact subtest body (50+ denial probes) closed and removed cleanly; isolated creates with 257MiB succeeded with no leak; RunStore.close() verified correct (wal_checkpoint TRUNCATE + db.close).",
+    "fix": "Test aligned to reviewed bound (deny PRODUCTION_POLICY.maxSourceBytes+1, close the legal 257MiB create); teardown hardened with fs.rm maxRetries:5/retryDelay:100 for transient Windows AV locks — genuine leaks still fail after retries.",
+    "result": "8/8 pass, reproduced across repeated runs"
+  },
+  "countReconciliation": { "tests": 574, "pass": 510, "fail": 0, "cancelled": 0, "skipped": 64, "todo": 0, "sum": "510 + 0 + 64 + 0 + 0 = 574 (reconciles exactly)", "skippedBreakdown": "64 provider-gated live conformance (postgres/CDC/repair/soak, mssql, mysql) — see runs[FULL npm test].skipCharacterization and BLOCKERS.json B002" }
+}

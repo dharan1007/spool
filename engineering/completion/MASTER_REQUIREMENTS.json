@@ -1,0 +1,136 @@
+{
+  "register": "SPOOL-ENGINEERING-MASTER-REQUIREMENTS",
+  "updatedAt": "2026-10-27",
+  "branch": "engineering/spool-enterprise-production-hardening",
+  "pullRequest": "https://github.com/dharan1007/spool/pull/99",
+  "statusVocabulary": ["LOCAL_UNCOMMITTED", "LOCAL_COMMITTED", "REMOTE_PUSHED", "TESTED", "INTEGRATION_VERIFIED", "PRODUCTION_QUALIFIED", "EXTERNALLY_BLOCKED"],
+  "domains": [
+    {
+      "id": "enterprise-api-v2",
+      "requirement": "Enterprise REST API v2 with multi-tenant registry (orgs/workspaces/memberships/api-keys), RBAC, workspace isolation, audit activity, and a full migration lifecycle bound to the real SpoolCommandService engine",
+      "implementation": ["src/enterprise/registry.js", "src/enterprise/orchestrator.js", "src/daemon/spoold-v2.js"],
+      "tests": ["tests/api-v2.test.js", "tests/api-stress.test.js"],
+      "verifiedResults": "api-v2 4/4 pass (transport hardening; full real-engine lifecycle with verified SQLite target rows and idempotent replay; revocation/source-mutation/contract-drift hardening; registry isolation), api-stress 1/1 pass (layered benchmark)",
+      "status": "TESTED",
+      "notes": "Fail-closed semantics: cross-workspace existence collapsed to MIGRATION_NOT_FOUND; key issuance provisions membership; replay only via real engine idempotent path"
+    },
+    {
+      "id": "observability",
+      "requirement": "Prometheus-compatible metrics with correct histogram semantics (cumulative buckets per key, +Inf, per-label sums/counts) and non-throwing Summaries",
+      "implementation": ["src/observability/prometheus.js"],
+      "tests": ["tests/observability.test.js"],
+      "verifiedResults": "5/5 pass",
+      "status": "TESTED"
+    },
+    {
+      "id": "scheduler",
+      "requirement": "Durable scheduler without insecure auto-approval/auto-execution; lease-based scheduling",
+      "implementation": ["src/daemon/scheduler.js"],
+      "tests": ["tests/scheduler.test.js"],
+      "verifiedResults": "6/6 pass (scheduleInterval insecure path removed; scheduleWithLease stages only)",
+      "status": "TESTED",
+      "notes": "Distributed multi-process scheduling audit remains open (see REMAINING_TASKS)"
+    },
+    {
+      "id": "release-gate",
+      "requirement": "Release gate fails closed without signing evidence; signed path verified",
+      "implementation": ["src/release/gate.js", "scripts/release-gate.js"],
+      "tests": ["tests/release-contract.test.js"],
+      "verifiedResults": "5/5 pass, including NEW fail-closed regression (UNSIGNED_BUILD with all qualification steps still run in order) and signed-path verification (sign + double verify-release-chain sharing exact parity evidence)",
+      "status": "TESTED"
+    },
+    {
+      "id": "bigquery-atomic",
+      "requirement": "Canonical SPOOL_ATOMIC_V2 BigQuery connector: multi-statement transaction, atomic target/ledger writes, ambiguous commit reconciliation, legacy ledger indeterminate handling, rollback, fencing, atomic recovery",
+      "implementation": ["src/connectors/bigquery/target.js"],
+      "tests": ["tests/bigquery-atomic-recovery.test.js"],
+      "verifiedResults": "5/5 pass (re-ran post-refactor)",
+      "status": "TESTED",
+      "notes": "Real-provider qualification remains EXTERNALLY_BLOCKED (no GCP credentials in this environment); see BLOCKERS"
+    },
+    {
+      "id": "production-connector-policy",
+      "requirement": "Production mode permits only qualified SQLite INSERT through the canonical lifecycle; experimental targets denied before discovery/approval/mutation; qualification marker semantics enforced",
+      "implementation": ["src/platform/production-policy.js", "src/daemon/command-service.js"],
+      "tests": ["tests/production-connector-policy.test.js"],
+      "verifiedResults": "8/8 pass. EBUSY teardown root cause RESOLVED: test expected denial for maxSourceBytes=257MiB but the reviewed 1.1.2 policy ceiling is 10 GiB (PRODUCTION_POLICY.maxSourceBytes, production-policy.js:65); the un-denied create leaked an open state.db-shm handle and the finally-block rm EBUSY replaced the real assertion error. Test now denies >10GiB, closes the legal 257MiB create, and teardown uses fs.rm maxRetries for transient Windows AV locks",
+      "status": "TESTED"
+    },
+    {
+      "id": "static-integrity",
+      "requirement": "Static release check continuity",
+      "verifiedResults": "node scripts/static-check.js: PASS (21 required artifacts, stable SQLite runtime, no source-network primitives, JS syntax valid)",
+      "status": "TESTED"
+    },
+    {
+      "id": "full-suite-reconciliation",
+      "requirement": "Full npm test suite green with exact reconciled counts (total/passed/failed/skipped/cancelled/todo)",
+      "implementation": [],
+      "tests": ["package.json scripts.test"],
+      "verifiedResults": "574 tests: 510 pass, 0 fail, 64 provider-gated skips (live-provider conformance, honestly skipped), 0 cancelled, 0 todo — reconciliation exact",
+      "status": "TESTED"
+    },
+    {
+      "id": "desktop-onboarding",
+      "requirement": "Desktop first-run onboarding and installed-application qualification",
+      "status": "NOT_STARTED",
+      "notes": "Tracked in REMAINING_TASKS"
+    },
+    {
+      "id": "browser-studio-security-e2e",
+      "requirement": "Browser Studio security and end-to-end tests",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "distributed-scheduling-workers",
+      "requirement": "Durable, distributed scheduling and worker execution beyond single-process",
+      "status": "PARTIAL",
+      "notes": "Lease-based staging verified single-process; multi-process/restart audit open"
+    },
+    {
+      "id": "connector-conformance-cdc-cutover",
+      "requirement": "Database connector conformance, exact verification, CDC, repair and cutover where required",
+      "status": "PARTIAL",
+      "notes": "SQLite/BigQuery canonical paths tested; real-provider CDC/cutover qualification externally blocked"
+    },
+    {
+      "id": "cicd",
+      "requirement": "CI/CD pipeline provisioning and green runs",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "containers",
+      "requirement": "Docker images, Kubernetes and Helm packaging",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "benchmarks-performance",
+      "requirement": "Performance benchmarks with honest labeling",
+      "status": "PARTIAL",
+      "notes": "api-stress layered benchmark now honestly labels transport/auth/registry layers; engine execution throughput qualified by real-engine suites not request-rate sampling"
+    },
+    {
+      "id": "backup-dr",
+      "requirement": "Backup and disaster recovery",
+      "status": "PARTIAL",
+      "notes": "Recovery checkpoints and BigQuery atomic recovery tests exist; full DR runbook/drill open"
+    },
+    {
+      "id": "threat-model-security",
+      "requirement": "Threat model maintenance and security remediation",
+      "status": "PARTIAL",
+      "notes": "docs/THREAT_MODEL.md exists; enterprise API additions need review"
+    },
+    {
+      "id": "release-integrity-signing",
+      "requirement": "Release integrity, signed artifacts, reproducible build evidence",
+      "status": "TESTED",
+      "notes": "Gate verified fail-closed; actual signing requires authorized release keys (EXTERNALLY_BLOCKED for production signing material)"
+    },
+    {
+      "id": "deployment-qualification",
+      "requirement": "Production deployment qualification",
+      "status": "NOT_STARTED"
+    }
+  ]
+}
