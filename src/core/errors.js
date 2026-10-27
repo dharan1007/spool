@@ -15,7 +15,11 @@ const CATALOG = Object.freeze({
   TARGET_RECONCILIATION_CONFLICT: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Do not replay the batch', 'Inspect target ledger evidence and resolve the conflict explicitly']) }),
   CONNECTOR_DRIVER_UNAVAILABLE: Object.freeze({ severity: 'environment', retryable: false, nextActions: Object.freeze(['Install the optional connector driver beside this release', 'Use a connector included in the core package if no optional driver is available']) }),
   CONNECTOR_DRIVER_INCOMPATIBLE: Object.freeze({ severity: 'environment', retryable: false, nextActions: Object.freeze(['Install the connector driver major version this release supports', 'Re-run preflight after changing installed packages']) }),
-  CONNECTOR_DRIVER_LOAD_FAILED: Object.freeze({ severity: 'environment', retryable: true, nextActions: Object.freeze(['Reinstall the optional connector driver', 'Retry only after the driver load failure is understood']) })
+  CONNECTOR_DRIVER_LOAD_FAILED: Object.freeze({ severity: 'environment', retryable: true, nextActions: Object.freeze(['Reinstall the optional connector driver', 'Retry only after the driver load failure is understood']) }),
+  INVALID_CLOUD_HTTP_ENDPOINT: Object.freeze({ severity: 'security', retryable: false, nextActions: Object.freeze(['Use an http(s) endpoint without embedded credentials', 'Review the connector targetRef before planning']) }),
+  CLOUD_HTTP_ENDPOINT_FORBIDDEN: Object.freeze({ severity: 'security', retryable: false, nextActions: Object.freeze(['Point the connector at the documented service endpoint', 'Do not route connector traffic through link-local or metadata addresses']) }),
+  CLOUD_HTTP_TIMEOUT: Object.freeze({ severity: 'environment', retryable: true, nextActions: Object.freeze(['Verify the endpoint is reachable from this host', 'Retry once the endpoint responds within the request deadline']) }),
+  CLOUD_HTTP_RESPONSE_TOO_LARGE: Object.freeze({ severity: 'environment', retryable: false, nextActions: Object.freeze(['Reduce the query result size', 'Use the native driver transport for large result sets']) })
 });
 
 export const ERROR_CATALOG = CATALOG;
