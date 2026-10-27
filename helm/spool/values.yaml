@@ -1,45 +1,104 @@
-replicaCount: 2
+# SPOOL enterprise API values.
+#
+# The daemon binds 127.0.0.1 only and rejects any other listen address and Host
+# header, so every pod runs a same-pod proxy that is the only network-facing
+# listener. State is a single-writer SQLite volume, so replicas are pinned to 1.
+
+replicaCount: 1
 
 image:
   repository: spool/spool-enterprise
+  tag: "1.1.2"
   pullPolicy: IfNotPresent
-  tag: "2.0.0"
+
+proxyImage:
+  repository: nginxinc/nginx-unprivileged
+  tag: "1.27-alpine"
+  pullPolicy: IfNotPresent
+
+# release.commitSha must be the exact 40-character commit the image was built
+# from; the chart refuses to render without it and the daemon refuses to start
+# if it does not match the shipped policy release.
+release:
+  version: "1.1.2"
+  commitSha: ""
+
+# Credentials are never templated. Create this Secret out of band:
+#   kubectl create secret generic spool-daemon-secrets \
+#     --from-literal=SPOOL_DAEMON_TOKEN="$(openssl rand -hex 32)" \
+#     --from-literal=SPOOL_APPROVAL_SIGNING_KEY="$(openssl rand -hex 32)"
+credentialsSecretName: spool-daemon-secrets
+
+state:
+  size: 10Gi
+  storageClass: ""
+  mountPath: /var/lib/spool
+
+sourceCeilingBytes: "10737418240"
 
 service:
   type: ClusterIP
-  port: 8080
-
-ingress:
-  enabled: true
-  className: "nginx"
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-  hosts:
-    - host: spool.internal.corp
-      paths:
-        - path: /
-          pathType: Prefix
+  port: 80
+  targetPort: 8081
 
 resources:
   limits:
     cpu: 2000m
-    memory: 4Gi
+    memory: 2Gi
   requests:
-    cpu: 500m
-    memory: 1Gi
+    cpu: 250m
+    memory: 512Mi
 
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 80
+proxyResources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 32Mi
+
+probes:
+  liveness:
+    path: /v2/health
+    initialDelaySeconds: 15
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    path: /v2/ready
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
 
 metrics:
-  enabled: true
   serviceMonitor:
-    enabled: true
-    interval: 15s
+    enabled: false
+    interval: 30s
+    labels: {}
 
-env:
-  NODE_ENV: production
-  SPOOL_SOURCE_CEILING_BYTES: "10737418240" # 10 GB
+networkPolicy:
+  enabled: true
+  # Only namespaces carrying this label may reach the proxy port.
+  ingressNamespaceLabels:
+    kubernetes.io/metadata.name: ingress-nginx
+  dnsNamespaceLabels:
+    kubernetes.io/metadata.name: kube-system
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  path: /
+  tlsSecretName: ""
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

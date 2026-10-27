@@ -1,43 +1,163 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: spool-enterprise
+  name: {{ include "spool.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: spool-enterprise
+    {{- include "spool.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  # Single writer: the registry and every migration checkpoint live on one RWO
+  # volume. Rolling updates would briefly run two writers, so the strategy is
+  # Recreate and the replica count is pinned.
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: spool-enterprise
+      {{- include "spool.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       labels:
-        app.kubernetes.io/name: spool-enterprise
+        {{- include "spool.selectorLabels" . | nindent 8 }}
     spec:
+      serviceAccountName: {{ include "spool.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
-        - name: spool
+        - name: daemon
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: loopback-http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "spool.fullname" . }}-daemon
+          env:
+            - name: SPOOL_DAEMON_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.credentialsSecretName }}
+                  key: SPOOL_DAEMON_TOKEN
+            - name: SPOOL_APPROVAL_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.credentialsSecretName }}
+                  key: SPOOL_APPROVAL_SIGNING_KEY
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: loopback-http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: loopback-http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: {{ .Values.state.mountPath }}
+            - name: scratch
+              mountPath: /tmp
+        - name: proxy
+          image: "{{ .Values.proxyImage.repository }}:{{ .Values.proxyImage.tag }}"
+          imagePullPolicy: {{ .Values.proxyImage.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: 8081
               protocol: TCP
           livenessProbe:
             httpGet:
-              path: /v2/health
+              path: {{ .Values.probes.liveness.path }}
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 15
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
             httpGet:
-              path: /v2/ready
+              path: {{ .Values.probes.readiness.path }}
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-          env:
-            - name: NODE_ENV
-              value: "{{ .Values.env.NODE_ENV }}"
-            - name: SPOOL_SOURCE_CEILING_BYTES
-              value: "{{ .Values.env.SPOOL_SOURCE_CEILING_BYTES }}"
+            {{- toYaml .Values.proxyResources | nindent 12 }}
+          volumeMounts:
+            - name: proxy-config
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ include "spool.fullname" . }}-state
+        - name: proxy-config
+          configMap:
+            name: {{ include "spool.fullname" . }}-proxy
+        - name: scratch
+          emptyDir:
+            sizeLimit: 256Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "spool.fullname" . }}-state
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spool.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.state.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.state.size }}

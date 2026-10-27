@@ -1,0 +1,25 @@
+{{- /* Release notes are operator instructions, not a success claim. */ -}}
+SPOOL enterprise API {{ .Chart.AppVersion }} (release commit {{ .Values.release.commitSha }})
+
+{{ if not .Values.release.commitSha }}
+WARNING: release.commitSha was not set. Set values.release.commitSha to the exact
+40-character commit this image was built from. The daemon refuses to start otherwise.
+{{ end }}
+
+1. Create the credential Secret (never templated, never defaulted):
+
+   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.credentialsSecretName }} \
+     --from-literal=SPOOL_DAEMON_TOKEN="$(openssl rand -hex 32)" \
+     --from-literal=SPOOL_APPROVAL_SIGNING_KEY="$(openssl rand -hex 32)"
+
+2. The daemon binds 127.0.0.1:8080 only and rejects any other Host header. Reach it
+   through the same-pod proxy:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "spool.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+   curl -H "Authorization: Bearer $SPOOL_DAEMON_TOKEN" http://127.0.0.1:{{ .Values.service.port }}/v2/migrations
+
+3. State is a single-writer SQLite volume ({{ .Values.state.size }}, ReadWriteOnce).
+   Scaling beyond one replica is not supported and the chart refuses to render it.
+
+4. Metrics are served unauthenticated at /v2/metrics but the NetworkPolicy only admits
+   labelled namespaces on the proxy port.

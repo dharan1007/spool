@@ -1,15 +1,16 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: spool-enterprise
+  name: {{ include "spool.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: spool-enterprise
+    {{- include "spool.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
-  ports:
-    - port: {{ .Values.service.port }}
-      targetPort: http
-      protocol: TCP
-      name: http
   selector:
-    app.kubernetes.io/name: spool-enterprise
+    {{- include "spool.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP

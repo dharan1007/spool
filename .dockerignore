@@ -1,0 +1,25 @@
+# Only the daemon runtime is copied into the image.
+.git
+.github
+node_modules
+dist
+apps
+tests
+benchmarks
+qualification
+deploy
+helm
+docs
+examples
+integrations
+dashboards
+keys
+release
+engineering
+sdk
+models
+.console-evidence
+*.log
+*.md
+Dockerfile
+.dockerignore
