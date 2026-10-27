@@ -1,5 +1,6 @@
 import { fail } from '../../core/errors.js';
 import { requestJson } from '../cloud-http.js';
+import { loadSnowflakeDriver } from './driver.js';
 
 export function normalizeSnowflakeRef(ref = {}) {
   if (!ref || typeof ref !== 'object') fail('INVALID_SNOWFLAKE_CONFIG', 'targetRef must be an object');
@@ -96,9 +97,9 @@ export async function withSnowflakeClient({ targetRef, credentialBroker, mockCli
     return await fn(client);
   }
 
-  // Official snowflake-sdk driver
+  // Official snowflake-sdk driver (optional driver, loaded on first use)
+  const snowflake = await loadSnowflakeDriver();
   try {
-    const snowflake = await import('snowflake-sdk');
     const connection = snowflake.createConnection({
       account: ref.account,
       username: process.env.SNOWFLAKE_USER || ref.account,

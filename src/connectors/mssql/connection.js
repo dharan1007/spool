@@ -1,5 +1,5 @@
-import sql from 'mssql';
 import { fail } from '../../core/errors.js';
+import { loadMssqlDriver } from './driver.js';
 
 const TLS_MODES = new Set(['disable', 'require', 'verify-full']);
 
@@ -62,6 +62,7 @@ export function mssqlConnectionConfig(ref, password) {
 export async function withMssqlConnection({ targetRef, credentialBroker }, callback) {
   if (!credentialBroker || typeof credentialBroker.withSecret !== 'function') fail('INVALID_MSSQL_CONFIG', 'credentialBroker.withSecret() is required');
   if (typeof callback !== 'function') fail('INVALID_MSSQL_CONFIG', 'SQL Server connection callback is required');
+  const sql = await loadMssqlDriver();
   return credentialBroker.withSecret(targetRef?.secretRef, async password => {
     const pool = new sql.ConnectionPool(mssqlConnectionConfig(targetRef, password));
     await pool.connect();

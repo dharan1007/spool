@@ -34,6 +34,9 @@ for (const file of sourceFiles) {
   if (/\sstyle\s*=\s*['"]/i.test(text)) failures.push(`${file}: inline style attribute violates strict production CSP`);
   if (/\bfetch\s*\(|\bXMLHttpRequest\b|\bnavigator\.sendBeacon\b|\bWebSocket\s*\(/.test(text)) failures.push(`${file}: outbound network primitive detected`);
   if (/from\s+['"]node:sqlite['"]|require\(['"]node:sqlite['"]\)/.test(text)) failures.push(`${file}: node:sqlite is not allowed in the production runtime; use the pinned stable driver`);
+  if (/from\s+['"](?:mssql|snowflake-sdk)['"]|require\(['"](?:mssql|snowflake-sdk)['"]\)/.test(text)) {
+    failures.push(`${file}: optional connector driver imported at module load; load it through src/connectors/driver-loader.js`);
+  }
   const checked = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' });
   if (checked.status !== 0) failures.push(`${file}: syntax check failed: ${checked.stderr.trim()}`);
 }
@@ -69,4 +72,4 @@ if (failures.length) {
   failures.forEach(f => console.error(`- ${f}`));
   process.exit(1);
 }
-console.log(`Static release check passed (${required.length} required artifacts, stable SQLite runtime, no source-network primitives, JS syntax valid).`);
+console.log(`Static release check passed (${required.length} required artifacts, stable SQLite runtime, no source-network primitives, optional connector drivers load lazily, JS syntax valid).`);

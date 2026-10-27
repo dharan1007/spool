@@ -12,7 +12,10 @@ const CATALOG = Object.freeze({
   SOURCE_CHANGED: Object.freeze({ severity: 'user_action', retryable: true, nextActions: Object.freeze(['Re-inspect the changed source', 'Create a new plan/approval against the new snapshot']) }),
   PATH_OUTSIDE_ALLOWED_ROOT: Object.freeze({ severity: 'security', retryable: false, nextActions: Object.freeze(['Move the resource under the configured allow-root', 'Review the configured source/target root']) }),
   STALE_FENCE: Object.freeze({ severity: 'concurrency', retryable: true, nextActions: Object.freeze(['Stop the stale runner', 'Resume through the current lease holder']) }),
-  TARGET_RECONCILIATION_CONFLICT: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Do not replay the batch', 'Inspect target ledger evidence and resolve the conflict explicitly']) })
+  TARGET_RECONCILIATION_CONFLICT: Object.freeze({ severity: 'integrity', retryable: false, nextActions: Object.freeze(['Do not replay the batch', 'Inspect target ledger evidence and resolve the conflict explicitly']) }),
+  CONNECTOR_DRIVER_UNAVAILABLE: Object.freeze({ severity: 'environment', retryable: false, nextActions: Object.freeze(['Install the optional connector driver beside this release', 'Use a connector included in the core package if no optional driver is available']) }),
+  CONNECTOR_DRIVER_INCOMPATIBLE: Object.freeze({ severity: 'environment', retryable: false, nextActions: Object.freeze(['Install the connector driver major version this release supports', 'Re-run preflight after changing installed packages']) }),
+  CONNECTOR_DRIVER_LOAD_FAILED: Object.freeze({ severity: 'environment', retryable: true, nextActions: Object.freeze(['Reinstall the optional connector driver', 'Retry only after the driver load failure is understood']) })
 });
 
 export const ERROR_CATALOG = CATALOG;

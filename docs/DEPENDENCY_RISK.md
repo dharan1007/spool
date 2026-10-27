@@ -8,25 +8,34 @@ npm audit --omit=dev --audit-level=high --json
 
 as a mandatory gate in `scripts/qualify-bounded-release.js` (`security_audit`).
 A high or critical finding in a production dependency blocks the candidate.
+
+The gate applies to the **core production dependency set**: `dependencies` in
+`package.json`, which is exactly what `npm ci --omit=dev`, the release tarball
+and the daemon image install. Optional connector drivers are split out of that
+set by design (DR-002) and are audited separately; they are not silently
+excluded, and the connectors that need them stay outside the production
+allowlist.
+
 This file records findings that cannot be resolved by a compatible upgrade,
 with the reachability analysis behind the decision. The gate itself is never
-lowered to make a candidate pass; a recorded finding keeps the release
+lowered to make a candidate pass; a recorded finding keeps the affected scope
 `BLOCKED` until the remediation trigger fires.
 
 ## DR-001 — GHSA-xcx6-jx8p-x3h5 in `@azure/msal-node`
 
-Status: OPEN — blocks release qualification (requesting the audit gate to pass
-would be masking, not fixing).
+Status: OPEN upstream; scoped out of the core production install by DR-002.
+Any install that adds `mssql` or `snowflake-sdk` is still affected, and both
+connectors remain non-production-qualified.
 
 | Field | Value |
 | --- | --- |
 | Advisory | GHSA-xcx6-jx8p-x3h5 — "MSAL Node authorization code flow may disclose parameters to an attacker-controlled endpoint" |
 | Severity | High, CVSS 3.1 base 7.5 (`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N`), CWE-346 |
 | Affected range | `@azure/msal-node` >= 5.0.0-beta.0 < 7.1.0 |
-| Installed | `@azure/msal-node@5.6.0` |
+| Installed (optional scope) | `@azure/msal-node@5.6.0` |
 | Fixed in | `@azure/msal-node@7.1.0` (7.1.1 published) |
 | Dependency paths | `mssql@12.7.2 -> tedious@20.0.0 -> @azure/identity@4.13.2 -> @azure/msal-node@5.6.0`; `snowflake-sdk@3.4.0 -> @azure/identity@4.13.2` (deduped) |
-| Audit metadata | production dependencies 282, high 2 (both entries are the same MSAL issue), critical 0 |
+| Audit metadata | full tree (dev included) 2 high, both the same MSAL issue; core production tree 0 findings (DR-002) |
 
 ### Why no compatible upgrade exists
 
@@ -61,8 +70,7 @@ was evaluated in an isolated install of the exact production dependency set
   performs Azure AD token acquisition.
 
 A major-version override that breaks a code path we cannot exercise is a
-supply-chain risk, not a remediation, so it is not applied and the audit gate
-stays failing.
+supply-chain risk, not a remediation, so it is not applied.
 
 ### Reachability analysis
 
@@ -79,18 +87,18 @@ stays failing.
   SPOOL builds its connection without any authenticator or OAuth credential
   (`src/connectors/snowflake/connection.js`: account, username, database,
   schema, warehouse, role), so the MSAL flow is loaded but never invoked.
-- Exposure for the shipped product is therefore limited to loading the module,
-  not executing the vulnerable flow. The residual risk is a future change that
-  adds Azure AD authentication without revisiting this record.
+- Exposure for any install that includes the optional driver is therefore
+  limited to loading the module, not executing the vulnerable flow. The core
+  release does not install it at all.
 
 ### Remediation trigger
 
 Re-run the gate as soon as any of the following is true:
 
 1. `@azure/identity` publishes a release that depends on
-   `@azure/msal-node >= 7.1.0` — bump `mssql`/`snowflake-sdk` or add a direct
-   dependency and re-run `npm audit --omit=dev --audit-level=high` plus
-   `npm test`;
+   `@azure/msal-node >= 7.1.0` — bump the optional driver and re-run
+   `npm audit --omit=dev --audit-level=high` plus the connector conformance
+   suites;
 2. `tedious` or `snowflake-sdk` drop `@azure/identity`, or a newer major stops
    pulling MSAL;
 3. the connectors move Azure AD authentication into an optional, separately
@@ -99,3 +107,56 @@ Re-run the gate as soon as any of the following is true:
 Also revisit the decision if SPOOL ever invokes an MSAL authorization-code
 flow, at which point the finding becomes directly exploitable and the
 affected connectors must not ship.
+
+## DR-002 — optional connector drivers are excluded from the core install
+
+Status: APPLIED. Core production dependency set: 0 high/critical findings.
+Optional connector scope: still affected by DR-001, connectors unqualified.
+
+### Decision
+
+`mssql` and `snowflake-sdk` moved from `dependencies` to `devDependencies`.
+The connector code stays in `src/connectors/{mssql,snowflake}` and ships with
+the package, but the drivers load only on first use:
+
+- `src/connectors/driver-loader.js` imports the driver dynamically, caches the
+  successful load, and maps a missing package to
+  `CONNECTOR_DRIVER_UNAVAILABLE`, a missing API or wrong major to
+  `CONNECTOR_DRIVER_INCOMPATIBLE`, and any other load failure to
+  `CONNECTOR_DRIVER_LOAD_FAILED`. The error is raised before a credential is
+  read or a socket is opened.
+- `src/connectors/mssql/driver.js` requires `ConnectionPool`, `Transaction`,
+  `Request` and `ISOLATION_LEVEL` from `mssql` major 12.
+- `src/connectors/snowflake/driver.js` requires `createConnection` from
+  `snowflake-sdk` major 3.
+- `scripts/static-check.js` fails the build if any file under `src/` imports
+  either driver statically.
+
+The core daemon, CLI and Browser Studio never need a remote driver: their
+production allowlist is SQLite and filesystem. PostgreSQL, MySQL and BigQuery
+remain production dependencies because they carry no open advisory and are the
+qualified/near-qualified paths; they are loaded by the modules that use them.
+
+### Evidence
+
+- `npm audit --omit=dev --audit-level=high` -> `found 0 vulnerabilities`.
+- `npm audit --audit-level=high` (dev included) -> still 2 high, GHSA-xcx6-jx8p-x3h5.
+- `tests/connector-driver-boundary.test.js` (7 tests): static-import scan,
+  production-closure walk over `package-lock.json` (asserts the closure contains
+  no `mssql`, `snowflake-sdk`, `@azure/identity` or `@azure/msal-node`, and does
+  contain `better-sqlite3`, `pg`, `mysql2`, `@google-cloud/bigquery`), a module
+  graph proof that the daemon and connector descriptors load with no driver
+  resolution, the loader error paths, and a packed-tarball probe that asserts
+  the shipped artifact fails with `CONNECTOR_DRIVER_UNAVAILABLE` instead of a
+  module crash.
+- The container image is built with `npm ci --omit=dev`; the in-container
+  boundary check asserts `mssql` is absent and the connector reports
+  `CONNECTOR_DRIVER_UNAVAILABLE`.
+
+### What this does not do
+
+It does not delete SQL Server or Snowflake support, does not change the
+capability matrix, and does not qualify either connector. Installing a driver
+reintroduces DR-001 in that install; `docs/SELF_HOSTING.md` documents the
+derived-image path and the requirement to audit it separately. This record is
+reopened if a driver returns to the core dependency set.

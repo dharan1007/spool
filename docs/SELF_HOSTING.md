@@ -57,6 +57,34 @@ workspace and API-key provisioning, a real CSV -> SQLite migration through
 plan/dry-run/approve/execute/receipt/verification, and row-level verification of
 the durable target. It exits non-zero on the first failed check.
 
+### Optional SQL Server and Snowflake drivers
+
+The release image and the packaged release install only the core dependency
+set. The SQL Server (`mssql@^12`) and Snowflake (`snowflake-sdk@^3`) drivers are
+optional: they are not bundled, and a migration that needs one fails closed with
+`CONNECTOR_DRIVER_UNAVAILABLE` before any secret is read or connection is
+attempted. Install the driver beside the release when you need that connector:
+
+```bash
+npm install mssql@^12.7.2          # SQL Server
+npm install snowflake-sdk@^3.4.0   # Snowflake
+```
+
+For the container, derive an image instead of modifying the release image:
+
+```dockerfile
+FROM spool-daemon:<exact-release>
+USER root
+RUN npm install --no-save --no-package-lock mssql@^12.7.2
+USER node
+```
+
+A derived image is outside the qualified release artifact: it reintroduces the
+upstream `@azure/msal-node` advisory recorded in `docs/DEPENDENCY_RISK.md`, so
+run `npm audit --omit=dev --audit-level=high` against it and treat the connector
+as unqualified. Installing a driver never changes the capability matrix or the
+production allowlist.
+
 ## Static hosting requirements
 
 Serve `dist/` as same-origin static files and configure SPA fallback so application routes such as `/studio/new`, `/local-runner`, `/security`, and `/services` resolve to `index.html` instead of returning a hosting-layer 404.

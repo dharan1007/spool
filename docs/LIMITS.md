@@ -63,6 +63,12 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 - Targets require pre-created ordinary tables. No read-after-write verification, repair execution or bulk writes.
 - Metadata tables (`dbo.spool_batch_ledger`, `dbo.spool_execution_leases`) live in the target database.
 
+## Optional connector drivers
+
+- SQL Server and Snowflake support is shipped as connector adapters, not as bundled drivers. The core install (`npm ci --omit=dev`), the release tarball and the daemon image contain neither `mssql` nor `snowflake-sdk`, and therefore no `@azure/*` packages.
+- Without the driver, the connector fails closed with `CONNECTOR_DRIVER_UNAVAILABLE` before reading a secret or opening a connection; an unsupported driver major or missing driver API fails with `CONNECTOR_DRIVER_INCOMPATIBLE`.
+- The optional drivers are outside the qualified release scope: installing one does not make the connector production-qualified, and the upstream `@azure/msal-node` advisory in `docs/DEPENDENCY_RISK.md` applies to any install that includes it.
+
 ## Repair and cutover
 
 - Repair applies only to stored `DIFF` evidence for runs in `VERIFICATION_FAILED` status; preconditions (`absent` / `actualRowHash`) fail the operation on any divergence, and re-verification must return `VERIFIED` before any receipt.
