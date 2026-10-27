@@ -46,6 +46,14 @@
       "missingResource": "A reachable Kubernetes cluster (kubectl 1.36.1 is installed but no API server) and a helm binary on PATH for repeat runs (this run used a checksum-verified helm 3.16.4 at a temporary path)",
       "evidenceWithoutResource": "Chart lints and renders; rendered object properties are asserted by scripts/check-deployment.js and tests/deployment-manifests.test.js",
       "notPassedLabel": "NOT_DEPLOYED"
+    },
+    {
+      "id": "B007",
+      "domain": "production-dependency-advisory",
+      "type": "EXTERNALLY_BLOCKED",
+      "missingResource": "An upstream @azure/identity release that depends on @azure/msal-node >= 7.1.0 (or tedious/snowflake-sdk dropping it); 4.13.2, 4.14.0 and 4.15.0-beta.1 all declare ^6.0.0, i.e. inside the affected range",
+      "evidenceWithoutResource": "docs/DEPENDENCY_RISK.md DR-001: GHSA-xcx6-jx8p-x3h5 (high, CVSS 7.5) in @azure/msal-node 5.6.0 via @azure/identity; no compatible upgrade exists and npm audit fix cannot leave the parent range. Reachability: SPOOL never invokes an MSAL authorization-code flow (zero @azure credential references in src/); mssql uses SQL auth and does not load MSAL, snowflake-sdk loads it eagerly but SPOOL passes no authenticator. Security audit gate executed at commit 6bedad3 and failed closed (qualification.json status BLOCKED).",
+      "notPassedLabel": "SECURITY_AUDIT_BLOCKED - never to be reported as pass; gate must not be lowered to accept the finding"
     }
   ],
   "resolvedThisSession": [

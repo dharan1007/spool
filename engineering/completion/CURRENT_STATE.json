@@ -37,7 +37,7 @@
     "staticCheck": "PASS",
     "build": "PASS (65/65 self-tests, dist built)",
     "npmRunCheck": "completed 2026-10-27 at commit 38370a6: embedded FULL npm test 574/510 pass/0 fail/64 provider-gated skips/0 todo; check:model PASS; release-gate ran build-dist (65/65 self-tests), benchmarks, static-check, pre-sign verify-release-chain and reproducible-build-evidence (two independent builds, identical artifact root sha 3648daec483ebb34661dc2f9ca1edc87ebbdab4abdc34eee058e5719f6d125b9, reproducible=true, 130 artifacts, binding SHA 38370a6) then failed CLOSED with UNSIGNED_BUILD — the honest by-design terminal state without signing material (BLOCKERS B003); script exit code 1",
-    "boundedReleaseQualification": "see REMAINING_TASKS T008 and TEST_RESULTS runs[scripts/qualify-bounded-release.js]"
+    "boundedReleaseQualification": "EXTERNALLY_BLOCKED at 6bedad3: dependency_install PASS, security_audit FAIL (2 high GHSA-xcx6-jx8p-x3h5 in @azure/msal-node 5.6.0), runbook stopped by design; evidence in TEST_RESULTS runs[scripts/qualify-bounded-release.js] and BLOCKERS B007"
   },
   "externalBlocks": "See BLOCKERS.json (BigQuery/PG/MySQL/MSSQL real-provider credentials, release signing keys, independent audit)",
   "remainingWork": "See REMAINING_TASKS.json T004-T016"
