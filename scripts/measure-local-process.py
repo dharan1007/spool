@@ -11,6 +11,17 @@ pid, roots_file, output = int(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 stop = output.with_suffix('.stop')
 records, cpu_by_pid, errors = [], {}, []
 peak_rss = peak_disk = peak_wal = 0
+
+
+def summary():
+    return json.dumps({'samples': len(records), 'peakTreeWorkingSetBytes': peak_rss,
+        'peakFixtureLogicalDiskBytes': peak_disk, 'peakWalBytes': peak_wal,
+        'observedTreeCpuSeconds': sum(cpu_by_pid.values()), 'errors': errors})
+
+
+# Always leave a readable summary: a parent that fails before the first sample
+# must report its own failure instead of an unreadable evidence file.
+output.write_text(summary(), encoding='utf-8')
 while not stop.exists() and psutil.pid_exists(pid):
     rss = disk = wal = 0
     try:
@@ -45,8 +56,7 @@ while not stop.exists() and psutil.pid_exists(pid):
                         'observedTreeCpuSeconds': sum(cpu_by_pid.values())})
     except Exception as error:
         errors.append(repr(error))
-    output.write_text(json.dumps({'samples': len(records), 'peakTreeWorkingSetBytes': peak_rss,
-        'peakFixtureLogicalDiskBytes': peak_disk, 'peakWalBytes': peak_wal,
-        'observedTreeCpuSeconds': sum(cpu_by_pid.values()), 'errors': errors}), encoding='utf-8')
+    output.write_text(summary(), encoding='utf-8')
     time.sleep(.25)
+output.write_text(summary(), encoding='utf-8')
 output.with_suffix('.samples.json').write_text(json.dumps(records), encoding='utf-8')
