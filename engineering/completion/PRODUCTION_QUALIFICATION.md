@@ -35,8 +35,9 @@ every capability that is claimed*, not *release-qualified*.
 | 12 | Release chain | `node scripts/release-gate.js` | **FAIL CLOSED** `UNSIGNED_BUILD` (exit 1) — B003 |
 | 13 | Browser Studio E2E | `python scripts/browser-smoke.py` (real Chrome, `dist`) | PASS — 3 consecutive full runs: 6 routes, 25 000-row explicit seven-stage run, WebMCP tool surface, 0 runtime exceptions, 0 failed network loads |
 | 14 | Backup/restore drill | `node scripts/drill-backup-restore.js` | PASS — 12 checks, restore parity, tampered backup rejected |
-| 15 | Deployment render | `node scripts/check-deployment.js` (helm 3.16.4) | PASS — lint clean, 8 objects, fail-closed paths proven for missing release commit and `replicaCount > 1` |
-| 16 | Capability matrix | `tests/capability-matrix.test.js` + pinned digest | PASS — 6/6, policy pin `4915ac01…` |
+| 15 | Image build | `docker build` (engine 29.8.2) | **NOT EXECUTED** — daemon came up after a restart, served `docker images`/`system df`, then died mid `docker build --check`; host drive has 1.28 GB free vs a 34.15 GB Docker data vhdx, B005 |
+| 16 | Deployment render | `node scripts/check-deployment.js` (helm 3.16.4) | PASS — lint clean, 8 objects, fail-closed paths proven for missing release commit and `replicaCount > 1` |
+| 17 | Capability matrix | `tests/capability-matrix.test.js` + pinned digest | PASS — 6/6, policy pin `4915ac01…` |
 
 Scope note for gate 5: the only `src/` change between the qualified commit
 `30565b1` and `06df51a` is the new `src/platform/sqlite-backup.js`, which is not
@@ -52,7 +53,7 @@ but it is stated with that scope rather than as a re-run on the final SHA.
 | B002 | PostgreSQL / MySQL / SQL Server connectors | Live database endpoints with credentials (CDC/repair/cutover/soak) | REAL_PROVIDER_NOT_QUALIFIED |
 | B003 | Signed release provenance | Authorized `SPOOL_RELEASE_PRIVATE_KEY` + enrolled public key | UNSIGNED_BUILD |
 | B004 | Independent security audit | Third-party audit engagement | NOT_AUDITED |
-| B005 | Container image | Working Docker engine (`docker version` cannot start here) | IMAGE_NOT_BUILT |
+| B005 | Container image | Stable Docker engine + host disk headroom (client 29.8.2 present; daemon starts then dies mid-build; 1.28 GB free on the drive holding the 34.15 GB Docker data vhdx) | IMAGE_NOT_BUILT |
 | B006 | Cluster deployment | Reachable Kubernetes API server + helm on PATH | NOT_DEPLOYED |
 | B007 | Dependency advisory | Upstream `@azure/identity` release depending on `@azure/msal-node >= 7.1.0` | SECURITY_AUDIT_BLOCKED |
 

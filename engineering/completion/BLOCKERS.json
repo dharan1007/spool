@@ -35,8 +35,8 @@
       "id": "B005",
       "domain": "container-image-build",
       "type": "EXTERNALLY_BLOCKED",
-      "missingResource": "A working Docker engine — `docker version` in this environment returns 'Docker Desktop is unable to start', so the image cannot be built, scanned or run here",
-      "evidenceWithoutResource": "Dockerfile, .dockerignore and helm/spool render-verified with helm 3.16.4 (checksum-verified download), scripts/check-deployment.js PASS with 8 objects and both fail-closed paths",
+      "missingResource": "A stable Docker engine plus host disk headroom. The client (29.8.2) is installed and `docker desktop stop/start` did bring the daemon up (server 29.8.2) long enough to list 38 images, report `docker system df` and begin `docker build --check` (which pulled docker/dockerfile:1), but the daemon then failed again mid-build with 'Docker Desktop is unable to start'. The Docker data vhdx is 34.15 GB on C:, which has 1.28 GB free, so an image build would also risk exhausting the host system drive.",
+      "evidenceWithoutResource": "Dockerfile, .dockerignore and helm/spool render-verified with helm 3.16.4 (checksum-verified download), scripts/check-deployment.js PASS with 8 objects and both fail-closed paths. Dockerfile lint via the real builder was attempted: `docker build --check .` loaded the build definition and pulled docker/dockerfile:1 successfully before the daemon died, so the file is parseable by BuildKit but no image was produced.",
       "notPassedLabel": "IMAGE_NOT_BUILT"
     },
     {
@@ -44,7 +44,7 @@
       "domain": "cluster-deployment",
       "type": "EXTERNALLY_BLOCKED",
       "missingResource": "A reachable Kubernetes cluster (kubectl 1.36.1 is installed but no API server) and a helm binary on PATH for repeat runs (this run used a checksum-verified helm 3.16.4 at a temporary path)",
-      "evidenceWithoutResource": "Chart lints and renders; rendered object properties are asserted by scripts/check-deployment.js and tests/deployment-manifests.test.js",
+    "evidenceWithoutResource": "Chart lints and renders; rendered object properties are asserted by scripts/check-deployment.js and tests/deployment-manifests.test.js. Docker Desktop was restarted during this session and its daemon came up briefly, but it died again mid-operation, so no cluster could be provisioned either (no kind/k3s/minikube installed).",
       "notPassedLabel": "NOT_DEPLOYED"
     },
     {

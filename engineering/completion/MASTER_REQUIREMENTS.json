@@ -153,7 +153,7 @@
       "id": "deployment-qualification",
       "requirement": "Production deployment qualification",
       "status": "EXTERNALLY_BLOCKED",
-      "verifiedResults": "Candidate qualification matrix produced (engineering/completion/PRODUCTION_QUALIFICATION.md): 16 gates executed, 14 PASS, 1 FAIL CLOSED (UNSIGNED_BUILD), 1 FAIL CLOSED (dependency audit). Chart renders with fail-closed guards; no image and no deployment exist to verify",
+      "verifiedResults": "Candidate qualification matrix produced (engineering/completion/PRODUCTION_QUALIFICATION.md): 17 gates executed, 14 PASS, 2 FAILED CLOSED (UNSIGNED_BUILD, dependency audit), 1 NOT EXECUTED (image build, B005). Chart renders with fail-closed guards; no image and no deployment exist to verify",
       "notes": "RELEASE NOT QUALIFIED. Blocked on container image build (B005, no working Docker engine), cluster apply (B006, no API server), signing material (B003), dependency advisory (B007), real providers (B001/B002) and independent audit (B004)."
     }
   ]
