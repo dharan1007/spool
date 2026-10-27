@@ -4,8 +4,8 @@
   "workingDirectory": "C:\\temp\\spool-console",
   "branch": "engineering/spool-enterprise-production-hardening",
   "baseCommit": "38370a6da3004202edd82bd5f2b9d6dca1f0f63d",
-  "remoteHeadAtRegisterTime": "7afd4bbbf3b994a5f00c4379162cc2c1a969e145 (verified via git ls-remote after push)",
-  "pushedCommitSha": "7afd4bbbf3b994a5f00c4379162cc2c1a969e145",
+  "remoteHeadAtRegisterTime": "PENDING_FINAL_BATCH (this register batch is committed and pushed after the last verification run; the exact SHA is verified with git ls-remote and recorded in the handover message)",
+  "pushedCommitSha": "PENDING_FINAL_BATCH",
   "environmentConstraints": {
     "systemDriveFreeBytes": "1427013632 (C: 1.33 GiB free; below the SQLite qualifier's mandatory 10 GiB preflight)",
     "qualificationVolume": "E: NTFS 424 GiB free — qualification fixtures and evidence must run with TEMP/TMP and SPOOL_QUALIFICATION_EVIDENCE_ROOT on E:",
@@ -21,18 +21,23 @@
     "Rewritten tests: api-v2 (4 tests), api-stress (layered honest benchmark), observability, scheduler, release-contract, production-connector-policy (EBUSY root-cause fix)"
   ],
   "verificationState": {
-    "apiV2": "4/4 TESTED",
+    "apiV2": "6/6 TESTED",
     "apiStress": "1/1 TESTED (layered benchmark; transport 572 rps, authenticated 771 rps, registry reads 11604 rps — labeled per layer)",
     "bigqueryAtomicRecovery": "5/5 TESTED",
-    "releaseContract": "5/5 TESTED (fail-closed unsigned gate + signed path proven via injectable gate)",
+    "releaseContract": "6/6 TESTED (fail-closed unsigned gate + signed path proven via injectable gate; benchmark evidence honours SPOOL_BENCHMARK_OUTPUT_DIR)",
     "productionConnectorPolicy": "8/8 TESTED (EBUSY root cause resolved)",
     "observability": "5/5 TESTED",
-    "scheduler": "6/6 TESTED",
-    "fullNpmTest": "582 total: 518 pass, 0 fail, 0 cancelled, 64 provider-gated skips, 0 todo (re-run after measurement-evidence fix)",
+    "scheduler": "6/6 TESTED + scheduler-distributed-lease 1/1",
+    "fullNpmTest": "595 total: 531 pass, 0 fail, 0 cancelled, 64 provider-gated skips, 0 todo (410.5s, run at 30565b1)",
     "measurementEvidence": "5/5 TESTED — readResourceSummary never throws; missing/malformed/zero-sample/error summaries all fail closed",
+    "sqliteSustainedQualification": "PASS at 30565b1 — 262599 assertions, 20 cases, 1379 resource samples, peak tree working set 350306304 B, peak fixture disk 1167401270 B, 0 measurement errors",
+    "backupRestore": "drill PASS (12 checks; registry 31 rows WAL, target 500 rows WAL, restore parity, tampered backup rejected) + tests/backup-restore.test.js 4/4",
+    "deploymentRender": "PASS — helm v3.16.4 lint clean, 8 objects, render sha256 d073f5bb…, fail-closed proven for missing release commit and replicaCount>1",
+    "daemonEntrypoint": "3/3 TESTED",
     "staticCheck": "PASS",
     "build": "PASS (65/65 self-tests, dist built)",
-    "npmRunCheck": "completed 2026-10-27: embedded FULL npm test 574/510 pass/0 fail/64 provider-gated skips/0 todo; check:model PASS; release-gate ran build-dist (65/65 self-tests), benchmarks, static-check, pre-sign verify-release-chain and reproducible-build-evidence (two independent builds, identical artifact root sha 3648daec483ebb34661dc2f9ca1edc87ebbdab4abdc34eee058e5719f6d125b9, reproducible=true, 130 artifacts, binding SHA 38370a6) then failed CLOSED with UNSIGNED_BUILD — the honest by-design terminal state without signing material (BLOCKERS B003); script exit code 1"
+    "npmRunCheck": "completed 2026-10-27 at commit 38370a6: embedded FULL npm test 574/510 pass/0 fail/64 provider-gated skips/0 todo; check:model PASS; release-gate ran build-dist (65/65 self-tests), benchmarks, static-check, pre-sign verify-release-chain and reproducible-build-evidence (two independent builds, identical artifact root sha 3648daec483ebb34661dc2f9ca1edc87ebbdab4abdc34eee058e5719f6d125b9, reproducible=true, 130 artifacts, binding SHA 38370a6) then failed CLOSED with UNSIGNED_BUILD — the honest by-design terminal state without signing material (BLOCKERS B003); script exit code 1",
+    "boundedReleaseQualification": "see REMAINING_TASKS T008 and TEST_RESULTS runs[scripts/qualify-bounded-release.js]"
   },
   "externalBlocks": "See BLOCKERS.json (BigQuery/PG/MySQL/MSSQL real-provider credentials, release signing keys, independent audit)",
   "remainingWork": "See REMAINING_TASKS.json T004-T016"

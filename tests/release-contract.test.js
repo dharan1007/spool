@@ -89,6 +89,15 @@ test('mandatory proof cannot be supplied by a status flag or evidence from a dif
   }
 });
 
+test('benchmark evidence honours the qualification output directory', async () => {
+  const stress = await readFile(new URL('../tests/api-stress.test.js', import.meta.url), 'utf8');
+  assert.match(stress, /process\.env\.SPOOL_BENCHMARK_OUTPUT_DIR \|\| join\(process\.cwd\(\), '\.console-evidence'\)/);
+  // The release runner exports SPOOL_BENCHMARK_OUTPUT_DIR, so a tracked-file
+  // rewrite during qualification would be reported as source drift.
+  const runner = await readFile(new URL('../scripts/qualify-bounded-release.js', import.meta.url), 'utf8');
+  assert.match(runner, /SPOOL_BENCHMARK_OUTPUT_DIR: join\(root\.evidence, 'benchmarks'\)/);
+});
+
 test('deployed release verifier checks actual artifact digests, not a commit-only success marker', async () => {
   const verifier = await readFile(new URL('../scripts/verify-deployed-release.js', import.meta.url), 'utf8');
   assert.match(verifier, /sha256/);

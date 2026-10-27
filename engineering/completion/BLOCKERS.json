@@ -30,6 +30,22 @@
       "type": "EXTERNALLY_BLOCKED",
       "missingResource": "Independent third-party security audit engagement",
       "notPassedLabel": "NOT_AUDITED"
+    },
+    {
+      "id": "B005",
+      "domain": "container-image-build",
+      "type": "EXTERNALLY_BLOCKED",
+      "missingResource": "A working Docker engine — `docker version` in this environment returns 'Docker Desktop is unable to start', so the image cannot be built, scanned or run here",
+      "evidenceWithoutResource": "Dockerfile, .dockerignore and helm/spool render-verified with helm 3.16.4 (checksum-verified download), scripts/check-deployment.js PASS with 8 objects and both fail-closed paths",
+      "notPassedLabel": "IMAGE_NOT_BUILT"
+    },
+    {
+      "id": "B006",
+      "domain": "cluster-deployment",
+      "type": "EXTERNALLY_BLOCKED",
+      "missingResource": "A reachable Kubernetes cluster (kubectl 1.36.1 is installed but no API server) and a helm binary on PATH for repeat runs (this run used a checksum-verified helm 3.16.4 at a temporary path)",
+      "evidenceWithoutResource": "Chart lints and renders; rendered object properties are asserted by scripts/check-deployment.js and tests/deployment-manifests.test.js",
+      "notPassedLabel": "NOT_DEPLOYED"
     }
   ],
   "resolvedThisSession": [
@@ -39,6 +55,13 @@
       "symptom": "EBUSY/EPERM unlink spool-policy-* state.db(-shm) teardown failure recurring in subtest 2",
       "rootCause": "Assertion drift masked by leaked handle: the 257MiB create was legal under the reviewed 10GiB ceiling, the failed a.rejects leaked the created service's open state DB handle, and the finally rm EBUSY replaced the real assertion error",
       "resolution": "Test aligned to the pinned policy bound; legal create explicitly closed; teardown uses fs.rm maxRetries; 8/8 across repeated runs"
+    },
+    {
+      "id": "R002",
+      "domain": "scripts/drill-backup-restore.js",
+      "symptom": "Drill reported EBUSY unlink of live/registry.db instead of its real failure",
+      "rootCause": "The cleanup block ran before handles were closed, so the Windows EBUSY from an open registry replaced the genuine assertion error (the workspace directory had not been created)",
+      "resolution": "Handles are tracked and closed in the finally before cleanup, the workspace directory is created up front, and the drill now reports real failures; 12 checks pass"
     }
   ]
 }

@@ -10,7 +10,7 @@
       "requirement": "Enterprise REST API v2 with multi-tenant registry (orgs/workspaces/memberships/api-keys), RBAC, workspace isolation, audit activity, and a full migration lifecycle bound to the real SpoolCommandService engine",
       "implementation": ["src/enterprise/registry.js", "src/enterprise/orchestrator.js", "src/daemon/spoold-v2.js"],
       "tests": ["tests/api-v2.test.js", "tests/api-stress.test.js"],
-      "verifiedResults": "api-v2 4/4 pass (transport hardening; full real-engine lifecycle with verified SQLite target rows and idempotent replay; revocation/source-mutation/contract-drift hardening; registry isolation), api-stress 1/1 pass (layered benchmark)",
+      "verifiedResults": "api-v2 6/6 pass (transport hardening; full real-engine lifecycle with verified SQLite target rows and idempotent replay; revocation/source-mutation/contract-drift hardening; registry isolation; per-principal rate limiting), api-stress 1/1 pass (layered benchmark), daemon entrypoint 3/3",
       "status": "TESTED",
       "notes": "Fail-closed semantics: cross-workspace existence collapsed to MIGRATION_NOT_FOUND; key issuance provisions membership; replay only via real engine idempotent path"
     },
@@ -27,9 +27,9 @@
       "requirement": "Durable scheduler without insecure auto-approval/auto-execution; lease-based scheduling",
       "implementation": ["src/daemon/scheduler.js"],
       "tests": ["tests/scheduler.test.js"],
-      "verifiedResults": "6/6 pass (scheduleInterval insecure path removed; scheduleWithLease stages only)",
+      "verifiedResults": "6/6 pass (scheduleInterval insecure path removed; scheduleWithLease stages only), scheduler-distributed-lease 1/1 (durable lease respected across a second scheduler instance; expiry and fencing enforced)",
       "status": "TESTED",
-      "notes": "Distributed multi-process scheduling audit remains open (see REMAINING_TASKS)"
+      "notes": "Proven for processes on one host sharing the target database lease table; no multi-node cluster has been deployed (BLOCKERS B006)"
     },
     {
       "id": "release-gate",
@@ -67,25 +67,33 @@
       "requirement": "Full npm test suite green with exact reconciled counts (total/passed/failed/skipped/cancelled/todo)",
       "implementation": [],
       "tests": ["package.json scripts.test"],
-      "verifiedResults": "574 tests: 510 pass, 0 fail, 64 provider-gated skips (live-provider conformance, honestly skipped), 0 cancelled, 0 todo — reconciliation exact",
+      "verifiedResults": "595 tests: 531 pass, 0 fail, 64 provider-gated skips (live-provider conformance, honestly skipped), 0 cancelled, 0 todo — reconciliation exact",
       "status": "TESTED"
     },
     {
       "id": "desktop-onboarding",
       "requirement": "Desktop first-run onboarding and installed-application qualification",
-      "status": "NOT_STARTED",
-      "notes": "Tracked in REMAINING_TASKS"
+      "tests": ["apps/console/tests/onboarding.test.js"],
+      "verifiedResults": "onboarding component gated on settings.onboardingComplete; console suite 10/10; typecheck clean; build:renderer OK; package:dir produced win-unpacked",
+      "status": "TESTED",
+      "notes": "The packaged directory build is verified; no code-signed installer is produced (signing material absent, BLOCKERS B003)"
     },
     {
       "id": "browser-studio-security-e2e",
       "requirement": "Browser Studio security and end-to-end tests",
-      "status": "NOT_STARTED"
+      "tests": ["scripts/browser-smoke.py"],
+      "verifiedResults": "real Chrome smoke against a built dist: all 6 routes, 25000 rows (24955 valid / 45 invalid), WebMCP tools present, 0 runtime exceptions, 0 failed network loads",
+      "status": "TESTED",
+      "notes": "Local Chrome only; no hosted deployment exists to test (see deployment-qualification)"
     },
     {
       "id": "distributed-scheduling-workers",
       "requirement": "Durable, distributed scheduling and worker execution beyond single-process",
-      "status": "PARTIAL",
-      "notes": "Lease-based staging verified single-process; multi-process/restart audit open"
+      "implementation": ["src/daemon/scheduler.js", "src/execution/lease-store.js"],
+      "tests": ["tests/scheduler.test.js", "tests/scheduler-distributed-lease.test.js"],
+      "verifiedResults": "lease-based staging verified across two scheduler instances on one host: current lease respected, expiry honoured, fencing token enforced; staging only, no auto-approve",
+      "status": "TESTED",
+      "notes": "Single-host process isolation proven. Multi-node deployment is not qualified: no cluster (BLOCKERS B006) and the registry/state volume is single-writer (deploy/kubernetes/README.md)"
     },
     {
       "id": "connector-conformance-cdc-cutover",
@@ -101,7 +109,11 @@
     {
       "id": "containers",
       "requirement": "Docker images, Kubernetes and Helm packaging",
-      "status": "NOT_STARTED"
+      "implementation": ["Dockerfile", ".dockerignore", "src/daemon/spoold-v2-main.js", "helm/spool", "deploy/kubernetes/README.md"],
+      "tests": ["tests/deployment-manifests.test.js", "scripts/check-deployment.js"],
+      "verifiedResults": "Helm chart lints and renders with checksum-verified helm 3.16.4; 8 objects; fail-closed for missing release commit and replicaCount>1; proxy-only listener rewriting Host to 127.0.0.1:8080; hardened pod security; NetworkPolicy; entrypoint 3/3; static invariants 5/5",
+      "status": "PARTIAL",
+      "notes": "Image build/run and cluster apply are EXTERNALLY_BLOCKED (no usable Docker engine B005, no cluster B006). No image is claimed as built."
     },
     {
       "id": "benchmarks-performance",
@@ -112,14 +124,19 @@
     {
       "id": "backup-dr",
       "requirement": "Backup and disaster recovery",
-      "status": "PARTIAL",
-      "notes": "Recovery checkpoints and BigQuery atomic recovery tests exist; full DR runbook/drill open"
+      "implementation": ["src/platform/sqlite-backup.js", "scripts/drill-backup-restore.js"],
+      "tests": ["tests/backup-restore.test.js"],
+      "verifiedResults": "drill PASS (12 checks): online backup of open WAL registry and target, restore into a fresh root with workspace/membership/API-key/migration/activity/row parity, tampered backup rejected; 4/4 tests",
+      "status": "TESTED",
+      "notes": "Software-level drill on one host. Off-host storage, encryption of backups, point-in-time recovery and restore onto other hardware are NOT covered (docs/BACKUP_AND_RESTORE.md)."
     },
     {
       "id": "threat-model-security",
       "requirement": "Threat model maintenance and security remediation",
-      "status": "PARTIAL",
-      "notes": "docs/THREAT_MODEL.md exists; enterprise API additions need review"
+      "implementation": ["docs/THREAT_MODEL.md"],
+      "verifiedResults": "Enterprise registry/API boundary added with assets, controls and explicit residual risks (per-process rate limits, no API key TTL, plain HTTP behind a TLS terminator, non-WORM journal)",
+      "status": "TESTED",
+      "notes": "Self-assessed against tests and code, NOT an independent audit (BLOCKERS B004)"
     },
     {
       "id": "release-integrity-signing",

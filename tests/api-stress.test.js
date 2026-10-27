@@ -165,8 +165,12 @@ test('REST API v2 layered benchmark: transport probes, authenticated API and rea
     timestamp: new Date().toISOString(),
     benchmarks: [transport, authenticated, registryReads]
   };
+  // Release qualification runs this suite against a clean tracked tree; honour
+  // its external evidence directory instead of rewriting a committed file.
+  const resultsDir = process.env.SPOOL_BENCHMARK_OUTPUT_DIR || join(process.cwd(), '.console-evidence');
+  await mkdir(resultsDir, { recursive: true });
   await writeFile(
-    join(process.cwd(), '.console-evidence', 'api-stress-results.json'),
+    join(resultsDir, 'api-stress-results.json'),
     JSON.stringify(evidence, null, 2) + '\n',
     'utf8'
   );
