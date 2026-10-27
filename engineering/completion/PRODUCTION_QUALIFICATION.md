@@ -2,12 +2,14 @@
 
 Candidate: branch `engineering/spool-enterprise-production-hardening` (PR #99),
 package version `1.1.2`. Every verification run in this update was executed on
-code commit `d2c1b945725ae934115840c2faa2f23a9d363ac5`, and the container image
-was built from exactly that tree. The commit that carries this file additionally
-contains register/documentation updates, regenerated API-layer benchmark output,
-and one change confined to a provider-gated MySQL conformance test (its 7 tests
-are skipped in the full-suite configuration, so no executed test path differs).
-The tested code commit is the one named above.
+code commit `d2c1b945725ae934115840c2faa2f23a9d363ac5`, the container image was
+built from exactly that tree, and the pushed head
+`e855353c50bb8cc37f615098fdee8822a493587f` re-ran the full gate chain
+(`npm run check`) with no `src/`, `capabilities/`, `package*.json` or `Dockerfile`
+difference from it. The commit that carries this file additionally contains
+register/documentation updates, regenerated API-layer benchmark output, and one
+change confined to a provider-gated MySQL conformance test (its 7 tests are
+skipped in the full-suite configuration, so no executed test path differs).
 
 ## Verdict
 
@@ -31,7 +33,7 @@ Remaining blockers, each with the exact missing resource:
 | Blocker | Domain | Missing resource | Honest label |
 | --- | --- | --- | --- |
 | B001 | BigQuery real provider | GCP service-account JSON authorized for a BigQuery test project | `REAL_PROVIDER_NOT_QUALIFIED` |
-| B002a | SQL Server live provider | Host capacity: the SQL Server 2022 image is 0.63 GB compressed / ≈1.6 GB extracted and needs a writable data volume, against **1.37 GB free on C:** holding a 34 GB Docker data disk that cannot be compacted without elevation (see "Host capacity") | `REAL_PROVIDER_NOT_QUALIFIED` (capacity, not product) |
+| B002a | SQL Server live provider | Host capacity, measured: SQL Server 2022 is 0.63 GB compressed / ≈1.6 GB extracted plus a data volume, against **1.12 GB free on C:** and a 34.90 GB Docker data disk that is effectively full (only <0.6 GB SPOOL-owned reclaimable after pruning our own cache; the rest belongs to other projects) and cannot be compacted without elevation (see "Host capacity") | `REAL_PROVIDER_NOT_QUALIFIED` (capacity, not product) |
 | B003 | Signed release provenance | Authorized `SPOOL_RELEASE_PRIVATE_KEY` + enrolled public key | `UNSIGNED_BUILD` |
 | B004 | Independent security audit | Third-party audit engagement | `NOT_AUDITED` |
 | B006 | Cluster deployment | A Kubernetes cluster. Docker Desktop's own cluster is `disabled`; enabling it downloads control-plane images (`kindest/node` alone is 0.38 GB compressed) into the same full C: drive, so it was not attempted | `NOT_DEPLOYED` |
@@ -49,16 +51,16 @@ audit) or host capacity that cannot be provisioned safely on this machine.
 | 3 | Full suite | `node --test --test-reporter=tap --test-concurrency=1 tests/*.test.js tests/conformance/*.test.js` | **PASS** — 597 tests, 533 pass, 0 fail, 64 provider-gated skips, 0 todo, 0 cancelled (690 s). Log: `E:\temp\spool-qual\full-suite-d2c1b94.log` |
 | 4 | Required SQLite suite | `node --test --test-concurrency=1 tests/sqlite-target …` | PASS — 30/30 at `06df51a` |
 | 5 | SQLite production qualifier | `node scripts/qualify-sqlite-production.js` | PASS at `30565b1` — 20 cases, 262 599 assertions, 1 379 resource samples, 0 measurement errors |
-| 6 | Build | `npm run build` | PASS — dist artifact root `bf9cbbf6…`, commit-bound |
-| 7 | Reproducible build | release gate (two independent builds) | PASS — identical artifact root `bf9cbbf6404297b33134a838fd9419f6b6c559b94ddf1e28ff5e556b44fefae4`, 133 artifacts |
-| 8 | Benchmark | `npm run benchmark` | PASS — evidence in `benchmarks/latest.json` and `docs/BENCHMARKS.md` |
+| 6 | Build | `npm run build` (inside `npm run check` at `e855353`) | **PASS** — dist artifact root `df77ec64…`, 133 artifacts, commit bound to `e855353c50bb8cc37f615098fdee8822a493587f` |
+| 7 | Reproducible build | release gate (two independent builds at `e855353`) | **PASS** — both builds `df77ec64ff822f29dbc97dc82c1973210babdc47b561de1281ea2b36ae5f25cd`, 133 artifacts, `reproducible: true`, node v22.23.2, package-lock `f0589f22…` |
+| 8 | Benchmark | `npm run benchmark` (inside `npm run check`) | **PASS** — evidence written to `E:\temp\spool-qual\bench-check\results\SPOOL-Bench\2026-10-27T14-19-58-819Z` (`SPOOL_BENCHMARK_OUTPUT_DIR`, so the in-repo copies were not rewritten and the tree stayed clean) |
 | 9 | Static release check | `node scripts/static-check.js` | PASS — 21 required artifacts, stable SQLite runtime, no source-network primitives |
-| 10 | Model check | `node scripts/check-svmp-model.js` | PASS — counterexample detection |
-| 11 | Package verification | `npm run pack:verify` | PASS — installed-package run reproduces the qualified behaviour |
-| 12 | Release chain | `node scripts/release-gate.js` | **FAIL CLOSED** `UNSIGNED_BUILD` (exit 1) — B003 |
+| 10 | Model check | `node scripts/check-svmp-model.js` (inside `npm run check` at `e855353`) | **PASS** — exhaustive SVMP exploration plus intentional-unsafe and stale-writer counterexamples (tests 532–536 in the same run) |
+| 11 | Package verification | `npm run pack:verify` | PASS at `06df51a` — installed-package run reproduces the qualified behaviour |
+| 12 | Release chain | `node scripts/release-gate.js` (inside `npm run check` at `e855353`) | **FAIL CLOSED** `UNSIGNED_BUILD` (exit 1) after binding SHA and both reproducible builds — B003 |
 | 13 | Browser Studio E2E | `python scripts/browser-smoke.py` (real Chrome, `dist`) | PASS — 3 consecutive full runs: 6 routes, 25 000-row seven-stage run, WebMCP surface, 0 runtime exceptions, 0 failed network loads |
 | 14 | Backup/restore drill | `node scripts/drill-backup-restore.js` | PASS — 12 checks, restore parity, tampered backup rejected |
-| 15 | Container image build | `docker build -t spool-daemon:d2c1b94 .` (engine 29.8.2) | **PASS** — exit 0, image `sha256:5a7c62073ca9d0cfe5b8f72c70cddd472034b2ce3eaaa0568cd0804f0863b9ea`, 532 642 879 B, `User=node`, entrypoint `node src/daemon/spoold-v2-main.js`, HEALTHCHECK present. Log: `E:\temp\spool-qual\docker-build-d2c1b94.log` |
+| 15 | Container image build | `docker build -t spool-daemon:d2c1b94 .` (engine 29.8.2) | **PASS** — exit 0, image `sha256:5a7c62073ca9d0cfe5b8f72c70cddd472034b2ce3eaaa0568cd0804f0863b9ea`, 532 642 879 B, `User=node`, entrypoint `node src/daemon/spoold-v2-main.js`, HEALTHCHECK present. Log: `E:\temp\spool-qual\docker-build-d2c1b94.log`. `git diff d2c1b94..e855353` touches no `src/`, `capabilities/`, `package*.json` or `Dockerfile` file, so this image is still the candidate's executable content |
 | 16 | Container runtime acceptance | `docker exec -u node … node /tmp/qualify-container.js` (`scripts/qualify-container.js`) | **PASS** — 20 checks: `/v2/health` 200, `/v2/ready` 200, Prometheus metrics, unauthenticated 401, foreign-Host 421, invalid JSON 400, organization/workspace/API-key provisioning, migration create, execute-before-approval 422, plan, dry-run 5/5 rows, approve, execute `COMPLETE`, plan-bound receipt, verification, 5 durable target rows with exact values. Evidence: `E:\temp\spool-qual\container-acceptance-d2c1b94.json` |
 | 17 | Container restart persistence | `docker restart` then re-query | **PASS** — migration still `COMPLETE` (200), 5 rows still readable after restart; volume-backed state |
 | 18 | Loopback-only binding | `docker exec … fetch(http://<eth0>:8080/v2/health)` and `/proc/net/tcp` | **PASS** — `ECONNREFUSED` on the non-loopback interface; the only listener is `0100007F:1F90` (127.0.0.1:8080) |
@@ -69,14 +71,17 @@ audit) or host capacity that cannot be provisioned safely on this machine.
 | 23 | Deployment render | `node scripts/check-deployment.js` (helm 3.16.4) | PASS — lint clean, 8 objects, fail-closed paths proven for missing release commit and `replicaCount > 1` |
 | 24 | Capability matrix | `tests/capability-matrix.test.js` + pinned digest | PASS — 6/6, policy pin `4915ac01…` |
 
-Scope note for gates 4–8 and 13–14: those runs belong to the earlier candidate
-`06df51a` (SQLite qualifier at `30565b1`); the sources they exercise are
-byte-identical to the current candidate except for the two connector fixes and
-the new root-only organization route, neither of which is on the SQLite
-migration path or the browser surface. They are labelled with their commit
-rather than presented as re-runs on `d2c1b94`. The gates that exercise changed
-code (full suite, container acceptance, PostgreSQL, MySQL) were re-run on
-`d2c1b94`.
+Scope of the commit labels: gates 3, 6, 7, 8, 10, 12 and 21–22 were executed on
+the code commit (`d2c1b94`) or on the pushed evidence head (`e855353`), where the
+only difference from `d2c1b94` is docs/registers, regenerated API-layer benchmark
+output and a provider-gated test file. Gates 4, 5, 11, 13 and 14 were executed
+on the earlier candidate `06df51a` (SQLite qualifier at `30565b1`) and are
+labelled with that commit rather than presented as re-runs: they exercise the
+SQLite target path, the browser surface, packaging and backup/restore, none of
+which the post-`06df51a` changes touch (two connector fixes and the root-only
+organization route). `npm run check` at `e855353` re-ran the full suite, build,
+benchmark, static check, model check and both reproducible builds, and ended in
+the designed `UNSIGNED_BUILD` failure.
 
 ## Defects found and fixed by live qualification
 
@@ -168,9 +173,12 @@ external-material blockers.
 
 ```powershell
 npm ci --ignore-scripts
+npm run check                # full suite + model + build + benchmark + static + reproducible build,
+                             # then fails closed UNSIGNED_BUILD without signing keys (exit 1)
+# or step by step:
 npm test                     # 597 tests, 533 pass, 0 fail, 64 provider-gated skips
 node scripts/static-check.js
-npm run build
+npm run build                # artifact root df77ec64… for e855353, 133 artifacts
 npm run benchmark
 npm run pack:verify
 node scripts/release-gate.js # fails closed UNSIGNED_BUILD without keys

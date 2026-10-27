@@ -7,8 +7,15 @@
 ## Current candidate
 
 - Code commit verified by this batch: `d2c1b945725ae934115840c2faa2f23a9d363ac5`
+- Pushed head that re-ran the full gate chain (`npm run check`):
+  `e855353c50bb8cc37f615098fdee8822a493587f` (no `src/`, `capabilities/`,
+  `package*.json` or `Dockerfile` difference from `d2c1b94`)
 - Container image built from that exact tree: `spool-daemon:d2c1b94`,
   `sha256:5a7c62073ca9d0cfe5b8f72c70cddd472034b2ce3eaaa0568cd0804f0863b9ea`
+- `npm run check` at `e855353`: 597 tests / 533 pass / 0 fail / 64 provider-gated
+  skips; model check PASS; build + reproducible build `df77ec64…` (133
+  artifacts, `reproducible: true`); static check PASS; then **`UNSIGNED_BUILD`**
+  (exit 1, by design). Log: `E:\temp\spool-qual\npm-check-e855353.log`.
 - Verdict: **NO-GO / EXTERNALLY BLOCKED** — only external material or host
   capacity remains (see `PRODUCTION_QUALIFICATION.md` and `BLOCKERS.json`).
 
@@ -55,12 +62,10 @@
 cd C:\temp\spool-console
 npm ci --ignore-scripts          # only if node_modules missing
 $env:TEMP='E:\temp\spool-qual'; $env:TMP='E:\temp\spool-qual'
-node --test --test-reporter=tap --test-concurrency=1 tests/*.test.js tests/conformance/*.test.js
-node scripts/static-check.js
-npm run build
-npm run benchmark
-npm run pack:verify
-node scripts/release-gate.js     # ends UNSIGNED_BUILD (fail-closed) without keys
+$env:SPOOL_BENCHMARK_OUTPUT_DIR='E:\temp\spool-qual\bench-check'
+npm run check                    # last verified at e855353: 597/533/0/64sk/0, model PASS,
+                                 # build+reproducible df77ec64… (133 artifacts), static PASS,
+                                 # ends UNSIGNED_BUILD (exit 1) - that is the honest outcome
 ```
 
 Live provider runs (containers `spool-pg`, `spool-mysql`, local CA at
@@ -91,7 +96,7 @@ docker exec -u node spool-daemon-test node /tmp/qualify-container.js
 | Blocker | Missing | Label |
 | --- | --- | --- |
 | B001 | GCP service-account JSON for a BigQuery test project | `REAL_PROVIDER_NOT_QUALIFIED` |
-| B002 | Host capacity for SQL Server 2022 (0.63 GB compressed / ≈1.6 GB extracted vs **1.37 GB free on C:**; 34.15 GB docker disk not compactable without elevation) | `REAL_PROVIDER_NOT_QUALIFIED` |
+| B002 | Host capacity for SQL Server 2022 (0.63 GB compressed / about 1.6 GB extracted vs **1.12 GB free on C:**; 34.90 GB docker disk effectively full, not compactable without elevation) | `REAL_PROVIDER_NOT_QUALIFIED` |
 | B003 | Authorized release signing key | `UNSIGNED_BUILD` |
 | B004 | Independent third-party audit | `NOT_AUDITED` |
 | B006 | A Kubernetes cluster (Docker Desktop k8s disabled; enabling pulls control-plane images into the full C:) | `NOT_DEPLOYED` |
