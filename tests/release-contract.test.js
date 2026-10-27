@@ -2,6 +2,58 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { qualificationPlan, validateBoundEvidence } from '../scripts/qualify-bounded-release.js';
+import { releaseGate } from '../src/release/gate.js';
+
+test('release gate fails closed when no signing evidence is configured', () => {
+  const steps = [];
+  const output = [];
+  let thrown = null;
+  try {
+    // Qualification steps are stubbed by the injected runner; the UNSIGNED
+    // decision itself is the behavior under test and stays real.
+    releaseGate(
+      { SPOOL_COMMIT_SHA: 'a'.repeat(40) },
+      { stepRunner: (script, env) => steps.push([script, env.SPOOL_PARITY_EVIDENCE ?? null]), write: line => output.push(line) }
+    );
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown, 'gate must throw without signing evidence');
+  assert.equal(thrown.code, 'UNSIGNED_BUILD');
+  // All qualification steps still ran in order before the fail-closed decision...
+  assert.deepEqual(steps.map(([script]) => script), [
+    'scripts/build-dist.js',
+    'benchmarks/run.js',
+    'scripts/static-check.js',
+    'scripts/verify-release-chain.js',
+    'scripts/reproducible-build-evidence.js'
+  ]);
+  // ...and NO signing step may exist without signing material.
+  assert.ok(!output.some(line => line.includes('SIGNED_RELEASE_VERIFIED')));
+});
+
+test('release gate verifies signed evidence when signing keys are configured', () => {
+  const steps = [];
+  const output = [];
+  releaseGate(
+    { SPOOL_COMMIT_SHA: 'b'.repeat(40), SPOOL_RELEASE_PRIVATE_KEY: 'x'.repeat(64) },
+    { stepRunner: (script, env) => steps.push([script, env.SPOOL_PARITY_EVIDENCE ?? null]), write: line => output.push(line) }
+  );
+  const scripts = steps.map(([script]) => script);
+  assert.deepEqual(scripts, [
+    'scripts/build-dist.js',
+    'benchmarks/run.js',
+    'scripts/static-check.js',
+    'scripts/verify-release-chain.js',
+    'scripts/reproducible-build-evidence.js',
+    'scripts/sign-release.js',
+    'scripts/verify-release-chain.js'
+  ]);
+  // The signed parity evidence env is wired into both verification passes.
+  assert.equal(steps[3][1], '', 'pre-sign verification runs without parity evidence');
+  assert.ok(steps[5][1] && steps[6][1] === steps[5][1], 'sign and verify passes share exact parity evidence');
+  assert.ok(output.some(line => line.includes('SIGNED_RELEASE_VERIFIED')));
+});
 
 test('release contracts require local qualification and security documentation without GitHub Actions', async () => {
   const artifacts = [
