@@ -1,51 +1,51 @@
 # SPOOL Benchmarks
 
-Generated: 2026-10-27T07:56:24.150Z
+Generated: 2026-10-27T12:00:04.691Z
 Suite: SPOOL-Bench v1
 
 ## Deterministic migration engine
 
 | Rows | CSV parse | Transform + target validation | Rows/sec | Valid | Invalid |
 |---:|---:|---:|---:|---:|---:|
-| 1,000 | 19.62 ms | 37.99 ms | 26,325 | 999 | 1 |
-| 10,000 | 85.79 ms | 239.61 ms | 41,735 | 9,982 | 18 |
-| 50,000 | 197.62 ms | 1056.58 ms | 47,322 | 49,910 | 90 |
+| 1,000 | 16.11 ms | 38.39 ms | 26,050 | 999 | 1 |
+| 10,000 | 68.41 ms | 229.64 ms | 43,547 | 9,982 | 18 |
+| 50,000 | 193.86 ms | 1065.33 ms | 46,934 | 49,910 | 90 |
 
 ## Content verification (exact row-hash projection)
 
 | Rows | Verify | Rows/sec |
 |---:|---:|---:|
-| 1,000 | 343.99 ms | 2,907 |
-| 10,000 | 2341.79 ms | 4,270 |
+| 1,000 | 319.24 ms | 3,132 |
+| 10,000 | 1989.58 ms | 5,026 |
 
 ## Merkle trees (root + inclusion proof + verify)
 
 | Leaves | Root/prove/verify | Leaves/sec |
 |---:|---:|---:|
-| 1,000 | 54.06 ms | 18,498 |
-| 10,000 | 589.07 ms | 16,976 |
+| 1,000 | 53.38 ms | 18,733 |
+| 10,000 | 507.86 ms | 19,690 |
 
 ## Repair plans (DIFF evidence to hash-bound operations)
 
 | Missing rows | Operations | Plan build |
 |---:|---:|---:|
-| 10 | 10 | 10.78 ms |
-| 100 | 100 | 17.59 ms |
+| 10 | 10 | 8.75 ms |
+| 100 | 100 | 23.46 ms |
 
 ## SQLite end-to-end (fenced ledger-backed batches)
 
 | Rows | Write | Rows/sec |
 |---:|---:|---:|
-| 1,000 | 34.72 ms | 28,803 |
-| 10,000 | 263.12 ms | 38,005 |
+| 1,000 | 188.13 ms | 5,315 |
+| 10,000 | 1409.21 ms | 7,096 |
 
 ## Release integrity (signed envelope + canonical evidence)
 
 | Operation | Ops/sec |
 |---:|---:|
-| Signed envelope creation | 3,848 |
-| Signed envelope verification | 3,288 |
-| Canonical evidence list hashing | 1,37,928 |
+| Signed envelope creation | 3,968 |
+| Signed envelope verification | 3,338 |
+| Canonical evidence list hashing | 1,59,563 |
 
 ## Temporal WebMCP surface
 

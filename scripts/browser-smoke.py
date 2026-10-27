@@ -258,10 +258,12 @@ def main():
 
         cdp.call('Page.navigate', {'url': base_url + '/studio/inspect'})
         wait_for(lambda: cdp.eval('document.querySelector("[data-spool-flow-root]") !== null'), label='inspect page')
-        assert cdp.eval('document.body.innerText.includes("Inspect what is actually inside the dataset")')
+        wait_for(lambda: cdp.eval('document.body.innerText.includes("Inspect what is actually inside the dataset")'), label='inspect page copy')
         cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/understand\\\"]").click()')
         wait_for(lambda: cdp.eval('location.pathname === "/studio/understand"'), label='understand page')
-        assert cdp.eval('document.body.innerText.includes("Understand columns, formats and problematic values")')
+        # Route content renders after the pathname changes; a bare assert here
+        # was 1-in-2 flaky. The wait still fails if the copy never appears.
+        wait_for(lambda: cdp.eval('document.body.innerText.includes("Understand columns, formats and problematic values")'), label='understand page copy')
         cdp.eval('document.querySelector("[data-flow-route=\\\"/studio/transform\\\"]").click()')
         wait_for(lambda: cdp.eval('location.pathname === "/studio/transform"'), label='transform page')
         wait_for(lambda: cdp.eval('document.querySelector("[data-flow-action=\\\"approve-plan\\\"]") !== null'), label='approve transformation action')

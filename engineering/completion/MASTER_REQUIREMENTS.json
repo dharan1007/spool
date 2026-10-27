@@ -98,13 +98,17 @@
     {
       "id": "connector-conformance-cdc-cutover",
       "requirement": "Database connector conformance, exact verification, CDC, repair and cutover where required",
-      "status": "PARTIAL",
-      "notes": "SQLite/BigQuery canonical paths tested; real-provider CDC/cutover qualification externally blocked"
+      "status": "EXTERNALLY_BLOCKED",
+      "verifiedResults": "SQLite target path qualified end to end (20 cases, 262599 assertions); BigQuery atomic/recovery semantics proven against the local contract (5/5); 64 live-provider conformance tests exist and are skipped only because endpoints/credentials are absent",
+      "notes": "Real PostgreSQL/MySQL/SQL Server CDC, repair, cutover and soak qualification needs live endpoints and credentials (BLOCKERS B002); BigQuery needs GCP service-account credentials (B001). Never report these as qualified."
     },
     {
       "id": "cicd",
       "requirement": "CI/CD pipeline provisioning and green runs",
-      "status": "NOT_STARTED"
+      "status": "EXTERNALLY_BLOCKED",
+      "implementation": ["scripts/qualify-bounded-release.js", "scripts/release-gate.js", "scripts/verify-deployment.js"],
+      "verifiedResults": "Local-first runbook executed at 6bedad3: npm ci PASS, then npm audit --omit=dev --audit-level=high failed closed (2 high, GHSA-xcx6-jx8p-x3h5) and the runbook stopped with status BLOCKED. Every earlier step of the same runbook was executed and passed separately at 06df51a: full suite 595/531, required SQLite suite 30/30, build, benchmark, static, model, package, reproducible build",
+      "notes": "Two blocking gates remain: the dependency advisory with no compatible upstream fix (B007, docs/DEPENDENCY_RISK.md) and missing signing material (B003, UNSIGNED_BUILD). GitHub Actions is deliberately not used (release contract)."
     },
     {
       "id": "containers",
@@ -118,8 +122,9 @@
     {
       "id": "benchmarks-performance",
       "requirement": "Performance benchmarks with honest labeling",
-      "status": "PARTIAL",
-      "notes": "api-stress layered benchmark now honestly labels transport/auth/registry layers; engine execution throughput qualified by real-engine suites not request-rate sampling"
+      "status": "TESTED",
+      "verifiedResults": "benchmarks/run.js executed at 06df51a and refreshed benchmarks/latest.json + docs/BENCHMARKS.md; api-stress labels transport/authenticated/registry layers separately and states that it is not migration execution throughput",
+      "notes": "Local deterministic engine and serialized-schema measurements only; public-scale throughput and LLM completion-rate improvement are not claimed (capabilities public-scale-proof remains EXPERIMENTAL)"
     },
     {
       "id": "backup-dr",
@@ -147,7 +152,9 @@
     {
       "id": "deployment-qualification",
       "requirement": "Production deployment qualification",
-      "status": "NOT_STARTED"
+      "status": "EXTERNALLY_BLOCKED",
+      "verifiedResults": "Candidate qualification matrix produced (engineering/completion/PRODUCTION_QUALIFICATION.md): 16 gates executed, 14 PASS, 1 FAIL CLOSED (UNSIGNED_BUILD), 1 FAIL CLOSED (dependency audit). Chart renders with fail-closed guards; no image and no deployment exist to verify",
+      "notes": "RELEASE NOT QUALIFIED. Blocked on container image build (B005, no working Docker engine), cluster apply (B006, no API server), signing material (B003), dependency advisory (B007), real providers (B001/B002) and independent audit (B004)."
     }
   ]
 }
