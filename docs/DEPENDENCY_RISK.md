@@ -30,16 +30,39 @@ would be masking, not fixing).
 
 ### Why no compatible upgrade exists
 
-`@azure/identity` pins the vulnerable major: 4.13.2 and the current latest
-4.14.0 both declare `"@azure/msal-node": "^6.0.0"`, and 4.15.0-beta.1 declares
-`^6.0.0` as well. Every 6.x release is inside the affected range, so no
-version of `@azure/identity` in the registry can pull a fixed `@azure/msal-node`.
+`@azure/identity` pins the vulnerable major: 4.13.2 declares
+`"@azure/msal-node": "^5.1.5"` (the lockfile installs 5.6.0) and 4.14.0, the
+current latest, declares `^6.0.0`. Every 5.x and 6.x release is inside the
+affected range, and no published `@azure/identity` version (stable or
+prerelease, checked against the registry) declares `^7.1.0` or newer, so no
+version of the parent can pull a fixed `@azure/msal-node`.
 `npm audit fix --dry-run` reports that it changed packages and still reports
 the same two high findings, because it cannot leave the parent's declared
-range. The only way to silence the gate today would be an `overrides` entry
-forcing `@azure/msal-node@7.x` under a parent that declares `^6.0.0`, i.e.
-shipping a major-version combination nobody tested. That is a supply-chain
-risk, not a remediation, so it is not applied.
+range.
+
+### The `overrides` alternative was tested and is not safe
+
+Forcing `@azure/msal-node@7.1.1` under a parent that declares `^5.1.5`/`^6.0.0`
+was evaluated in an isolated install of the exact production dependency set
+(`npm install --omit=dev` with `overrides: { "@azure/msal-node": "7.1.1" }`):
+
+- Install and module load succeed: `require('@azure/identity')`,
+  `require('mssql')` and `require('snowflake-sdk')` all resolve, and
+  `ClientSecretCredential`, `UsernamePasswordCredential` and
+  `AuthorizationCodeCredential` construct without throwing.
+- The API surface is not compatible: in 7.1.1
+  `ConfidentialClientApplication` no longer exposes `acquireTokenSilent`
+  (only `getAuthCodeUrl`, `acquireTokenByCode`, `acquireTokenByClientCredential`,
+  `acquireTokenOnBehalfOf`, `acquireTokenByUserFederatedIdentityCredential`),
+  while `@azure/identity@4.13.2` calls `acquireTokenSilent` in its shared
+  MSAL client (`dist/commonjs/msal/nodeFlows/msalClient.js:155`). The silent
+  token path used by every cached/refresh flow would fail at runtime with a
+  `TypeError`, which no test in this repository can catch because SPOOL never
+  performs Azure AD token acquisition.
+
+A major-version override that breaks a code path we cannot exercise is a
+supply-chain risk, not a remediation, so it is not applied and the audit gate
+stays failing.
 
 ### Reachability analysis
 

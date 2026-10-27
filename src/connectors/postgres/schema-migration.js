@@ -123,7 +123,10 @@ function unmanagedObjects(record) {
     entries.push({ kind: 'UNMANAGED_RULE', name: rule.name });
   }
   for (const constraint of record.constraints ?? []) {
-    if (constraint.type === 'p') continue;
+    // 'p' is the managed primary key. 'n' is a NOT NULL constraint: PostgreSQL
+    // 18 catalogues NOT NULL in pg_constraint, but nullability is already part
+    // of the column contract, so it is not an unmanaged object.
+    if (constraint.type === 'p' || constraint.type === 'n') continue;
     entries.push({ kind: 'UNMANAGED_CONSTRAINT', name: constraint.name, type: constraint.type });
   }
   entries.sort((left, right) => left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name));

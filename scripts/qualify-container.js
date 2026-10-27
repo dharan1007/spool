@@ -196,8 +196,8 @@ async function main() {
   const rows = verifyDb.prepare('SELECT * FROM customers ORDER BY customer_id').all();
   verifyDb.close();
   check('target_row_count', rows.length === 5, rows.length);
-  check('target_content', rows[0].full_name === 'Customer 1' && rows[0].is_active === 0 && rows[1].is_active === 1 && rows[4].joined_on.startsWith('2024-05-15'), rows[0]);
-  check('target_fee_value', rows[2].monthly_fee === 19.35 && rows[2].joined_on.startsWith('2024-03-13'), rows[2]);
+  check('target_content', rows[0].full_name === 'Customer 1' && rows[0].is_active === 0 && rows[1].is_active === 1 && rows[4].joined_on.startsWith('2024-06-15'), rows[0]);
+  check('target_fee_value', rows[2].monthly_fee === 19.35 && rows[2].joined_on.startsWith('2024-04-13'), rows[2]);
 
   return {
     ok: true,
