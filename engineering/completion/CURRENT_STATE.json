@@ -9,7 +9,7 @@
   "environmentConstraints": {
     "systemDriveFreeBytes": "1200000000 (C: about 1.12 GiB free; below the SQLite qualifier's mandatory 10 GiB preflight and too small for the SQL Server image or Docker Desktop Kubernetes control-plane images)",
     "dockerDisk": "34.90 GB docker_data.vhdx (64 GB ceiling), contents effectively full: 25.97 GB images (15.6 GB other projects), 2.061 GB containers (1.95 GB other projects), 2.26 GB volumes, 3.435 GB build cache (79 MB reclaimable after pruning our own cache); compaction requires elevation (diskpart/Optimize-VHD), relocation is a Docker Desktop GUI/admin operation; manual vhdx moves are out of bounds",
-    "qualificationVolume": "E: NTFS 421 GiB free — qualification fixtures and evidence must run with TEMP/TMP and SPOOL_QUALIFICATION_EVIDENCE_ROOT on E:",
+    "qualificationVolume": "E: NTFS 421 GiB free — qualification fixtures and evidence must run with TEMP/TMP and SPOOL_QUALIFICATION_EVIDENCE_ROOT on E:. The volume intermittently refuses new file handles for a few seconds ('Cannot find drive'/'Could not find a part of the path') even though it is a healthy fixed NTFS disk; retry, and keep a copy of the small evidence files under %TEMP%\\spool-qual-backup (27 files, 1.8 MB) so the register references stay resolvable.",
     "python": "C:\\Users\\dhara\\AppData\\Local\\Programs\\Python\\Python311\\python.exe (psutil 7.0.0 present); `python` resolves there first, WindowsApps alias also on PATH"
   },
   "supersedes": {
@@ -46,7 +46,7 @@
     "boundedReleaseQualification": "EXTERNALLY_BLOCKED at 6bedad3: dependency_install PASS, security_audit FAIL (2 high GHSA-xcx6-jx8p-x3h5 in @azure/msal-node 5.6.0), runbook stopped by design; evidence in TEST_RESULTS runs[scripts/qualify-bounded-release.js] and BLOCKERS B007",
     "requiredSqliteSuite": "30/30 PASS at 06df51a (tap, concurrency 1)",
     "modelAndPackage": "check-svmp-model PASS (counterexamples detected), pack:verify PASS at 06df51a",
-    "browserStudio": "PASS 3 consecutive real-Chrome runs at 06df51a (6 routes, 25000 rows, WebMCP, 0 exceptions, 0 failed loads); smoke render race fixed at scripts/browser-smoke.py:261,264",
+    "browserStudio": "PASS at e855353 against the dist built from that commit (artifact root df77ec64…): 6 routes, 25000 rows (24955 valid / 45 invalid), phase COMPLETE, WebMCP tool surface, recovery PASS, explicit Studio workflow PASS, 0 runtime exceptions, 0 failed network loads; earlier 3 consecutive runs at 06df51a also PASS",
     "releaseGate": "FAILED CLOSED UNSIGNED_BUILD at e855353 after reproducible build PASS (df77ec64..., 133 artifacts) - BLOCKERS B003",
     "securityAudit": "FAIL at d2c1b94 - 2 high GHSA-xcx6-jx8p-x3h5 (@azure/msal-node 5.6.0 via @azure/identity 4.13.2); msal 7.1.1 override proven API-incompatible (acquireTokenSilent removed) - BLOCKERS B007 / docs/DEPENDENCY_RISK.md",
     "candidateVerdict": "NO-GO / EXTERNALLY BLOCKED - see engineering/completion/PRODUCTION_QUALIFICATION.md and BLOCKERS B001/B002/B003/B004/B006/B007"

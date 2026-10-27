@@ -58,7 +58,7 @@ audit) or host capacity that cannot be provisioned safely on this machine.
 | 10 | Model check | `node scripts/check-svmp-model.js` (inside `npm run check` at `e855353`) | **PASS** — exhaustive SVMP exploration plus intentional-unsafe and stale-writer counterexamples (tests 532–536 in the same run) |
 | 11 | Package verification | `npm run pack:verify` | PASS at `06df51a` — installed-package run reproduces the qualified behaviour |
 | 12 | Release chain | `node scripts/release-gate.js` (inside `npm run check` at `e855353`) | **FAIL CLOSED** `UNSIGNED_BUILD` (exit 1) after binding SHA and both reproducible builds — B003 |
-| 13 | Browser Studio E2E | `python scripts/browser-smoke.py` (real Chrome, `dist`) | PASS — 3 consecutive full runs: 6 routes, 25 000-row seven-stage run, WebMCP surface, 0 runtime exceptions, 0 failed network loads |
+| 13 | Browser Studio E2E | `python scripts/browser-smoke.py` (`SPOOL_SERVE_DIR=dist`, `SPOOL_BROWSER=…chrome.exe`) | **PASS** — 3 consecutive full runs at `06df51a` and a re-run at `e855353` against the `dist` built from that commit (artifact root `df77ec64…`): 6 routes, 25 000-row seven-stage run (24 955 valid / 45 invalid, phase `COMPLETE`), WebMCP tool surface, recovery `PASS`, explicit Studio workflow `PASS`, 0 runtime exceptions, 0 failed network loads. Log: `E:\temp\spool-qual\browser-smoke-e855353.log` |
 | 14 | Backup/restore drill | `node scripts/drill-backup-restore.js` | PASS — 12 checks, restore parity, tampered backup rejected |
 | 15 | Container image build | `docker build -t spool-daemon:d2c1b94 .` (engine 29.8.2) | **PASS** — exit 0, image `sha256:5a7c62073ca9d0cfe5b8f72c70cddd472034b2ce3eaaa0568cd0804f0863b9ea`, 532 642 879 B, `User=node`, entrypoint `node src/daemon/spoold-v2-main.js`, HEALTHCHECK present. Log: `E:\temp\spool-qual\docker-build-d2c1b94.log`. `git diff d2c1b94..e855353` touches no `src/`, `capabilities/`, `package*.json` or `Dockerfile` file, so this image is still the candidate's executable content |
 | 16 | Container runtime acceptance | `docker exec -u node … node /tmp/qualify-container.js` (`scripts/qualify-container.js`) | **PASS** — 20 checks: `/v2/health` 200, `/v2/ready` 200, Prometheus metrics, unauthenticated 401, foreign-Host 421, invalid JSON 400, organization/workspace/API-key provisioning, migration create, execute-before-approval 422, plan, dry-run 5/5 rows, approve, execute `COMPLETE`, plan-bound receipt, verification, 5 durable target rows with exact values. Evidence: `E:\temp\spool-qual\container-acceptance-d2c1b94.json` |
@@ -71,17 +71,19 @@ audit) or host capacity that cannot be provisioned safely on this machine.
 | 23 | Deployment render | `node scripts/check-deployment.js` (helm 3.16.4) | PASS — lint clean, 8 objects, fail-closed paths proven for missing release commit and `replicaCount > 1` |
 | 24 | Capability matrix | `tests/capability-matrix.test.js` + pinned digest | PASS — 6/6, policy pin `4915ac01…` |
 
-Scope of the commit labels: gates 3, 6, 7, 8, 10, 12 and 21–22 were executed on
+Scope of the commit labels: gates 3, 6, 7, 8, 10, 12, 13 and 21–22 were executed on
 the code commit (`d2c1b94`) or on the pushed evidence head (`e855353`), where the
 only difference from `d2c1b94` is docs/registers, regenerated API-layer benchmark
-output and a provider-gated test file. Gates 4, 5, 11, 13 and 14 were executed
-on the earlier candidate `06df51a` (SQLite qualifier at `30565b1`) and are
-labelled with that commit rather than presented as re-runs: they exercise the
-SQLite target path, the browser surface, packaging and backup/restore, none of
-which the post-`06df51a` changes touch (two connector fixes and the root-only
-organization route). `npm run check` at `e855353` re-ran the full suite, build,
-benchmark, static check, model check and both reproducible builds, and ended in
-the designed `UNSIGNED_BUILD` failure.
+output and a provider-gated test file. Gates 4, 5, 11 and 14 were executed on the
+earlier candidate `06df51a` (SQLite qualifier at `30565b1`) and are labelled with
+that commit rather than presented as re-runs: they exercise the SQLite target
+path, packaging and backup/restore, none of which the post-`06df51a` changes touch
+(two connector fixes and the root-only organization route). `npm run check` at
+`e855353` re-ran the full suite, build, benchmark, static check, model check and
+both reproducible builds, and ended in the designed `UNSIGNED_BUILD` failure;
+`git diff 06df51a..HEAD` is empty for `package.json`, `package-lock.json`, `helm/`,
+`scripts/check-deployment.js`, the SQLite/engine paths and the deployment tests,
+so those labels remain valid for the candidate.
 
 ## Defects found and fixed by live qualification
 
