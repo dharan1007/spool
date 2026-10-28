@@ -91,7 +91,8 @@
       "domain": "production-dependency-advisory (was B007)",
       "symptom": "High-severity dependency advisory GHSA-xcx6-jx8p-x3h5 in @azure/msal-node (transitive via tedious/mssql and snowflake-sdk) failed npm audit --omit=dev --audit-level=high",
       "rootCause": "mssql and snowflake-sdk were listed as core production dependencies even though they are optional connectors, pulling in @azure/identity and vulnerable @azure/msal-node into the core production package closure",
-      "resolution": "Scoped optional drivers (mssql, snowflake-sdk) to devDependencies; introduced src/connectors/driver-loader.js with shape, major-version verification and fail-closed typed errors (CONNECTOR_DRIVER_*); updated static release check and added boundary tests; core production closure (npm audit --omit=dev) reports 0 vulnerabilities"
+      "resolution": "Scoped optional drivers (mssql, snowflake-sdk) to devDependencies; introduced src/connectors/driver-loader.js with shape, major-version verification and fail-closed typed errors (CONNECTOR_DRIVER_*); updated static release check and added boundary tests; core production closure (npm audit --omit=dev) reports 0 vulnerabilities",
+      "scope": "CORE ARTIFACT ONLY. The optional-driver artifact (core + mssql/snowflake-sdk) is still affected by DR-001 (npm audit --audit-level=high: GHSA-xcx6-jx8p-x3h5), so SQL Server and Snowflake remain outside the production allowlist and non-qualified. Re-verified 2026-10-28: no published @azure/identity (latest 4.14.0, beta 4.15.0-beta.1) depends on @azure/msal-node >= 7.1.0. scripts/audit-artifacts.js reports both scopes separately and never labels the optional scope as a pass."
     }
   ]
 }

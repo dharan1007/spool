@@ -26,6 +26,7 @@
     "benchmark": "node benchmarks/run.js",
     "check:model": "node scripts/check-svmp-model.js",
     "check": "npm test && npm run check:model && node scripts/release-gate.js",
+    "audit:artifacts": "node scripts/audit-artifacts.js",
     "release:sign": "node scripts/sign-release.js",
     "release:verify": "node scripts/verify-release-chain.js",
     "release:reproduce": "node scripts/reproducible-build-evidence.js",

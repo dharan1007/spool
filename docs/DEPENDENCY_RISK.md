@@ -49,6 +49,13 @@ version of the parent can pull a fixed `@azure/msal-node`.
 the same two high findings, because it cannot leave the parent's declared
 range.
 
+Re-checked 2026-10-28: `@azure/identity` latest is still `4.14.0` (`^6.0.0`),
+the `beta` dist-tag is `4.15.0-beta.1` and also declares `^6.0.0`,
+`@azure/msal-node` latest is `7.1.2`, `mssql` latest is `12.7.13` with
+`tedious 20.3.8` (still `@azure/identity ^4.13.1`), and `snowflake-sdk` latest
+is `3.4.1` (still `@azure/identity`). No parent release can reach a fixed
+MSAL, so DR-001 stays OPEN upstream.
+
 ### The `overrides` alternative was tested and is not safe
 
 Forcing `@azure/msal-node@7.1.1` under a parent that declares `^5.1.5`/`^6.0.0`
@@ -91,6 +98,13 @@ supply-chain risk, not a remediation, so it is not applied.
   limited to loading the module, not executing the vulnerable flow. The core
   release does not install it at all.
 
+`tests/connector-auth-surface.test.js` pins this so it cannot drift: the SQL
+Server config is asserted to carry SQL credentials only (an
+`authentication=azure-active-directory` endpoint query is rejected), the
+Snowflake driver options are rebuilt from an explicit key list so an injected
+`authenticator`/token/password/clientId can never reach the driver, and no file
+under `src/connectors` may reference an Azure credential class.
+
 ### Remediation trigger
 
 Re-run the gate as soon as any of the following is true:
@@ -112,6 +126,33 @@ affected connectors must not ship.
 
 Status: APPLIED. Core production dependency set: 0 high/critical findings.
 Optional connector scope: still affected by DR-001, connectors unqualified.
+
+### Scope is per artifact, not global
+
+B007 must not be called resolved for every artifact. There are two distinct
+distributions and they are audited separately:
+
+| Artifact | Install set | Audit command | Status |
+| --- | --- | --- | --- |
+| core (`spool-webmcp` tarball, daemon image) | `dependencies` only | `npm audit --omit=dev --audit-level=high` | **PASS** — 0 findings |
+| optional connector drivers | core + `devDependencies` (`mssql`, `snowflake-sdk`) | `npm audit --audit-level=high` | **OPTIONAL_SCOPE_AFFECTED** — GHSA-xcx6-jx8p-x3h5, connectors not production-qualified |
+
+`scripts/audit-artifacts.js` runs both audits and emits one JSON report per
+artifact (`status`, `highs`, `criticals`, `advisories`, `productionAllowlist`,
+`affectedConnectors`). It exits 1 only when the core artifact has a
+high/critical finding; an affected optional scope is recorded as
+`OPTIONAL_SCOPE_AFFECTED`, never as a pass.
+
+The dependency scope and the capability register are tied together by
+`tests/dependency-artifacts.test.js`, which fails if:
+
+- a capability backed by an affected driver (`mssql.*`, `snowflake*`) is
+  promoted to `PRODUCTION`;
+- those capabilities are deleted from the matrix to make the register look
+  complete;
+- the optional driver closure stops resolving `@azure/msal-node`, or the
+  installed MSAL version escapes the recorded affected range (that is the
+  remediation trigger firing, and DR-001 must be re-evaluated).
 
 ### Decision
 
@@ -141,14 +182,23 @@ qualified/near-qualified paths; they are loaded by the modules that use them.
 
 - `npm audit --omit=dev --audit-level=high` -> `found 0 vulnerabilities`.
 - `npm audit --audit-level=high` (dev included) -> still 2 high, GHSA-xcx6-jx8p-x3h5.
+- `node scripts/audit-artifacts.js` -> `core: PASS`, `optional-drivers:
+  AFFECTED`, overall `OPTIONAL_SCOPE_AFFECTED`, `productionAllowlist: allowed`.
+- `tests/dependency-artifacts.test.js` (7 tests): production-closure walk over
+  `package-lock.json` (no `mssql`, `snowflake-sdk`, `@azure/identity`,
+  `@azure/msal-node`; `better-sqlite3`, `pg`, `mysql2`,
+  `@google-cloud/bigquery` present), proof the optional closure still resolves the
+  affected MSAL major, the capability/allowlist invariant, the affected-range
+  boundaries, and the report classification (core clean vs optional affected vs
+  core critical).
+- `tests/connector-auth-surface.test.js` (3 tests): SQL-only SQL Server config,
+  rebuilt Snowflake driver options, and no Azure credential class anywhere under
+  `src/connectors`.
 - `tests/connector-driver-boundary.test.js` (7 tests): static-import scan,
-  production-closure walk over `package-lock.json` (asserts the closure contains
-  no `mssql`, `snowflake-sdk`, `@azure/identity` or `@azure/msal-node`, and does
-  contain `better-sqlite3`, `pg`, `mysql2`, `@google-cloud/bigquery`), a module
-  graph proof that the daemon and connector descriptors load with no driver
-  resolution, the loader error paths, and a packed-tarball probe that asserts
-  the shipped artifact fails with `CONNECTOR_DRIVER_UNAVAILABLE` instead of a
-  module crash.
+  module graph proof that the daemon and connector descriptors load with no
+  driver resolution, the loader error paths, and a packed-tarball probe that
+  asserts the shipped artifact fails with `CONNECTOR_DRIVER_UNAVAILABLE` instead
+  of a module crash.
 - The container image is built with `npm ci --omit=dev`; the in-container
   boundary check asserts `mssql` is absent and the connector reports
   `CONNECTOR_DRIVER_UNAVAILABLE`.
