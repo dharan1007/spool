@@ -84,6 +84,32 @@ upstream `@azure/msal-node` advisory recorded in `docs/DEPENDENCY_RISK.md`, so
 run `npm audit --omit=dev --audit-level=high` against it and treat the connector
 as unqualified. Installing a driver never changes the capability matrix or the
 production allowlist.
+`node scripts/audit-artifacts.js` reports the core artifact and the
+optional-driver scope separately.
+
+## Cloud wire endpoints and private networks
+
+Snowflake and BigQuery can be reached through the HTTP wire transport when the
+target ref carries an `endpoint`. The endpoint is untrusted plan data, so the
+transport refuses cloud metadata services and link-local addresses at all times,
+and refuses loopback/private addresses unless the operator names the endpoint:
+
+```bash
+# Exact private endpoints, comma separated. `host` or `host:port` entries.
+export SPOOL_CLOUD_PRIVATE_ENDPOINT_HOSTS="snowflake.internal.example:443,10.20.0.15:8443"
+
+# Optional: require https for every wire endpoint.
+export SPOOL_CLOUD_REQUIRE_TLS=1
+```
+
+- `SPOOL_CLOUD_ALLOW_PRIVATE_ENDPOINTS=1` is a blanket opt-in for disposable
+  staging roots only. It still cannot enable metadata or link-local targets.
+- Hostnames are validated again at connection time against the address they
+  resolve to, so a DNS name that resolves to a forbidden address is refused.
+- Redirects are not followed, responses are capped at 32 MiB, request bodies at
+  16 MiB, and each request has a 30 s total deadline.
+
+See `docs/THREAT_MODEL.md` for the residual risks of this control.
 
 ## Static hosting requirements
 

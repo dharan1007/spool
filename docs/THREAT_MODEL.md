@@ -53,4 +53,31 @@ Enterprise registry state is also an asset: organizations, workspaces and their 
 - Issued API keys have no TTL and no rotation-required state; revocation is explicit and immediate, but a leaked key stays valid until revoked.
 - The activity journal is append-only by convention in SQLite, not by an external WORM store, and a local actor with filesystem access could alter it.
 - Enterprise registry isolation is enforced by the daemon and proven by tests; it is not an independent audit finding (see BLOCKERS B004).
-- Two high `npm audit` findings remain in the production dependency graph: GHSA-xcx6-jx8p-x3h5 in `@azure/msal-node` 5.6.0, pulled in by `@azure/identity` through `mssql`/`snowflake-sdk`. No compatible upgrade exists (the parent pins `^6.0.0`, which is inside the affected range) and SPOOL never invokes the affected authorization-code flow; see `docs/DEPENDENCY_RISK.md` for the reachability analysis and remediation trigger. The release gate fails closed on this finding rather than ignoring it.
+- Two high `npm audit` findings remain in the **optional-driver** dependency graph: GHSA-xcx6-jx8p-x3h5 in `@azure/msal-node` 5.6.0, pulled in by `@azure/identity` through `mssql`/`snowflake-sdk`. The core production closure (`npm audit --omit=dev`) reports 0 findings because those drivers are not installed by the core artifact, and SQL Server/Snowflake stay outside the production allowlist. No compatible upgrade exists (the parent pins `^6.0.0`, which is inside the affected range) and SPOOL never invokes the affected authorization-code flow; see `docs/DEPENDENCY_RISK.md` for the reachability analysis, the per-artifact audit and the remediation trigger.
+
+### Cloud HTTP transport (Snowflake / BigQuery wire endpoints)
+
+- The endpoint is plan-supplied data, so it is treated as untrusted: http(s) only, no
+  embedded credentials, no fragment, control characters or over-long URLs.
+- Cloud metadata services (`169.254.169.254`, `metadata.google.internal`,
+  `metadata.goog`, `100.100.100.200`, `fd00:ec2::254`, `instance-data`) and
+  link-local, unspecified, multicast and reserved addresses are refused always,
+  including decimal/octal/hex and IPv4-mapped IPv6 spellings. No configuration
+  enables them.
+- Loopback and private targets (RFC1918, CGNAT, IPv6 ULA, `localhost`) are refused by
+  default. The target ref cannot grant itself access; an operator must name the
+  endpoint with `SPOOL_CLOUD_PRIVATE_ENDPOINT_HOSTS`. `SPOOL_CLOUD_PRIVATE_ENDPOINT_HOSTS`
+  and `SPOOL_CLOUD_REQUIRE_TLS` are documented in `docs/SELF_HOSTING.md`.
+- Hostnames are resolved through a guarded DNS lookup that validates **every**
+  resolved address and returns the validated address for the connection, so a
+  name resolving to a forbidden address, or re-bound between validation and
+  connect, is refused.
+- Redirects are never followed; a `3xx` is returned and treated as a failed
+  response, so a redirect cannot re-target the request. Request and response
+  bodies have byte ceilings, and an idle timeout plus a total deadline bound
+  stalled or trickling transfers.
+- **Not claimed:** this is bounded SSRF resistance for a local-first product that
+  must reach local endpoints, not complete SSRF protection. It does not stop a
+  public hostname whose DNS answer changes after the connection is established,
+  it does not police proxy settings, and an operator who allowlists a private host
+  has chosen to trust it.

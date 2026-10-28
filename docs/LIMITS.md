@@ -69,6 +69,22 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 - Without the driver, the connector fails closed with `CONNECTOR_DRIVER_UNAVAILABLE` before reading a secret or opening a connection; an unsupported driver major or missing driver API fails with `CONNECTOR_DRIVER_INCOMPATIBLE`.
 - The optional drivers are outside the qualified release scope: installing one does not make the connector production-qualified, and the upstream `@azure/msal-node` advisory in `docs/DEPENDENCY_RISK.md` applies to any install that includes it.
 
+## Cloud HTTP transport (Snowflake / BigQuery wire endpoints)
+
+- The wire transport only accepts `http(s)`, refuses embedded credentials and
+  fragments, and never follows redirects (a `3xx` is returned as a failed
+  response).
+- Metadata, link-local, unspecified, multicast and reserved addresses are always
+  refused. Loopback and private addresses are refused by default and must be
+  named explicitly (see `docs/SELF_HOSTING.md`), because the target ref is
+  untrusted data.
+- Hostnames are validated against the policy at connection time (guarded DNS
+  lookup with the validated address pinned), not only when the URL is parsed.
+- Limits: 30 s total deadline and 30 s idle timeout per request, 32 MiB response
+  ceiling, 16 MiB request-body ceiling, 2048-character URL ceiling.
+- This is bounded SSRF resistance, not complete SSRF protection; the residual
+  risks are listed in `docs/THREAT_MODEL.md`.
+
 ## Repair and cutover
 
 - Repair applies only to stored `DIFF` evidence for runs in `VERIFICATION_FAILED` status; preconditions (`absent` / `actualRowHash`) fail the operation on any divergence, and re-verification must return `VERIFIED` before any receipt.

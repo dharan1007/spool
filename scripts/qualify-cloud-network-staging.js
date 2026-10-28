@@ -5,6 +5,12 @@ import { BigQueryWireServer } from '../src/connectors/bigquery/wire-server.js';
 import { createSnowflakeRuntime } from '../src/connectors/snowflake/index.js';
 import { createBigQueryRuntime } from '../src/connectors/bigquery/index.js';
 
+// This staging run drives the connectors against a loopback wire server on
+// purpose. Private endpoints are opt-in by design (src/connectors/cloud-http.js),
+// so the staging root names loopback explicitly instead of the transport
+// silently permitting private targets.
+process.env.SPOOL_CLOUD_PRIVATE_ENDPOINT_HOSTS = '127.0.0.1';
+
 async function runStaging() {
   console.log('=== SPOOL Cloud Target Live Network Staging (Snowflake & BigQuery) ===\n');
 

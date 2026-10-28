@@ -5,6 +5,11 @@ import { BigQueryWireServer } from '../src/connectors/bigquery/wire-server.js';
 import { createSnowflakeRuntime } from '../src/connectors/snowflake/index.js';
 import { createBigQueryRuntime } from '../src/connectors/bigquery/index.js';
 
+// These tests deliberately drive the connectors against a loopback wire server.
+// Private endpoints are opt-in by design (src/connectors/cloud-http.js): the
+// staging root names loopback explicitly instead of the transport allowing it.
+process.env.SPOOL_CLOUD_PRIVATE_ENDPOINT_HOSTS = '127.0.0.1';
+
 test('Snowflake Live Network Wire Staging: Real HTTP/REST Execution', async () => {
   const server = new SnowflakeWireServer();
   server.seedTable('ANALYTICS', 'PUBLIC', 'CUSTOMERS', [
