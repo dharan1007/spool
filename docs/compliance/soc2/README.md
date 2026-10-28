@@ -18,6 +18,9 @@ What exists:
 - `scripts/internal-control-self-assessment.js`, a repeatable check that the
   mapped engineering controls still hold at the current commit. Its report is
   written with `attestation: false` and an explicit disclaimer.
+- `scripts/audit-evidence-index.js` (`docs/EVIDENCE_INDEX.md`), a deterministic,
+  content-hashed inventory of the evidence in this repository. It reports
+  missing evidence as `ABSENT` and is not an audit either.
 
 What does not exist, and must not be claimed:
 
