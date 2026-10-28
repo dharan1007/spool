@@ -1,13 +1,58 @@
 {
-  "test": "REST_API_STRESS_TEST",
-  "timestamp": "2026-10-24T07:39:48.222Z",
-  "totalRequests": 600,
-  "concurrency": 30,
-  "successRate": 100,
-  "throughputReqPerSec": 643,
-  "latencyMs": {
-    "p50": 34.08,
-    "p95": 175.38,
-    "p99": 202.66
-  }
+  "test": "REST_API_LAYERED_BENCHMARK",
+  "note": "Transport and registry benchmarks only; migration EXECUTION throughput is qualified by real-engine suites, not request-rate sampling.",
+  "timestamp": "2026-10-28T06:22:31.999Z",
+  "benchmarks": [
+    {
+      "label": "transport-probes",
+      "requests": 300,
+      "concurrency": 30,
+      "successful": 300,
+      "failed": 0,
+      "successRatePct": 100,
+      "durableSeconds": 0.769,
+      "requestsPerSecond": 390,
+      "latencyMs": {
+        "min": 31.73,
+        "p50": 59.7,
+        "p95": 178.08,
+        "p99": 208.84,
+        "max": 213.8
+      }
+    },
+    {
+      "label": "authenticated-api-lists",
+      "requests": 300,
+      "concurrency": 30,
+      "successful": 300,
+      "failed": 0,
+      "successRatePct": 100,
+      "durableSeconds": 0.598,
+      "requestsPerSecond": 501,
+      "latencyMs": {
+        "min": 43.87,
+        "p50": 57.68,
+        "p95": 67.82,
+        "p99": 70.52,
+        "max": 71.36
+      }
+    },
+    {
+      "label": "orchestrator-registry-reads",
+      "requests": 300,
+      "concurrency": 30,
+      "successful": 300,
+      "failed": 0,
+      "successRatePct": 100,
+      "durableSeconds": 0.047,
+      "requestsPerSecond": 6332,
+      "latencyMs": {
+        "min": 0.22,
+        "p50": 4.23,
+        "p95": 6.98,
+        "p99": 9.04,
+        "max": 9.9
+      }
+    }
+  ]
 }

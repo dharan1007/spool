@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SPOOL enterprise API values",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["replicaCount", "image", "release", "credentialsSecretName", "state", "service"],
+  "properties": {
+    "replicaCount": {
+      "description": "Single-writer SQLite state; any value other than 1 fails to render.",
+      "type": "integer",
+      "const": 1
+    },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "proxyImage": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "release": {
+      "type": "object",
+      "required": ["version", "commitSha"],
+      "properties": {
+        "version": { "const": "1.1.2" },
+        "commitSha": { "type": "string", "pattern": "^([a-f0-9]{40})?$" }
+      }
+    },
+    "credentialsSecretName": { "type": "string", "minLength": 1 },
+    "state": {
+      "type": "object",
+      "required": ["size"],
+      "properties": {
+        "size": { "type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$" },
+        "storageClass": { "type": "string" },
+        "mountPath": { "type": "string", "pattern": "^/" }
+      }
+    },
+    "sourceCeilingBytes": { "type": "string", "pattern": "^[0-9]+$" },
+    "service": {
+      "type": "object",
+      "required": ["port", "targetPort"],
+      "properties": {
+        "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "targetPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    }
+  }
+}

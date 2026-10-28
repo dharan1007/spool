@@ -51,7 +51,10 @@ export function mysqlConnectionConfig(ref, password) {
     password,
     database,
     connectTimeout: 10_000,
-    supportBigNumbers: false
+    supportBigNumbers: false,
+    // DATETIME carries no offset. Interpret and render it as UTC so migration
+    // results do not silently depend on the host process timezone.
+    timezone: 'Z'
   };
   if (endpoint.sslMode === 'require') config.ssl = { rejectUnauthorized: false };
   else if (endpoint.sslMode === 'verify-full') config.ssl = {};

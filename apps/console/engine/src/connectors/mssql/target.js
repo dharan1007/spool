@@ -1,7 +1,7 @@
-import sql from 'mssql';
 import { fail } from '../../core/errors.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
 import { withMssqlConnection } from './connection.js';
+import { loadMssqlDriver } from './driver.js';
 import { mssqlQuery, mssqlTargetContractId } from './preflight.js';
 
 const LEDGER_TABLE = 'spool_batch_ledger';
@@ -142,6 +142,7 @@ export async function ensureMssqlMetadata({ targetRef, credentialBroker } = {}) 
 export async function acquireMssqlLease({ targetRef, credentialBroker, resource, owner, ttlMs } = {}) {
   requiredString('resource', resource); requiredString('owner', owner);
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) fail('INVALID_MSSQL_RUNTIME_CONFIG', 'ttlMs must be a positive safe integer');
+  const sql = await loadMssqlDriver();
   await ensureMssqlMetadata({ targetRef, credentialBroker });
 
   const result = await withMssqlConnection({ targetRef, credentialBroker }, async pool => {
@@ -215,7 +216,7 @@ function bindValue(request, name, value) {
   else request.input(name, value);
 }
 
-async function insertRows(transaction, targetRef, columns, rows) {
+async function insertRows(sql, transaction, targetRef, columns, rows) {
   if (!rows.length) return;
   const qualifiedTable = `dbo.${quoteIdentifier(targetRef.table)}`;
   const quotedColumns = columns.map(quoteIdentifier).join(', ');
@@ -289,6 +290,7 @@ export class MssqlTarget {
     const described = mssqlPayloadEvidence(rows);
     const evidence = evidenceFrom(input, described.payloadHash, described.rowCount);
     if (this.requireFencing && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1)) fail('FENCE_REQUIRED', 'Production SQL Server mutation requires a fencing token');
+    const sql = await loadMssqlDriver();
 
     const result = await withMssqlConnection({ targetRef: this.targetRef, credentialBroker: this.credentialBroker }, async pool => {
       const transaction = new sql.Transaction(pool);
@@ -337,7 +339,7 @@ export class MssqlTarget {
           return { kind: 'COMMITTED_EXACT', alreadyCommitted: true };
         }
 
-        await insertRows(transaction, this.targetRef, columns, rows);
+        await insertRows(sql, transaction, this.targetRef, columns, rows);
         await mssqlQuery(transaction,
           `INSERT INTO dbo.${quoteIdentifier(LEDGER_TABLE)}
              (batch_identity, migration_id, plan_id, source_snapshot_id, mapping_revision,

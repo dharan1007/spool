@@ -2,7 +2,7 @@
 
 **Entity Name**: SPOOL Technologies Inc.  
 **Product**: SPOOL Enterprise Data Migration Platform  
-**Compliance Framework**: SOC 2 Type I / ISO 27001 Aligned  
+**Compliance framework**: internal controls mapped to the SOC 2 Trust Services Criteria, written in an ISO 27001 style. SPOOL holds no SOC 2 report and no ISO 27001 certification, and no independent auditor has reviewed these responses. See `README.md` in this directory and `engineering/completion/BLOCKERS.json` B004 (`NOT_AUDITED`).  
 
 ---
 

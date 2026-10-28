@@ -1,7 +1,13 @@
 # Build artifacts
 dist/
 node_modules/
-engine/
+
+# The embedded engine (apps/console/engine) is deliberately NOT ignored: it is a
+# tracked distribution artifact, and its manifest binds the packaged engine to the
+# exact source commit. Ignoring it let the committed bundle drift behind the
+# authoritative root source while its self-manifest still looked consistent.
+# Regenerate it with `node scripts/console/sync-engine.mjs` and verify with
+# `--check`; both are enforced by tests/console-engine-parity.test.js.
 
 # OS / editor
 *.swp

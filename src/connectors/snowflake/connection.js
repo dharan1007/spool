@@ -1,5 +1,6 @@
 import { fail } from '../../core/errors.js';
 import { requestJson } from '../cloud-http.js';
+import { loadSnowflakeDriver } from './driver.js';
 
 export function normalizeSnowflakeRef(ref = {}) {
   if (!ref || typeof ref !== 'object') fail('INVALID_SNOWFLAKE_CONFIG', 'targetRef must be an object');
@@ -26,6 +27,27 @@ export function normalizeSnowflakeRef(ref = {}) {
     endpoint,
     token
   });
+}
+
+/**
+ * Connection options passed to the official driver.
+ *
+ * Deliberately limited to username/password-free key-pair-less fields: SPOOL
+ * never supplies an `authenticator`, OAuth token or Azure credential, so the
+ * MSAL authorization-code flow that GHSA-xcx6-jx8p-x3h5 affects
+ * (docs/DEPENDENCY_RISK.md DR-001) is loaded by the driver but never invoked.
+ * `ref` is rebuilt here instead of forwarded so unknown/injected keys cannot
+ * reach the driver.
+ */
+export function snowflakeSdkOptions(ref) {
+  return {
+    account: ref.account,
+    username: process.env.SNOWFLAKE_USER || ref.account,
+    database: ref.database,
+    schema: ref.schema,
+    warehouse: ref.warehouse,
+    role: ref.role
+  };
 }
 
 export function quoteIdentifier(name) {
@@ -96,17 +118,10 @@ export async function withSnowflakeClient({ targetRef, credentialBroker, mockCli
     return await fn(client);
   }
 
-  // Official snowflake-sdk driver
+  // Official snowflake-sdk driver (optional driver, loaded on first use)
+  const snowflake = await loadSnowflakeDriver();
   try {
-    const snowflake = await import('snowflake-sdk');
-    const connection = snowflake.createConnection({
-      account: ref.account,
-      username: process.env.SNOWFLAKE_USER || ref.account,
-      database: ref.database,
-      schema: ref.schema,
-      warehouse: ref.warehouse,
-      role: ref.role
-    });
+    const connection = snowflake.createConnection(snowflakeSdkOptions(ref));
 
     await new Promise((resolve, reject) => {
       connection.connect((err, conn) => {

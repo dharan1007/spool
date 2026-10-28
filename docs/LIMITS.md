@@ -24,6 +24,7 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 
 ## PostgreSQL
 
+- Live conformance verified against PostgreSQL 18.6 with `sslmode=verify-full` (source, target, schema migration, mutations, bulk COPY, repair, CDC, recovery, workers): all 55 conformance tests pass. The performance profile below was measured on 17.6 and is not re-measured for 18.
 - Sources stream one table per snapshot under `REPEATABLE READ`; tables require a primary key for keyset traversal.
 - Whole-database snapshots share one exported MVCC snapshot token across sessions; the exporting transaction must stay open while joiners read.
 - Targets require pre-created ordinary or partitioned tables with a primary key for verification.
@@ -42,16 +43,17 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 - Type changes are allowed without approval only for total casts to `text`; every other type change, and every column drop, is destructive and requires a bound approval carrying the `postgres:schema-migrate-destructive` effect against the migration source contract.
 - Migration applies run fenced inside a single transaction: any step failure rolls the whole plan back with no ledger row, and out-of-band contract drift refuses the apply with a structured report.
 - Replays never take the fencing lease: an applied plan whose recorded contract still matches live returns `ALREADY_APPLIED` from a read-only probe.
-- Column defaults, secondary indexes, triggers, rules and non-PK constraints are never auto-migrated; their presence fails planning closed as unmanaged objects.
+- Column defaults, secondary indexes, triggers, rules and non-PK constraints are never auto-migrated; their presence fails planning closed as unmanaged objects. Primary-key and NOT NULL constraints are not unmanaged: they are part of the declared column contract (PostgreSQL 18 catalogues NOT NULL in `pg_constraint`, and that row is ignored rather than treated as an unmanaged object).
 - DDL steps run under the connector statement timeout; large-table rewrites beyond that budget are rejected, not retried.
 - The connector checks destructive-approval binding (migration, effect, source contract, expiry); approval signature verification stays with the service layer.
 
 ## MySQL
 
+- Live conformance verified against MySQL 8.4.13 with `sslmode=verify-full` on a non-UTC host (source snapshot, target fenced batches with ledger evidence, stale-writer refusal, contract drift, filesystem-to-MySQL migration): all 7 conformance tests pass.
 - Sources read one table per session under `REPEATABLE READ` with a consistent snapshot; tables require a primary key. Snapshots are single-session: there is no cross-session snapshot export.
-- Sources must run as least-privilege readers; `DATETIME` values arrive as `Date`, `DECIMAL`/`BIGINT` arrive as strings.
+- Sources must run as least-privilege readers; `DATETIME` values arrive as `Date` interpreted in UTC (`timezone: 'Z'` on the connection, so a non-UTC host does not shift migrated values), `DECIMAL`/`BIGINT` arrive as strings.
 - Targets require pre-created ordinary tables. No read-after-write verification, repair execution or bulk writes.
-- Metadata tables (`spool_batch_ledger`, `spool_execution_leases`) live in the target database.
+- Metadata tables (`spool_batch_ledger`, `spool_execution_leases`) live in the target database. They are durable per target database, so replaying the same batch identity against an already-populated ledger is reported as already committed rather than written twice.
 
 ## SQL Server
 
@@ -60,6 +62,28 @@ Every limit below is enforced in code or asserted in tests. Anything not listed 
 - Only the `dbo` schema scope is supported for sources and targets.
 - Targets require pre-created ordinary tables. No read-after-write verification, repair execution or bulk writes.
 - Metadata tables (`dbo.spool_batch_ledger`, `dbo.spool_execution_leases`) live in the target database.
+
+## Optional connector drivers
+
+- SQL Server and Snowflake support is shipped as connector adapters, not as bundled drivers. The core install (`npm ci --omit=dev`), the release tarball and the daemon image contain neither `mssql` nor `snowflake-sdk`, and therefore no `@azure/*` packages.
+- Without the driver, the connector fails closed with `CONNECTOR_DRIVER_UNAVAILABLE` before reading a secret or opening a connection; an unsupported driver major or missing driver API fails with `CONNECTOR_DRIVER_INCOMPATIBLE`.
+- The optional drivers are outside the qualified release scope: installing one does not make the connector production-qualified, and the upstream `@azure/msal-node` advisory in `docs/DEPENDENCY_RISK.md` applies to any install that includes it.
+
+## Cloud HTTP transport (Snowflake / BigQuery wire endpoints)
+
+- The wire transport only accepts `http(s)`, refuses embedded credentials and
+  fragments, and never follows redirects (a `3xx` is returned as a failed
+  response).
+- Metadata, link-local, unspecified, multicast and reserved addresses are always
+  refused. Loopback and private addresses are refused by default and must be
+  named explicitly (see `docs/SELF_HOSTING.md`), because the target ref is
+  untrusted data.
+- Hostnames are validated against the policy at connection time (guarded DNS
+  lookup with the validated address pinned), not only when the URL is parsed.
+- Limits: 30 s total deadline and 30 s idle timeout per request, 32 MiB response
+  ceiling, 16 MiB request-body ceiling, 2048-character URL ceiling.
+- This is bounded SSRF resistance, not complete SSRF protection; the residual
+  risks are listed in `docs/THREAT_MODEL.md`.
 
 ## Repair and cutover
 

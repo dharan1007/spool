@@ -1,15 +1,21 @@
-{{- if .Values.metrics.enabled }}
+{{- if .Values.metrics.serviceMonitor.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: spool-enterprise
+  name: {{ include "spool.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: spool-enterprise
+    {{- include "spool.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: spool-enterprise
+      {{- include "spool.selectorLabels" . | nindent 6 }}
   endpoints:
+    # /v2/metrics is unauthenticated on the daemon; the NetworkPolicy is what
+    # keeps it off the pod network except through the proxy.
     - port: http
       path: /v2/metrics
       interval: {{ .Values.metrics.serviceMonitor.interval }}

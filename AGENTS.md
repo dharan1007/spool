@@ -46,3 +46,13 @@ For browser-path changes, attempt `python3 scripts/browser-smoke.py` when the en
 - Keep benchmark methodology changes explicit.
 - Treat connectors as durability/security boundaries, not convenience wrappers.
 - Update README/architecture/security docs when externally observable behavior changes.
+
+## Engineering status register (2026-10-27)
+
+Production-readiness state, exact test evidence, remaining work and external blockers
+live in `engineering/completion/` (MASTER_REQUIREMENTS.json, CURRENT_STATE.json,
+REMAINING_TASKS.json, TEST_RESULTS.json, BLOCKERS.json, RESUME.md). Consult RESUME.md
+first when resuming work; do not rederive state from memory or session transcripts.
+Statuses use LOCAL_UNCOMMITTED / LOCAL_COMMITTED / REMOTE_PUSHED / TESTED /
+INTEGRATION_VERIFIED / PRODUCTION_QUALIFIED / EXTERNALLY_BLOCKED — never relabel a
+blocked qualification as passed.

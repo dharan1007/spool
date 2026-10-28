@@ -1,0 +1,98 @@
+{
+  "register": "SPOOL-BLOCKERS",
+  "updatedAt": "2026-10-28",
+  "branch": "engineering/spool-enterprise-production-hardening",
+  "blockers": [
+    {
+      "id": "B001",
+      "domain": "bigquery-real-provider",
+      "type": "EXTERNALLY_BLOCKED",
+      "missingResource": "GCP service-account credentials (GOOGLE_APPLICATION_CREDENTIALS / service-account JSON) authorized for a BigQuery test project",
+      "evidenceWithoutResource": "SPOOL_ATOMIC_V2 semantics, recovery, fencing and rollback proven against the emulator/local contract in tests/bigquery-atomic-recovery.test.js 5/5",
+      "notPassedLabel": "REAL_PROVIDER_NOT_QUALIFIED — must never be labeled passed"
+    },
+    {
+      "id": "B002",
+      "domain": "mssql-connector-live-qualification",
+      "type": "ENVIRONMENT_CAPACITY",
+      "missingResource": "Host capacity to run SQL Server 2022 for Linux. Re-measured on 2026-10-28: C: has 1.34 GB free; the Docker data disk (docker_data.vhdx) is 34.90 GB against a 64 GB ceiling and its contents are essentially full (docker system df: 25.97 GB images of which 15.6 GB belongs to other projects, 2.061 GB containers of which 1.95 GB belongs to other projects, 2.26 GB volumes of which 396 MB is reclaimable, 3.435 GB build cache with 79 MB reclaimable after pruning). The SQL Server 2022 image is 0.63 GB compressed / about 1.6 GB extracted plus a writable data volume. After pruning our own build cache there is still under 0.6 GB of SPOOL-owned space, so the pull would need ~1.6 GB of vhdx growth into ~1.3 GB of host free space. Compaction needs elevation (diskpart/Optimize-VHD) and relocating the data root is a Docker Desktop GUI/admin operation; deleting other projects' images and manual vhdx moves are out of bounds. On 2026-10-28 the Docker engine also stopped answering a bounded 25 s `docker info` probe (Docker Desktop processes present, com.docker.service Stopped), so even an image pull could not be attempted at c5d3cc9.",
+      "alreadyQualified": "PostgreSQL 18.6 (TLS verify-full) 55/55 and MySQL 8.4.13 (TLS verify-full, non-UTC host) 7/7 conformance suites now pass live — see resolvedThisSession R003/R004. The SQL Server connector remains covered only by its provider-gated suite plus static verification that it defaults to encrypt=true with trustServerCertificate=false (src/connectors/mssql/connection.js:47-50).",
+      "notPassedLabel": "REAL_PROVIDER_NOT_QUALIFIED — capacity-blocked, not a product defect"
+    },
+    {
+      "id": "B003",
+      "domain": "release-signing",
+      "type": "EXTERNALLY_BLOCKED",
+      "missingResource": "Authorized SPOOL_RELEASE_PRIVATE_KEY / release signing material held outside engineer machines",
+      "notPassedLabel": "UNSIGNED_BUILD — gate fails closed by verified design"
+    },
+    {
+      "id": "B004",
+      "domain": "independent-audit",
+      "type": "EXTERNALLY_BLOCKED",
+      "missingResource": "Independent third-party security audit engagement. Internal hardening is complete and reproducible but cannot substitute for an independent audit: tests/cloud-http-security.test.js 12/12 (address classes, DNS-time enforcement, redirects, deadlines, body ceilings), tests/connector-auth-surface.test.js 3/3, tests/dependency-artifacts.test.js 7/7 and scripts/audit-artifacts.js per-artifact audit at c5d3cc9, plus the register-validation suite. Evidence is audit-ready; no auditor has reviewed it.",
+      "notPassedLabel": "NOT_AUDITED"
+    },
+    {
+      "id": "B006",
+      "domain": "cluster-deployment",
+      "type": "ENVIRONMENT_CAPACITY",
+      "missingResource": "A reachable Kubernetes cluster. Re-checked on 2026-10-28: kubectl v1.36.1 is installed and `kubectl config get-contexts` returns no contexts at all, so no API server is configured. Docker Desktop's bundled cluster was reported Mode kind, State disabled; enabling it downloads control-plane images (kindest/node alone is 0.38 GB compressed) into the same C: drive that has 1.34 GB free while the Docker data disk is effectively full and the engine was not answering `docker info` within 25 s, so it was deliberately not attempted rather than risk filling the system drive.",
+      "evidenceWithoutResource": "Chart lints and renders; rendered object properties are asserted by scripts/check-deployment.js (8 objects) and tests/deployment-manifests.test.js 5/5 (non-root entrypoint, single-writer replica pin, proxy-only listener with Host rewrite, read-only rootfs, dropped capabilities, seccomp, NetworkPolicy both directions). The image the chart would deploy is now built and runtime-qualified (B005 resolved), so only a cluster is missing.",
+      "notPassedLabel": "NOT_DEPLOYED"
+    }
+  ],
+  "resolvedThisSession": [
+    {
+      "id": "R001",
+      "domain": "tests/production-connector-policy.test.js",
+      "symptom": "EBUSY/EPERM unlink spool-policy-* state.db(-shm) teardown failure recurring in subtest 2",
+      "rootCause": "Assertion drift masked by leaked handle: the 257MiB create was legal under the reviewed 10GiB ceiling, the failed a.rejects leaked the created service's open state DB handle, and the finally rm EBUSY replaced the real assertion error",
+      "resolution": "Test aligned to the pinned policy bound; legal create explicitly closed; teardown uses fs.rm maxRetries; 8/8 across repeated runs"
+    },
+    {
+      "id": "R002",
+      "domain": "scripts/drill-backup-restore.js",
+      "symptom": "Drill reported EBUSY unlink of live/registry.db instead of its real failure",
+      "rootCause": "The cleanup block ran before handles were closed, so the Windows EBUSY from an open registry replaced the genuine assertion error (the workspace directory had not been created)",
+      "resolution": "Handles are tracked and closed in the finally before cleanup, the workspace directory is created up front, and the drill now reports real failures; 12 checks pass"
+    },
+    {
+      "id": "R003",
+      "domain": "postgres-connector-live-qualification",
+      "symptom": "PostgreSQL 18.6 schema-migration conformance failed 5/5 live tests with UNMANAGED_CONSTRAINT BLOCKING entries",
+      "rootCause": "PostgreSQL 18 catalogues NOT NULL as pg_constraint (contype 'n'); the planner treated every non-primary constraint as unmanaged, so any NOT NULL column blocked add-column/cast/drop/PK migrations",
+      "resolution": "diffPostgresSchema skips 'n' (nullability is already in the column contract) and still blocks real unmanaged constraints; live PostgreSQL 18.6 conformance 55/55 with TLS verify-full; unit regression in tests/schema-migration.test.js"
+    },
+    {
+      "id": "R004",
+      "domain": "mysql-connector-live-qualification",
+      "symptom": "MySQL source conformance returned 2026-02-28T23:36:07Z for a stored 2026-03-01 05:06:07 DATETIME on an IST host",
+      "rootCause": "DATETIME has no offset and mysql2 parsed it in the host process timezone, so migrated values shifted by the host offset (5h30m)",
+      "resolution": "mysqlConnectionConfig pins timezone 'Z'; live MySQL 8.4.13 source+target conformance 7/7 on the non-UTC host with TLS verify-full",
+      "followUp": "A repeat run against the same server exposed a non-idempotent test reset: it recreated only the data table, so the durable spool_batch_ledger/spool_execution_leases evidence from the previous run made the replay look like a ledger mismatch. The reset now deletes only that table's ledger and lease rows; 7/7 passes on a dirty server too, with no assertion relaxed."
+    },
+    {
+      "id": "R005",
+      "domain": "container-image (was B005)",
+      "symptom": "Image build repeatedly failed because the Docker engine died mid-build with 0.25-1.3 GB free on C:",
+      "rootCause": "Host disk exhaustion, not a Docker or Dockerfile defect: reclaiming temp/update caches restored the engine, and the build then completed with cache hits",
+      "resolution": "Image built at d2c1b94 (sha256:5a7c6207…, 532 642 879 B, non-root node, HEALTHCHECK), real HTTP lifecycle 20/20 checks in-container, restart persistence, kernel-level loopback-only listener, fail-closed config exits; scripts/qualify-container.js + docs/SELF_HOSTING.md runbook"
+    },
+    {
+      "id": "R006",
+      "domain": "enterprise-api-organization-provisioning",
+      "symptom": "A fresh daemon deployment could never create a workspace: POST /v2/workspaces failed ORGANIZATION_NOT_FOUND and only tests could create an organization",
+      "rootCause": "The registry constructor API had no product surface; the daemon was provisioned only with a pre-existing registry.db",
+      "resolution": "POST /v2/organizations (platform root, registry required) with root-only RBAC; tests/api-v2.test.js covers creation, denial for API-key principals and immediate workspace usability; documented in docs/SELF_HOSTING.md"
+    },
+    {
+      "id": "R007",
+      "domain": "production-dependency-advisory (was B007)",
+      "symptom": "High-severity dependency advisory GHSA-xcx6-jx8p-x3h5 in @azure/msal-node (transitive via tedious/mssql and snowflake-sdk) failed npm audit --omit=dev --audit-level=high",
+      "rootCause": "mssql and snowflake-sdk were listed as core production dependencies even though they are optional connectors, pulling in @azure/identity and vulnerable @azure/msal-node into the core production package closure",
+      "resolution": "Scoped optional drivers (mssql, snowflake-sdk) to devDependencies; introduced src/connectors/driver-loader.js with shape, major-version verification and fail-closed typed errors (CONNECTOR_DRIVER_*); updated static release check and added boundary tests; core production closure (npm audit --omit=dev) reports 0 vulnerabilities",
+      "scope": "CORE ARTIFACT ONLY. The optional-driver artifact (core + mssql/snowflake-sdk) is still affected by DR-001 (npm audit --audit-level=high: GHSA-xcx6-jx8p-x3h5), so SQL Server and Snowflake remain outside the production allowlist and non-qualified. Re-verified 2026-10-28: no published @azure/identity (latest 4.14.0, beta 4.15.0-beta.1) depends on @azure/msal-node >= 7.1.0. scripts/audit-artifacts.js reports both scopes separately and never labels the optional scope as a pass."
+    }
+  ]
+}

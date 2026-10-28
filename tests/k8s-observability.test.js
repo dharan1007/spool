@@ -5,8 +5,12 @@ import { metrics, defaultRegistry } from '../src/observability/prometheus.js';
 
 test('Kubernetes deployment and ServiceMonitor specifications', async () => {
   const deploymentYaml = await readFile('helm/spool/templates/deployment.yaml', 'utf8');
-  assert.ok(deploymentYaml.includes('path: /v2/health'));
-  assert.ok(deploymentYaml.includes('path: /v2/ready'));
+  const valuesYaml = await readFile('helm/spool/values.yaml', 'utf8');
+  // Probes must be wired to the chart values that carry the real daemon routes.
+  assert.ok(deploymentYaml.includes('path: {{ .Values.probes.liveness.path }}'));
+  assert.ok(deploymentYaml.includes('path: {{ .Values.probes.readiness.path }}'));
+  assert.ok(/liveness:\n\s+path: \/v2\/health\n/.test(valuesYaml));
+  assert.ok(/readiness:\n\s+path: \/v2\/ready\n/.test(valuesYaml));
   assert.ok(deploymentYaml.includes('containerPort: 8080'));
 
   const serviceMonitorYaml = await readFile('helm/spool/templates/servicemonitor.yaml', 'utf8');

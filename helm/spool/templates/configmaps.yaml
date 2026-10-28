@@ -1,0 +1,44 @@
+{{- include "spool.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "spool.fullname" . }}-daemon
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spool.labels" . | nindent 4 }}
+data:
+  NODE_ENV: production
+  SPOOL_STATE_DIR: {{ .Values.state.mountPath | quote }}
+  SPOOL_DAEMON_PORT: "8080"
+  SPOOL_SOURCE_CEILING_BYTES: {{ .Values.sourceCeilingBytes | quote }}
+  SPOOL_RELEASE_VERSION: {{ .Values.release.version | quote }}
+  SPOOL_RELEASE_COMMIT_SHA: {{ .Values.release.commitSha | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "spool.fullname" . }}-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spool.labels" . | nindent 4 }}
+data:
+  default.conf: |
+    # The daemon listens on loopback and validates the Host header against its
+    # own loopback identity, so the proxy must rewrite Host rather than forward
+    # the client's host name.
+    server {
+      listen 8081;
+      server_name _;
+      client_max_body_size 16m;
+
+      location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1:8080;
+        proxy_set_header Connection "";
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_buffering off;
+      }
+    }

@@ -26,8 +26,52 @@ export function App() {
         <span className="brand">SPOOL Console</span>
         <span className="release">engine {state.info?.engine?.release} � {String(state.info?.engine?.commitSha ?? "").slice(0, 7)}</span>
       </header>
-      <Wizard />
+      {state.page === "onboarding" ? (
+        <Onboarding onComplete={() => setState(s => ({ ...s, page: "workspace" }))} />
+      ) : (
+        <Wizard />
+      )}
     </div>
+  );
+}
+
+function Onboarding({ onComplete }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function handleStart() {
+    setBusy(true);
+    setError(null);
+    try {
+      await call("settings.completeOnboarding", {});
+      onComplete();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel title="Welcome to SPOOL Console">
+      <div className="onboarding-welcome">
+        <p className="lead">
+          SPOOL is a local-first deterministic data migration system.
+        </p>
+        <div className="guarantees">
+          <h3>Local-first safety invariants:</h3>
+          <ul>
+            <li><strong>Zero data upload:</strong> Your dataset remains strictly on this machine.</li>
+            <li><strong>Fail-closed verification:</strong> Ambiguity or contract drift halts execution without writing corrupted data.</li>
+            <li><strong>Durable ledger & checkpoints:</strong> Every batch is cryptographically fenced and atomic.</li>
+          </ul>
+        </div>
+        {error && <Banner error={error} />}
+        <Button onClick={handleStart} disabled={busy}>
+          {busy ? "Setting up workspace..." : "Get Started"}
+        </Button>
+      </div>
+    </Panel>
   );
 }
 

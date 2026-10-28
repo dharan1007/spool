@@ -26,6 +26,7 @@
     "benchmark": "node benchmarks/run.js",
     "check:model": "node scripts/check-svmp-model.js",
     "check": "npm test && npm run check:model && node scripts/release-gate.js",
+    "audit:artifacts": "node scripts/audit-artifacts.js",
     "release:sign": "node scripts/sign-release.js",
     "release:verify": "node scripts/verify-release-chain.js",
     "release:reproduce": "node scripts/reproducible-build-evidence.js",
@@ -34,8 +35,8 @@
     "build": "node scripts/build-dist.js"
   },
   "dependencies": {
+    "@google-cloud/bigquery": "^9.5.0",
     "better-sqlite3": "12.10.1",
-    "mssql": "^12.7.2",
     "mysql2": "^3.24.4",
     "pg": "8.23.0",
     "pg-copy-streams": "^7.0.0",
@@ -46,6 +47,8 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "@types/node": "^22.20.2"
+    "@types/node": "^22.20.2",
+    "mssql": "^12.7.2",
+    "snowflake-sdk": "^3.4.0"
   }
 }

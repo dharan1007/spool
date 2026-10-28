@@ -861,14 +861,18 @@ API call succeeds with SSO JWT. Test: expired session → re-auth required.
 **Priority**: P1  
 **Acceptance criteria**:
 1. Security policy document at `docs/compliance/soc2/security-policy.md`
-2. Availability policy at `docs/compliance/soc2/availability-policy.md`
+2. Availability/support commitments at `docs/compliance/soc2/SLA_AND_SUPPORT_POLICY.md`
 3. Processing integrity policy (strongest: receipts = proof of integrity)
 4. Confidentiality policy (credential isolation, no data telemetry)
-5. Privacy policy (PII awareness tags, no data retention beyond customer target)
+5. Privacy/data-classification handling at `docs/compliance/soc2/03-data-classification-handling-policy.md`
 6. Controls matrix mapping policies → implementation evidence
 7. Access review process documented
 8. Incident response runbook at `docs/operations/incident-response.md`
 9. Change management process documented (signed releases, PR reviews)
+
+These documents are internal drafts written against the SOC 2 Trust Services Criteria.
+They are not an audit and no auditor has issued a report; see
+`docs/compliance/soc2/README.md` and `engineering/completion/BLOCKERS.json` B004.
 
 ### Phase 4 Requirements (Scale & Orchestration)
 
@@ -1031,7 +1035,7 @@ are invisible to B; billing reflects A's usage only.
 | scheduling | — | **PRODUCTION** |
 | horizontal-scaling | — | **PRODUCTION** |
 | managed-service | — | **PRODUCTION** |
-| soc2-type2 | — | **ACHIEVED** |
+| soc2-type2 | — | Auditor-issued report (not started; no engagement) |
 
 ### Appendix B: Organizational Requirements
 

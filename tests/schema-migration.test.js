@@ -110,6 +110,35 @@ test('unmanaged objects are reported and refuse plan creation', () => {
   }), /SCHEMA_MIGRATION_UNMANAGED/);
 });
 
+test('PostgreSQL 18 catalogued NOT NULL constraints are not unmanaged objects', () => {
+  const record = liveRecord({
+    columns: BASE_COLUMNS,
+    extras: {
+      constraints: [
+        { name: 't_pkey', type: 'p', validated: true, deferrable: false, deferred: false, definition: 'PRIMARY KEY (id)' },
+        { name: 't_name_not_null', type: 'n', validated: true, deferrable: false, deferred: false, definition: 'NOT NULL name' }
+      ]
+    }
+  });
+  const diff = diffPostgresSchema({ desiredSchema: BASE_DESIRED, primaryKey: ['id'], liveRecord: record });
+  assert.deepEqual(diff.map(entry => entry.kind), []);
+
+  // A real unmanaged constraint still blocks, so skipping 'n' does not weaken the guard.
+  const withCheck = liveRecord({
+    columns: BASE_COLUMNS,
+    extras: {
+      constraints: [
+        { name: 't_pkey', type: 'p', validated: true, deferrable: false, deferred: false, definition: 'PRIMARY KEY (id)' },
+        { name: 't_name_not_null', type: 'n', validated: true, deferrable: false, deferred: false, definition: 'NOT NULL name' },
+        { name: 't_name_check', type: 'c', validated: true, deferrable: false, deferred: false, definition: "CHECK ((name <> ''::text))" }
+      ]
+    }
+  });
+  const blocked = diffPostgresSchema({ desiredSchema: BASE_DESIRED, primaryKey: ['id'], liveRecord: withCheck });
+  assert.deepEqual(blocked.map(entry => entry.kind), ['UNMANAGED_CONSTRAINT']);
+  assert.equal(blocked[0].name, 't_name_check');
+});
+
 test('migration plans order steps deterministically with stable hash identity', () => {
   const desired = [
     { name: 'id', type: 'integer', nullable: false },

@@ -1,4 +1,3 @@
-import sql from 'mssql';
 import { fail } from '../../core/errors.js';
 import { sha256Canonical } from '../../platform/canonical-json.js';
 import { connectorIdentity } from '../../platform/contracts.js';
@@ -7,6 +6,7 @@ import { createMssqlSourceState } from '../../protocol/state-descriptors.js';
 import { validateConnectorDescriptor } from '../contract.js';
 import { materializeSnapshotBatches } from '../materialized-snapshot.js';
 import { parseMssqlEndpoint, withMssqlConnection } from './connection.js';
+import { loadMssqlDriver } from './driver.js';
 import { mssqlQuery } from './preflight.js';
 
 const DEFAULT_BATCH_SIZE = 1000;
@@ -215,6 +215,7 @@ export async function withMssqlSourceSnapshot({ sourceRef, credentialBroker, bat
   if (typeof callback !== 'function') fail('INVALID_MSSQL_SOURCE_CONFIG', 'snapshot callback is required');
   const ref = sourceRefConfig(sourceRef);
   const size = requireBatchSize(batchSize);
+  const sql = await loadMssqlDriver();
 
   return withMssqlConnection({ targetRef: ref, credentialBroker }, async pool => {
     // Isolation must be set on the transaction itself: pool connections are

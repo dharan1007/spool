@@ -1,0 +1,161 @@
+{
+  "register": "SPOOL-ENGINEERING-MASTER-REQUIREMENTS",
+  "updatedAt": "2026-10-28",
+  "branch": "engineering/spool-enterprise-production-hardening",
+  "pullRequest": "https://github.com/dharan1007/spool/pull/99",
+  "statusVocabulary": ["LOCAL_UNCOMMITTED", "LOCAL_COMMITTED", "REMOTE_PUSHED", "TESTED", "INTEGRATION_VERIFIED", "PRODUCTION_QUALIFIED", "EXTERNALLY_BLOCKED", "PARTIAL"],
+  "domains": [
+    {
+      "id": "enterprise-api-v2",
+      "requirement": "Enterprise REST API v2 with multi-tenant registry (orgs/workspaces/memberships/api-keys), RBAC, workspace isolation, audit activity, and a full migration lifecycle bound to the real SpoolCommandService engine",
+      "implementation": ["src/enterprise/registry.js", "src/enterprise/orchestrator.js", "src/daemon/spoold-v2.js"],
+      "tests": ["tests/api-v2.test.js", "tests/api-stress.test.js"],
+      "verifiedResults": "api-v2 6/6 pass (transport hardening; full real-engine lifecycle with verified SQLite target rows and idempotent replay; revocation/source-mutation/contract-drift hardening; registry isolation; per-principal rate limiting), api-stress 1/1 pass (layered benchmark), daemon entrypoint 3/3",
+      "status": "TESTED",
+      "notes": "Fail-closed semantics: cross-workspace existence collapsed to MIGRATION_NOT_FOUND; key issuance provisions membership; replay only via real engine idempotent path"
+    },
+    {
+      "id": "observability",
+      "requirement": "Prometheus-compatible metrics with correct histogram semantics (cumulative buckets per key, +Inf, per-label sums/counts) and non-throwing Summaries",
+      "implementation": ["src/observability/prometheus.js"],
+      "tests": ["tests/observability.test.js"],
+      "verifiedResults": "5/5 pass",
+      "status": "TESTED"
+    },
+    {
+      "id": "scheduler",
+      "requirement": "Durable scheduler without insecure auto-approval/auto-execution; lease-based scheduling",
+      "implementation": ["src/daemon/scheduler.js"],
+      "tests": ["tests/scheduler.test.js"],
+      "verifiedResults": "6/6 pass (scheduleInterval insecure path removed; scheduleWithLease stages only), scheduler-distributed-lease 1/1 (durable lease respected across a second scheduler instance; expiry and fencing enforced)",
+      "status": "TESTED",
+      "notes": "Proven for processes on one host sharing the target database lease table; no multi-node cluster has been deployed (BLOCKERS B006)"
+    },
+    {
+      "id": "release-gate",
+      "requirement": "Release gate fails closed without signing evidence; signed path verified",
+      "implementation": ["src/release/gate.js", "scripts/release-gate.js"],
+      "tests": ["tests/release-contract.test.js"],
+      "verifiedResults": "5/5 pass, including NEW fail-closed regression (UNSIGNED_BUILD with all qualification steps still run in order) and signed-path verification (sign + double verify-release-chain sharing exact parity evidence)",
+      "status": "TESTED"
+    },
+    {
+      "id": "bigquery-atomic",
+      "requirement": "Canonical SPOOL_ATOMIC_V2 BigQuery connector: multi-statement transaction, atomic target/ledger writes, ambiguous commit reconciliation, legacy ledger indeterminate handling, rollback, fencing, atomic recovery",
+      "implementation": ["src/connectors/bigquery/target.js"],
+      "tests": ["tests/bigquery-atomic-recovery.test.js"],
+      "verifiedResults": "5/5 pass (re-ran post-refactor)",
+      "status": "TESTED",
+      "notes": "Real-provider qualification remains EXTERNALLY_BLOCKED (no GCP credentials in this environment); see BLOCKERS"
+    },
+    {
+      "id": "production-connector-policy",
+      "requirement": "Production mode permits only qualified SQLite INSERT through the canonical lifecycle; experimental targets denied before discovery/approval/mutation; qualification marker semantics enforced",
+      "implementation": ["src/platform/production-policy.js", "src/daemon/command-service.js"],
+      "tests": ["tests/production-connector-policy.test.js"],
+      "verifiedResults": "8/8 pass. EBUSY teardown root cause RESOLVED: test expected denial for maxSourceBytes=257MiB but the reviewed 1.1.2 policy ceiling is 10 GiB (PRODUCTION_POLICY.maxSourceBytes, production-policy.js:65); the un-denied create leaked an open state.db-shm handle and the finally-block rm EBUSY replaced the real assertion error. Test now denies >10GiB, closes the legal 257MiB create, and teardown uses fs.rm maxRetries for transient Windows AV locks",
+      "status": "TESTED"
+    },
+    {
+      "id": "static-integrity",
+      "requirement": "Static release check continuity",
+      "verifiedResults": "node scripts/static-check.js: PASS (21 required artifacts, stable SQLite runtime, no source-network primitives, JS syntax valid)",
+      "status": "TESTED"
+    },
+    {
+      "id": "full-suite-reconciliation",
+      "requirement": "Full npm test suite green with exact reconciled counts (total/passed/failed/skipped/cancelled/todo)",
+      "implementation": [],
+      "tests": ["package.json scripts.test"],
+      "verifiedResults": "634 tests: 570 pass, 0 fail, 64 provider-gated skips (live-provider conformance, honestly skipped), 0 cancelled, 0 todo — reconciliation exact",
+      "status": "TESTED"
+    },
+    {
+      "id": "desktop-onboarding",
+      "requirement": "Desktop first-run onboarding and installed-application qualification",
+      "tests": ["apps/console/tests/onboarding.test.js"],
+      "verifiedResults": "onboarding component gated on settings.onboardingComplete; console suite 10/10; typecheck clean; build:renderer OK; package:dir produced win-unpacked",
+      "status": "TESTED",
+      "notes": "The packaged directory build is verified; no code-signed installer is produced (signing material absent, BLOCKERS B003)"
+    },
+    {
+      "id": "browser-studio-security-e2e",
+      "requirement": "Browser Studio security and end-to-end tests",
+      "tests": ["scripts/browser-smoke.py"],
+      "verifiedResults": "real Chrome smoke against a built dist: all 6 routes, 25000 rows (24955 valid / 45 invalid), WebMCP tools present, 0 runtime exceptions, 0 failed network loads",
+      "status": "TESTED",
+      "notes": "Local Chrome only; no hosted deployment exists to test (see deployment-qualification)"
+    },
+    {
+      "id": "distributed-scheduling-workers",
+      "requirement": "Durable, distributed scheduling and worker execution beyond single-process",
+      "implementation": ["src/daemon/scheduler.js", "src/execution/lease-store.js"],
+      "tests": ["tests/scheduler.test.js", "tests/scheduler-distributed-lease.test.js"],
+      "verifiedResults": "lease-based staging verified across two scheduler instances on one host: current lease respected, expiry honoured, fencing token enforced; staging only, no auto-approve",
+      "status": "TESTED",
+      "notes": "Single-host process isolation proven. Multi-node deployment is not qualified: no cluster (BLOCKERS B006) and the registry/state volume is single-writer (deploy/kubernetes/README.md)"
+    },
+    {
+      "id": "connector-conformance-cdc-cutover",
+      "requirement": "Database connector conformance, exact verification, CDC, repair and cutover where required",
+      "status": "EXTERNALLY_BLOCKED",
+      "verifiedResults": "SQLite target path qualified end to end (20 cases, 262599 assertions); PostgreSQL 18.6 (TLS verify-full) 55/55 and MySQL 8.4.13 (TLS verify-full, non-UTC host) live conformance, CDC, repair, bulk and cutover suites pass at d2c1b94; BigQuery atomic/recovery semantics proven against the local contract (5/5); 64 live-provider conformance tests exist and are skipped only because endpoints/credentials are absent",
+      "notes": "SQL Server live conformance needs host capacity (BLOCKERS B002); BigQuery needs GCP service-account credentials (B001). PostgreSQL and MySQL live results are bound to d2c1b94 and must be re-run for any newer commit before being cited as current. Never report these as qualified."
+    },
+    {
+      "id": "cicd",
+      "requirement": "CI/CD pipeline provisioning and green runs",
+      "status": "EXTERNALLY_BLOCKED",
+      "implementation": ["scripts/qualify-bounded-release.js", "scripts/release-gate.js", "scripts/verify-deployment.js"],
+      "verifiedResults": "At c5d3cc9: full suite 634 tests / 570 pass / 0 fail / 64 provider-gated skips / 0 todo (exit 0); model check PASS; build PASS (dist artifact root 344a1d89�?�, 65/65 build-time tests); reproducible build PASS (both builds 344a1d89�?�, 136 artifacts); pack:verify PASS (tarball sha256:7e901499�?�, installed run 5 rows -> 3 written / 2 rejected); benchmark PASS; static check PASS (22 required artifacts); per-artifact dependency audit: core PASS (npm audit --omit=dev --audit-level=high = 0 findings), optional-driver scope AFFECTED by the upstream MSAL advisory and reported as OPTIONAL_SCOPE_AFFECTED rather than as a pass. Release gate fails closed on missing signing material (UNSIGNED_BUILD, B003).",
+      "notes": "Signing material (B003, UNSIGNED_BUILD) remains the blocking gate. GitHub Actions is deliberately not used (release contract)."
+    },
+    {
+      "id": "containers",
+      "requirement": "Docker images, Kubernetes and Helm packaging",
+      "implementation": ["Dockerfile", ".dockerignore", "src/daemon/spoold-v2-main.js", "helm/spool", "deploy/kubernetes/README.md"],
+      "tests": ["tests/deployment-manifests.test.js", "scripts/check-deployment.js"],
+      "verifiedResults": "Container image BUILT and runtime-qualified at d2c1b94 (sha256:5a7c6207…, non-root node, HEALTHCHECK): 20/20 checks in-container including real migration, restart persistence, loopback-only listener, fail-closed config (scripts/qualify-container.js, docs/SELF_HOSTING.md). Helm chart lints and renders (8 objects, fail-closed replicaCount>1).",
+      "status": "PARTIAL",
+      "notes": "Cluster apply is capacity-blocked (no Kubernetes cluster, B006; CAPACITY_RELOCATION.md prepared for Docker Desktop relocation)."
+    },
+    {
+      "id": "benchmarks-performance",
+      "requirement": "Performance benchmarks with honest labeling",
+      "status": "TESTED",
+      "verifiedResults": "benchmarks/run.js executed at 06df51a and refreshed benchmarks/latest.json + docs/BENCHMARKS.md; api-stress labels transport/authenticated/registry layers separately and states that it is not migration execution throughput",
+      "notes": "Local deterministic engine and serialized-schema measurements only; public-scale throughput and LLM completion-rate improvement are not claimed (capabilities public-scale-proof remains EXPERIMENTAL)"
+    },
+    {
+      "id": "backup-dr",
+      "requirement": "Backup and disaster recovery",
+      "implementation": ["src/platform/sqlite-backup.js", "scripts/drill-backup-restore.js"],
+      "tests": ["tests/backup-restore.test.js"],
+      "verifiedResults": "drill PASS (12 checks): online backup of open WAL registry and target, restore into a fresh root with workspace/membership/API-key/migration/activity/row parity, tampered backup rejected; 4/4 tests",
+      "status": "TESTED",
+      "notes": "Software-level drill on one host. Off-host storage, encryption of backups, point-in-time recovery and restore onto other hardware are NOT covered (docs/BACKUP_AND_RESTORE.md)."
+    },
+    {
+      "id": "threat-model-security",
+      "requirement": "Threat model maintenance and security remediation",
+      "implementation": ["docs/THREAT_MODEL.md"],
+      "verifiedResults": "Enterprise registry/API boundary, plus bounded SSRF resistance for the cloud HTTP transport (address classification, metadata/link-local always refused, loopback+private require an explicit operator allowlist, DNS-time enforcement with pinned address, redirects never followed, request/response ceilings, total deadline) and a pinned connector credential surface (SQL Server uses SQL auth only, Snowflake driver options rebuilt from an explicit key list, no Azure credential class under src/connectors). Explicit residual risks are recorded, including that this is bounded SSRF resistance and not complete SSRF protection.",
+      "status": "TESTED",
+      "notes": "Self-assessed against tests and code, NOT an independent audit (BLOCKERS B004)"
+    },
+    {
+      "id": "release-integrity-signing",
+      "requirement": "Release integrity, signed artifacts, reproducible build evidence",
+      "status": "TESTED",
+      "verifiedResults": "Release gate verified fail-closed: unsigned builds terminate with UNSIGNED_BUILD after binding the exact SHA, running both reproducible builds and verifying the chain; signed-path verification is covered by tests/release-contract.test.js using an injectable gate. Reproducible build evidence is identical across independent builds of the same commit.",
+      "notes": "Gate verified fail-closed; actual signing requires authorized release keys (EXTERNALLY_BLOCKED for production signing material)"
+    },
+    {
+      "id": "deployment-qualification",
+      "requirement": "Production deployment qualification",
+      "status": "EXTERNALLY_BLOCKED",
+      "verifiedResults": "Candidate qualification matrix produced (engineering/completion/PRODUCTION_QUALIFICATION.md update 4, bound to c5d3cc94b012c80722715375fa409933a316bf1a): every gate that this host can exercise was executed and reconciled. PASS at c5d3cc9: full suite 634/570 pass/0 fail/64 provider-gated skips, container image build + in-container lifecycle + restart persistence + loopback-only + non-root + fail-closed config (d2c1b94 image; no src/ changes since, but the engine is now unresponsive so it was not rebuilt), PostgreSQL 55/55 live and MySQL 7/7 live (bound to d2c1b94), backup drill, browser Studio (e855353), build, reproducible build, benchmark, static check, model check, package verify, Helm render. Per-artifact dependency audit: core 0 vulnerabilities, optional-driver scope affected by the upstream MSAL advisory and reported as affected. FAIL CLOSED by design: release chain UNSIGNED_BUILD (B003). Not run: SQL Server live (host capacity, B002), cluster deployment (host capacity, B006), independent audit (B004), BigQuery (B001).",
+      "notes": "RELEASE NOT QUALIFIED. Remaining external material: signing material (B003), BigQuery credentials (B001) and independent audit (B004). Remaining host-capacity limits: SQL Server live qualification (B002, CAPACITY_RELOCATION.md prepared) and cluster apply (B006)."
+    }
+  ]
+}

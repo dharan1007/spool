@@ -17,6 +17,100 @@ npm run build
 
 The build produces `dist/` and `dist/release.json`. A production release must contain the exact 40-character Git commit in `release.json`; do not invent or replace release identity after the build.
 
+## Run the enterprise daemon container
+
+The repository `Dockerfile` builds a non-root image (`node`, uid 1000) whose
+entrypoint is `node src/daemon/spoold-v2-main.js` and whose state directory is
+the `/var/lib/spool` volume. The daemon binds `127.0.0.1` inside the container,
+so publish nothing directly: front it with the same-pod proxy from `helm/spool`
+or exec inside it.
+
+```bash
+docker build -t spool-daemon .
+docker run -d --name spool-daemon \
+  -v spool-state:/var/lib/spool \
+  -e SPOOL_DAEMON_TOKEN="<at least 32 bytes>" \
+  -e SPOOL_APPROVAL_SIGNING_KEY="<at least 32 bytes>" \
+  -e SPOOL_RELEASE_COMMIT_SHA="$(git rev-parse HEAD)" \
+  spool-daemon
+```
+
+The daemon refuses to start without those three values and exits non-zero with
+`INVALID_DAEMON_CONFIG`, so a misconfigured deployment fails closed instead of
+serving unauthenticated state.
+
+A fresh volume has no organization, and every workspace belongs to one. With
+the root bearer token provision it in product order:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/v2/organizations \
+  -H "authorization: Bearer $SPOOL_DAEMON_TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"your-org"}'
+# then POST /v2/workspaces with that organizationId, and
+# POST /v2/workspaces/{id}/apikeys for per-workspace operator/viewer keys
+```
+
+`scripts/qualify-container.js` is the in-container acceptance check: copy it in
+(`docker cp`) and run it as the image user. It exercises health/ready/metrics,
+the fail-closed transport cases (401, 421, invalid JSON), organization,
+workspace and API-key provisioning, a real CSV -> SQLite migration through
+plan/dry-run/approve/execute/receipt/verification, and row-level verification of
+the durable target. It exits non-zero on the first failed check.
+
+### Optional SQL Server and Snowflake drivers
+
+The release image and the packaged release install only the core dependency
+set. The SQL Server (`mssql@^12`) and Snowflake (`snowflake-sdk@^3`) drivers are
+optional: they are not bundled, and a migration that needs one fails closed with
+`CONNECTOR_DRIVER_UNAVAILABLE` before any secret is read or connection is
+attempted. Install the driver beside the release when you need that connector:
+
+```bash
+npm install mssql@^12.7.2          # SQL Server
+npm install snowflake-sdk@^3.4.0   # Snowflake
+```
+
+For the container, derive an image instead of modifying the release image:
+
+```dockerfile
+FROM spool-daemon:<exact-release>
+USER root
+RUN npm install --no-save --no-package-lock mssql@^12.7.2
+USER node
+```
+
+A derived image is outside the qualified release artifact: it reintroduces the
+upstream `@azure/msal-node` advisory recorded in `docs/DEPENDENCY_RISK.md`, so
+run `npm audit --omit=dev --audit-level=high` against it and treat the connector
+as unqualified. Installing a driver never changes the capability matrix or the
+production allowlist.
+`node scripts/audit-artifacts.js` reports the core artifact and the
+optional-driver scope separately.
+
+## Cloud wire endpoints and private networks
+
+Snowflake and BigQuery can be reached through the HTTP wire transport when the
+target ref carries an `endpoint`. The endpoint is untrusted plan data, so the
+transport refuses cloud metadata services and link-local addresses at all times,
+and refuses loopback/private addresses unless the operator names the endpoint:
+
+```bash
+# Exact private endpoints, comma separated. `host` or `host:port` entries.
+export SPOOL_CLOUD_PRIVATE_ENDPOINT_HOSTS="snowflake.internal.example:443,10.20.0.15:8443"
+
+# Optional: require https for every wire endpoint.
+export SPOOL_CLOUD_REQUIRE_TLS=1
+```
+
+- `SPOOL_CLOUD_ALLOW_PRIVATE_ENDPOINTS=1` is a blanket opt-in for disposable
+  staging roots only. It still cannot enable metadata or link-local targets.
+- Hostnames are validated again at connection time against the address they
+  resolve to, so a DNS name that resolves to a forbidden address is refused.
+- Redirects are not followed, responses are capped at 32 MiB, request bodies at
+  16 MiB, and each request has a 30 s total deadline.
+
+See `docs/THREAT_MODEL.md` for the residual risks of this control.
+
 ## Static hosting requirements
 
 Serve `dist/` as same-origin static files and configure SPA fallback so application routes such as `/studio/new`, `/local-runner`, `/security`, and `/services` resolve to `index.html` instead of returning a hosting-layer 404.

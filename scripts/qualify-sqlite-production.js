@@ -14,6 +14,7 @@ import { secureSnapshotPath, verifySnapshotPrivacy } from '../src/connectors/sna
 import { sha256Canonical } from '../src/platform/canonical-json.js';
 import { LeaseStore } from '../src/execution/lease-store.js';
 import { createBoundApproval } from '../src/platform/approval.js';
+import { readResourceSummary } from '../src/platform/measurement-evidence.js';
 
 const MiB = 1024 * 1024;
 const LIMIT = 256 * MiB;
@@ -452,8 +453,9 @@ async function parent() {
     monitorLog.end(); await once(monitorLog, 'finish');
     report.wallMs = performance.now() - started;
     if (code === 0) {
-      report.resources = JSON.parse(await readFile(measurementPath, 'utf8'));
-      if (!report.resources.samples || report.resources.errors.length) report.measurementFailure = 'missing samples or measurement errors';
+      const measured = await readResourceSummary(measurementPath);
+      if (measured.summary) report.resources = measured.summary;
+      if (!measured.ok) report.measurementFailure = measured.failure;
     } else report.measurementFailure = 'measurement process exited ' + code;
     await persist(); process.stdout.write('SQLITE_ATTEMPT_EVIDENCE=' + evidence + '\n');
   }
