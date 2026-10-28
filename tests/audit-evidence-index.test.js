@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, mkdir, rm, stat } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +30,11 @@ function runIndex(args, options = {}) {
     timeout: 120_000,
     ...options
   });
+}
+
+function trackedSet(paths) {
+  const output = execFileSync('git', ['ls-files', '-z', '--', ...paths], { cwd: root, encoding: 'utf8' });
+  return new Set(output.split('\0').filter(Boolean).map(entry => entry.split('\\').join('/')));
 }
 
 test('evidence index inventories real bytes, is deterministic and claims nothing', async () => {
@@ -65,11 +71,28 @@ test('evidence index inventories real bytes, is deterministic and claims nothing
     assert.equal(typeof entry.purpose, 'string');
   }
 
+  // The manifest describes the repository, so every present entry must be tracked.
+  const tracked = trackedSet(paths);
+  for (const entry of first.entries.filter(item => item.status === 'PRESENT')) {
+    assert.ok(tracked.has(entry.path), `${entry.path} is listed as repository evidence but is not tracked by git`);
+  }
+  for (const localPath of first.localOnly.paths) {
+    assert.equal(paths.includes(localPath), false, `${localPath} cannot be both an entry and local-only`);
+    assert.equal(tracked.has(localPath), false, `${localPath} is tracked and belongs in entries`);
+  }
+  assert.match(first.localOnly.note, /not tracked by git/);
+
   assert.equal(first.totals.expected, first.entries.length);
   assert.equal(first.totals.present + first.totals.absent, first.totals.expected);
+  assert.equal(first.totals.localOnly, first.localOnly.paths.length);
   assert.equal(first.totals.sets, EVIDENCE_MANIFEST.length);
   assert.ok(first.totals.present >= 30, 'the repository must already hold the core evidence set');
   assert.match(first.indexSha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    first.indexSha256,
+    sha256(first.entries.map(entry => `${entry.path}:${entry.status}:${entry.sha256 ?? 'ABSENT'}`).join('\n')),
+    'the manifest digest must cover entries only, not local-only files'
+  );
 
   for (const entry of first.entries.filter(item => item.status === 'PRESENT').slice(0, 10)) {
     const bytes = await readFile(join(root, entry.path));
@@ -99,6 +122,23 @@ test('expected-but-absent evidence is reported as ABSENT rather than omitted or 
   assert.match(present.sha256, /^[0-9a-f]{64}$/);
 });
 
+test('untracked local files are excluded from the manifest, not silently counted', async () => {
+  const index = await buildEvidenceIndex({ trackedPaths: [] });
+  assert.equal(index.entries.every(entry => entry.status === 'ABSENT'), true);
+  assert.ok(index.localOnly.paths.length >= 30, 'every present file becomes local-only without git tracking');
+  assert.ok(
+    index.localOnly.paths.every(path => existsSync(join(root, path))),
+    'local-only paths must exist on disk'
+  );
+
+  // A gitignored build artifact is reported, never presented as repository evidence.
+  const reproducibility = 'release/reproducibility-evidence.json';
+  if (existsSync(join(root, reproducibility))) {
+    assert.ok(index.localOnly.paths.includes(reproducibility));
+    assert.equal(index.entries.some(entry => entry.path === reproducibility), false);
+  }
+});
+
 test('the index refuses to treat its own output as evidence input', async () => {
   assert.throws(() => assertOutputIsNotEvidence(join(root, 'release', 'reproducibility-evidence.json'), root), EvidenceIndexError);
   assert.throws(() => assertOutputIsNotEvidence(join(root, '.console-evidence', 'index.json'), root), EvidenceIndexError);
@@ -108,7 +148,7 @@ test('the index refuses to treat its own output as evidence input', async () => 
   assert.equal(assertOutputIsNotEvidence(outside, root), outside);
 
   // A refusal must leave the evidence file untouched.
-  const evidencePath = join(root, 'release', 'reproducibility-evidence.json');
+  const evidencePath = join(root, 'release', 'parity-evidence.json');
   const before = await readFile(evidencePath);
   const result = runIndex(['--out', evidencePath]);
   assert.equal(result.status, 1, 'writing over evidence must fail');
@@ -140,26 +180,38 @@ test('the index runs from any working directory and never lists its own output',
 test('unexpected read failures are errors, never ABSENT', async () => {
   const fakeRoot = await temporaryDirectory('spool-evidence-index-errors-');
   try {
-    // A manifest path that exists but is not a regular file.
-    await mkdir(join(fakeRoot, 'release', 'reproducibility-evidence.json'), { recursive: true });
     const set = EVIDENCE_MANIFEST.find(item => item.id === 'release-evidence');
+
+    // Genuine absence is ABSENT.
+    const absent = await describeEvidenceEntry(fakeRoot, set, 'release/parity-evidence.json');
+    assert.equal(absent.status, 'ABSENT');
+
+    // A path that exists but is not a regular file is an error, and it is not
+    // downgraded to ABSENT by the whole-build path either.
+    await mkdir(join(fakeRoot, 'release', 'reproducibility-evidence.json'), { recursive: true });
     await assert.rejects(
       () => describeEvidenceEntry(fakeRoot, set, 'release/reproducibility-evidence.json'),
       error => error instanceof EvidenceIndexError && error.code === 'EVIDENCE_INDEX_NOT_A_FILE'
     );
-
-    // Genuine absence in the same fake root is still ABSENT.
-    const absent = await describeEvidenceEntry(fakeRoot, set, 'release/parity-evidence.json');
-    assert.equal(absent.status, 'ABSENT');
+    await assert.rejects(
+      () => buildEvidenceIndex({ root: fakeRoot, trackedPaths: ['release/reproducibility-evidence.json', 'release/parity-evidence.json'] }),
+      error => error instanceof EvidenceIndexError && error.code === 'EVIDENCE_INDEX_NOT_A_FILE'
+    );
 
     // Path traversal and absolute paths are refused outright.
     await assert.rejects(() => describeEvidenceEntry(fakeRoot, set, '../outside.json'), /EVIDENCE_INDEX_PATH_TRAVERSAL/);
     await assert.rejects(() => describeEvidenceEntry(fakeRoot, set, 'C:\\Windows\\win.ini'), /EVIDENCE_INDEX_INVALID_PATH/);
+  } finally {
+    await rm(fakeRoot, { recursive: true, force: true });
+  }
+});
 
-    // The same failure aborts the whole build instead of being downgraded to ABSENT.
+test('a directory that is not a git work tree is refused instead of guessed at', async () => {
+  const fakeRoot = await temporaryDirectory('spool-evidence-index-nogit-');
+  try {
     await assert.rejects(
       () => buildEvidenceIndex({ root: fakeRoot }),
-      error => error instanceof EvidenceIndexError && error.code === 'EVIDENCE_INDEX_NOT_A_FILE'
+      error => error instanceof EvidenceIndexError && error.code === 'EVIDENCE_INDEX_GIT_REQUIRED'
     );
   } finally {
     await rm(fakeRoot, { recursive: true, force: true });

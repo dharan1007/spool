@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { readdirSync, statSync, existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -8,11 +9,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 /**
  * Internal audit-readiness evidence inventory.
  *
- * Produces a deterministic, content-hashed manifest of the evidence SPOOL already
- * keeps in the repository (registers, security design documents, internal
- * compliance mapping, release evidence, generated suite evidence, benchmark
- * summary) so a third party can be handed a manifest instead of a directory
- * listing.
+ * Produces a deterministic, content-hashed manifest of the evidence SPOOL keeps
+ * in the repository (registers, security design documents, internal compliance
+ * mapping, release evidence, generated suite evidence, benchmark summary) so a
+ * third party can be handed a manifest instead of a directory listing.
  *
  * It is NOT an audit, NOT an attestation, NOT a compliance certification, NOT a
  * signed release and NOT a production qualification. Nothing here closes
@@ -21,6 +21,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
  * Guarantees, in order:
  * - input scope is an explicit allowlist (no recursive sweep of the repo, no
  *   keys/credentials/temporary directories/unrelated files);
+ * - only git-tracked files are inventoried, so the manifest describes the
+ *   repository rather than one machine's leftover build output. Files that
+ *   exist locally but are not tracked are listed separately under `localOnly`
+ *   and excluded from the manifest digest;
  * - every present file is hashed from its actual bytes;
  * - expected-but-absent evidence is reported as ABSENT, never omitted and never
  *   implied to have passed;
@@ -114,6 +118,10 @@ export class EvidenceIndexError extends Error {
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+const LOCAL_ONLY_NOTE =
+  'Present in this working tree but not tracked by git (gitignored local build output or generated evidence). ' +
+  'Excluded from `entries` and from `indexSha256` so the manifest describes the repository rather than one machine.';
+
 export function repositoryRoot() {
   return REPO_ROOT;
 }
@@ -142,14 +150,42 @@ function expandSet(set, root) {
     const directory = assertRepositoryRelative(set.dir);
     const absolute = join(root, directory);
     if (existsSync(absolute)) {
-      const entries = readdirSync(absolute, { withFileTypes: true });
-      const names = entries
+      const names = readdirSync(absolute, { withFileTypes: true })
         .filter(entry => entry.isFile() && (!set.extension || entry.name.endsWith(set.extension)))
         .map(entry => `${directory}/${entry.name}`);
       files.push(...names.map(assertRepositoryRelative).sort());
     }
   }
   return files;
+}
+
+/**
+ * Ask git which of the candidate paths are tracked. The manifest must describe
+ * the repository, so a git work tree is required; there is no silent fallback
+ * to "whatever happens to be on disk".
+ */
+export function gitTrackedPaths(root, candidates) {
+  if (candidates.length === 0) return new Set();
+  let output;
+  try {
+    output = execFileSync('git', ['ls-files', '-z', '--', ...candidates], {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } catch (error) {
+    throw new EvidenceIndexError(
+      'EVIDENCE_INDEX_GIT_REQUIRED',
+      `${root} is not a usable git work tree (${error?.code ?? error?.message ?? error}); a git checkout is required to decide which evidence is tracked`
+    );
+  }
+  return new Set(
+    output
+      .split('\0')
+      .filter(Boolean)
+      .map(entry => normalizeRelativePath(entry))
+  );
 }
 
 function digest(bytes) {
@@ -234,15 +270,32 @@ export function assertOutputIsNotEvidence(outputPath, root) {
   return absolute;
 }
 
-export async function buildEvidenceIndex({ root = REPO_ROOT, commit } = {}) {
+export async function buildEvidenceIndex({ root = REPO_ROOT, commit, trackedPaths } = {}) {
   const rootPath = resolve(root);
-  const entries = [];
+
+  const declared = [];
   for (const set of EVIDENCE_MANIFEST) {
     for (const relativePath of expandSet(set, rootPath)) {
-      entries.push(await describeEvidenceEntry(rootPath, set, relativePath));
+      declared.push({ set, path: relativePath });
     }
   }
-  entries.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  declared.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+
+  const tracked =
+    trackedPaths === undefined
+      ? gitTrackedPaths(rootPath, declared.map(item => item.path))
+      : new Set([...trackedPaths].map(assertRepositoryRelative));
+
+  const entries = [];
+  const localOnly = [];
+  for (const { set, path } of declared) {
+    if (!tracked.has(path) && existsSync(resolve(rootPath, path))) {
+      // Untracked and present: local build output, not repository evidence.
+      localOnly.push(path);
+      continue;
+    }
+    entries.push(await describeEvidenceEntry(rootPath, set, path));
+  }
 
   if (entries.length === 0) {
     throw new EvidenceIndexError('EVIDENCE_INDEX_EMPTY', 'the evidence manifest resolved to zero entries');
@@ -257,9 +310,11 @@ export async function buildEvidenceIndex({ root = REPO_ROOT, commit } = {}) {
     scope: {
       root: 'repository root (resolved from the script location, not the caller working directory)',
       manifest: 'explicit allowlist: registers, security design documents, internal compliance mapping, release evidence, generated suite evidence, benchmark summary',
+      tracked: 'git-tracked files only, so the manifest is identical in a fresh clone of the same commit',
       excludes: [
         'credentials, keys and any .env file',
         'temporary directories and build output such as dist/',
+        'untracked or gitignored files present in the working tree (listed under localOnly instead)',
         'unrelated project data and unlisted repository files',
         'the index output itself'
       ],
@@ -269,11 +324,13 @@ export async function buildEvidenceIndex({ root = REPO_ROOT, commit } = {}) {
       expected: entries.length,
       present: entries.filter(entry => entry.status === 'PRESENT').length,
       absent: entries.filter(entry => entry.status === 'ABSENT').length,
+      localOnly: localOnly.length,
       sets: EVIDENCE_MANIFEST.length
     },
     indexSha256: digest(
       Buffer.from(entries.map(entry => `${entry.path}:${entry.status}:${entry.sha256 ?? 'ABSENT'}`).join('\n'), 'utf8')
     ),
+    localOnly: { note: LOCAL_ONLY_NOTE, paths: localOnly },
     entries
   };
   if (commit) index.commit = commit;
@@ -307,8 +364,9 @@ if (invokedFromCli) {
       }
       const { totals } = index;
       console.error(
-        `Evidence index: ${totals.present}/${totals.expected} present, ${totals.absent} absent (recorded as ABSENT). ` +
-          'Not an audit, not a compliance certification, not a signed release, not a production qualification.'
+        `Evidence index: ${totals.present}/${totals.expected} tracked entries present, ${totals.absent} absent (recorded as ABSENT), ` +
+          `${totals.localOnly} untracked local file(s) excluded. Not an audit, not a compliance certification, not a signed release, ` +
+          'not a production qualification.'
       );
       if (totals.absent > 0) {
         console.error(
