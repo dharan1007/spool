@@ -720,23 +720,35 @@
       "assurance": null,
       "evidence": {
         "implementation": [
-          "src/daemon/spoold.js"
+          "src/daemon/spoold.js",
+          "src/daemon/spoold-v2.js",
+          "src/daemon/spoold-v2-main.js",
+          "src/enterprise/registry.js",
+          "src/enterprise/orchestrator.js"
         ],
         "integrationTests": [
-          "tests/spoold.test.js"
+          "tests/spoold.test.js",
+          "tests/api-v2.test.js",
+          "tests/daemon-entrypoint.test.js"
         ],
         "faultTests": [
-          "tests/spoold.test.js"
+          "tests/spoold.test.js",
+          "tests/scheduler-distributed-lease.test.js",
+          "tests/api-v2.test.js"
         ],
         "securityTests": [
           "tests/spoold.test.js",
-          "tests/platform-security.test.js"
+          "tests/platform-security.test.js",
+          "tests/api-v2.test.js",
+          "tests/deployment-manifests.test.js"
         ],
         "loadTests": [],
-        "benchmarks": [],
+        "benchmarks": [
+          "tests/api-stress.test.js (layered transport/registry request rates only)"
+        ],
         "limits": "docs/LIMITS.md#control-plane-and-benchmarks"
       },
-      "notes": "Audit logging, session management, and policy enforcement proven; load and benchmark evidence in progress."
+      "notes": "Single-node control plane: API-key hashing, per-route RBAC, workspace-pinned tenant isolation that fails closed with MIGRATION_NOT_FOUND, transactional key issuance/revocation with audit activity, per-principal rate limiting, lease-based staging scheduler and a fail-closed production entrypoint are proven by tests. It stays EXPERIMENTAL: request-rate evidence is layered transport/registry only (not migration throughput), the registry is a single-writer SQLite volume with no multi-replica story, no live cluster deployment has been qualified, and no independent audit exists (BLOCKERS B004)."
     },
     {
       "id": "merkle-proofs",

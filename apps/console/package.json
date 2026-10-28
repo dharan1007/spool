@@ -7,8 +7,8 @@
     "description":  "Windows-first desktop console for the qualified SPOOL local migration runner",
     "main":  "electron/main.js",
     "dependencies":  {
+                         "@google-cloud/bigquery":  "^9.5.0",
                          "better-sqlite3":  "12.10.1",
-                         "mssql":  "12.7.2",
                          "mysql2":  "3.24.4",
                          "pg":  "8.23.0",
                          "pg-copy-streams":  "7.0.0",
@@ -26,6 +26,7 @@
                             "@vitejs/plugin-react":  "5.1.0",
                             "electron":  "^40.10.6",
                             "electron-builder":  "26.0.12",
+                            "mssql":  "12.7.2",
                             "typescript":  "5.9.3",
                             "vite":  "7.1.9"
                         },

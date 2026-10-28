@@ -1,15 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   AFFECTED_MSAL_RANGE,
   OPTIONAL_DRIVER_SCOPE,
+  ARTIFACTS,
   artifactVerdict,
+  auditEmbeddedEngine,
   classifyAudit,
   compareVersions,
   dependencyClosure,
+  dockerProductionClosureEqualsCore,
   installedVersions,
   isAffectedMsalVersion,
   overallVerdict
@@ -122,4 +125,52 @@ test('a critical finding in the core artifact blocks the allowlist', () => {
   assert.equal(verdict.status, 'AFFECTED');
   assert.deepEqual(verdict.criticals, ['left-pad']);
   assert.equal(overallVerdict({ core: verdict, optionalDrivers: verdict }).productionAllowlist, 'blocked');
+});
+
+test('every distributable artifact is enumerated and the Electron/runtime closure excludes optional drivers', () => {
+  const ids = ARTIFACTS.map(a => a.id).sort();
+  assert.deepEqual(ids, ['core', 'docker-production', 'electron-runtime', 'optional-drivers']);
+  assert.equal(ARTIFACTS.find(a => a.id === 'docker-production').derivedFrom, 'core');
+
+  const electronPkg = JSON.parse(readFileSync(join(root, 'apps/console/package.json'), 'utf8'));
+  assert.equal(electronPkg.dependencies?.mssql, undefined, 'mssql must not be a runtime dependency of the Electron app');
+  assert.equal(typeof electronPkg.devDependencies?.mssql, 'string', 'mssql may remain in devDependencies for tooling');
+  for (const forbidden of OPTIONAL_DRIVER_SCOPE.drivers) {
+    assert.equal(electronPkg.dependencies?.[forbidden], undefined, `${forbidden} must not ship in the Electron production closure`);
+  }
+  for (const required of ['better-sqlite3', 'pg', 'mysql2']) {
+    assert.equal(typeof electronPkg.dependencies?.[required], 'string', `${required} remains required by the desktop app`);
+  }
+
+  if (existsSync(join(root, 'Dockerfile'))) {
+    const dockerfile = readFileSync(join(root, 'Dockerfile'), 'utf8');
+    assert.equal(dockerProductionClosureEqualsCore(dockerfile), true);
+  }
+});
+
+test('embedded engine runtime dependencies are satisfied by the Electron closure', () => {
+  const embedded = auditEmbeddedEngine(root);
+  assert.equal(embedded.consistent, true, JSON.stringify(embedded));
+  assert.deepEqual(embedded.missingFromElectron, []);
+  assert.deepEqual(embedded.unresolvedFromClosure, []);
+  assert.ok(embedded.engineDependencies.includes('better-sqlite3'));
+  assert.ok(embedded.engineDependencies.includes('@google-cloud/bigquery'));
+
+  const verdict = overallVerdict({
+    core: artifactVerdict({ vulnerabilities: {} }),
+    optionalDrivers: artifactVerdict({ vulnerabilities: {} }),
+    electronRuntime: artifactVerdict({ vulnerabilities: {} }),
+    embeddedEngine: embedded,
+    dockerProduction: artifactVerdict({ vulnerabilities: {} })
+  });
+  assert.equal(verdict.productionAllowlist, 'allowed');
+});
+
+test('an affected Electron/runtime or embedded-engine artifact blocks production allowlist', () => {
+  const clean = artifactVerdict({ vulnerabilities: {} });
+  const affectedElectron = artifactVerdict({ vulnerabilities: { zod: { severity: 'high', via: [{ source: 1, title: 'x', url: 'u', severity: 'high' }] } } });
+  const badEngine = { id: 'embedded-engine', status: 'AFFECTED', consistent: false, missingFromElectron: ['missing'] };
+
+  assert.equal(overallVerdict({ core: clean, optionalDrivers: clean, electronRuntime: affectedElectron, embeddedEngine: { id: 'embedded-engine', consistent: true }, dockerProduction: clean }).productionAllowlist, 'blocked');
+  assert.equal(overallVerdict({ core: clean, optionalDrivers: clean, electronRuntime: clean, embeddedEngine: badEngine, dockerProduction: clean }).productionAllowlist, 'blocked');
 });

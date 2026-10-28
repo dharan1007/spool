@@ -3,18 +3,18 @@
 // The release gate audits the CORE production dependency set
 // (`npm audit --omit=dev`). Optional connector drivers are deliberately not part
 // of that set (docs/DEPENDENCY_RISK.md DR-002), so they need their own audit
-// rather than being silently excluded. This script audits both scopes and
-// reports each one separately:
+// rather than being silently excluded. This script audits each distributable
+// artifact separately:
+//   - core               -> root `npm audit --omit=dev` (tarball/daemon image)
+//   - optional-drivers   -> root `npm audit` (driver set outside production allowlist)
+//   - electron-runtime   -> apps/console `npm audit --omit=dev`
+//   - docker-production  -> root with Dockerfile `npm ci --omit=dev` (same closure as core)
+//   - embedded-engine    -> derived from apps/console/engine/package.json + electron closure
 //
-//   core               -> `npm audit --omit=dev` (what the tarball/daemon image installs)
-//   optional-drivers   -> `npm audit` (full tree: core + devDependencies, which is
-//                         the driver set a derived connector image adds)
-//
-// Exit code is 1 only when the core artifact has a high/critical finding. A
-// finding in the optional-driver scope is recorded as OPTIONAL_SCOPE_AFFECTED
-// and keeps those connectors outside the production allowlist; it is never
-// reported as a pass and never hidden.
-import { readFileSync } from 'node:fs';
+// Exit code is 1 when the core artifact has a high/critical finding. Findings in
+// other artifacts are recorded honestly and block promotion of those artifacts;
+// they are never hidden.
+import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,10 +26,12 @@ export const OPTIONAL_DRIVER_SCOPE = Object.freeze({
   transitive: ['@azure/identity', '@azure/msal-node']
 });
 
-export const ARTIFACTS = Object.freeze({
-  core: Object.freeze({ id: 'core', command: ['audit', '--omit=dev', '--audit-level=high', '--json'] }),
-  optionalDrivers: Object.freeze({ id: 'optional-drivers', command: ['audit', '--audit-level=high', '--json'] })
-});
+export const ARTIFACTS = Object.freeze([
+  Object.freeze({ id: 'core', root: '.', command: ['audit', '--omit=dev', '--audit-level=high', '--json'], kind: 'installed' }),
+  Object.freeze({ id: 'optional-drivers', root: '.', command: ['audit', '--audit-level=high', '--json'], kind: 'installed' }),
+  Object.freeze({ id: 'electron-runtime', root: 'apps/console', command: ['audit', '--omit=dev', '--audit-level=high', '--json'], kind: 'installed' }),
+  Object.freeze({ id: 'docker-production', root: '.', command: ['audit', '--omit=dev', '--audit-level=high', '--json'], kind: 'installed', derivedFrom: 'core' })
+]);
 
 function numericParts(version) {
   const [core] = String(version).split('-');
@@ -109,18 +111,36 @@ export function artifactVerdict(report) {
   return { status: failing ? 'AFFECTED' : 'PASS', ...classification };
 }
 
-export function overallVerdict({ core, optionalDrivers }) {
-  const coreClean = core.status === 'PASS';
+export function overallVerdict({
+  core,
+  optionalDrivers,
+  electronRuntime,
+  embeddedEngine,
+  dockerProduction
+} = {}) {
+  const coreClean = core?.status === 'PASS';
   let status;
   if (!coreClean) status = 'CORE_AFFECTED';
-  else if (optionalDrivers.status === 'PASS') status = 'PASS';
+  else if (electronRuntime?.status === 'AFFECTED') status = 'ELECTRON_RUNTIME_AFFECTED';
+  else if (embeddedEngine?.status === 'AFFECTED' || embeddedEngine?.consistent === false) status = 'EMBEDDED_ENGINE_AFFECTED';
+  else if (dockerProduction?.status === 'AFFECTED') status = 'DOCKER_AFFECTED';
+  else if (optionalDrivers?.status === 'PASS') status = 'PASS';
   else status = 'OPTIONAL_SCOPE_AFFECTED';
+  const optionalScopeAffected = optionalDrivers?.status !== 'PASS';
+  const productionAllowlist = coreClean && electronRuntime?.status !== 'AFFECTED' && dockerProduction?.status !== 'AFFECTED' && embeddedEngine?.status !== 'AFFECTED' && embeddedEngine?.consistent !== false ? 'allowed' : 'blocked';
   return {
     status,
     coreClean,
-    optionalScopeAffected: optionalDrivers.status !== 'PASS',
-    productionAllowlist: coreClean ? 'allowed' : 'blocked',
-    affectedConnectors: optionalDrivers.status === 'PASS' ? [] : [...OPTIONAL_DRIVER_SCOPE.drivers]
+    optionalScopeAffected,
+    electronRuntimeClean: electronRuntime?.status === 'PASS',
+    embeddedEngineConsistent: embeddedEngine?.consistent !== false,
+    dockerClean: dockerProduction?.status === 'PASS',
+    productionAllowlist,
+    affectedConnectors: optionalScopeAffected ? [...OPTIONAL_DRIVER_SCOPE.drivers] : [],
+    affectedArtifacts: [core, electronRuntime, dockerProduction, embeddedEngine]
+      .filter(Boolean)
+      .filter(artifact => artifact.status === 'AFFECTED' || artifact.consistent === false)
+      .map(artifact => artifact.id)
   };
 }
 
@@ -140,19 +160,65 @@ function runAudit(root, args) {
   return { report, exitCode: result.status };
 }
 
+export function dockerProductionClosureEqualsCore(dockerfileText) {
+  return /npm\s+ci\s+--omit=dev/.test(dockerfileText);
+}
+
+export function auditEmbeddedEngine(repoRoot) {
+  const engineManifest = JSON.parse(readFileSync(join(repoRoot, 'apps/console/engine/package.json'), 'utf8'));
+  const engineDeps = engineManifest.dependencies ?? {};
+  const consoleManifest = JSON.parse(readFileSync(join(repoRoot, 'apps/console/package.json'), 'utf8'));
+  const consoleDeps = consoleManifest.dependencies ?? {};
+  const missing = [];
+  for (const dep of Object.keys(engineDeps)) {
+    if (consoleDeps[dep] === undefined) missing.push(dep);
+  }
+  const electronLock = JSON.parse(readFileSync(join(repoRoot, 'apps/console/package-lock.json'), 'utf8'));
+  const packages = electronLock.packages ?? {};
+  const closure = dependencyClosure(packages, consoleDeps);
+  const unresolved = Object.keys(engineDeps).filter(dep => !closure.has(dep));
+  const consistent = missing.length === 0 && unresolved.length === 0;
+  return {
+    id: 'embedded-engine',
+    status: consistent ? 'PASS' : 'AFFECTED',
+    consistent,
+    engineDependencies: Object.keys(engineDeps).sort(),
+    missingFromElectron: missing,
+    unresolvedFromClosure: unresolved
+  };
+}
+
 export function auditArtifacts(root) {
   const results = {};
-  for (const artifact of Object.values(ARTIFACTS)) {
-    const { report, exitCode } = runAudit(root, artifact.command);
-    results[artifact.id] = {
-      command: `npm ${artifact.command.slice(0, -1).join(' ')}`,
-      exitCode,
-      ...artifactVerdict(report)
-    };
+  for (const artifact of ARTIFACTS) {
+    const artifactRoot = join(root, artifact.root);
+    if (artifact.kind === 'installed') {
+      const { report, exitCode } = runAudit(artifactRoot, artifact.command);
+      results[artifact.id] = {
+        id: artifact.id,
+        root: artifact.root,
+        command: `npm ${artifact.command.slice(0, -1).join(' ')}`,
+        exitCode,
+        ...artifactVerdict(report)
+      };
+      if (artifact.derivedFrom && results[artifact.derivedFrom]) {
+        if (existsSync(join(root, 'Dockerfile'))) {
+          const dockerfile = readFileSync(join(root, 'Dockerfile'), 'utf8');
+          results[artifact.id].dockerfileVerified = dockerProductionClosureEqualsCore(dockerfile);
+        }
+      }
+    }
   }
-  const verdict = overallVerdict({ core: results.core, optionalDrivers: results['optional-drivers'] });
+  results['embedded-engine'] = auditEmbeddedEngine(root);
+  const verdict = overallVerdict({
+    core: results.core,
+    optionalDrivers: results['optional-drivers'],
+    electronRuntime: results['electron-runtime'],
+    embeddedEngine: results['embedded-engine'],
+    dockerProduction: results['docker-production']
+  });
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     auditRange: AFFECTED_MSAL_RANGE,
     optionalDriverScope: OPTIONAL_DRIVER_SCOPE,
     artifacts: results,

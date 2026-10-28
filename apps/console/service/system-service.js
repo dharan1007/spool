@@ -29,7 +29,7 @@ export function createSystemService({ engine, engineRoot, releaseCommitSha, appV
         release: engine.PRODUCTION_POLICY.release,
         commitSha: releaseCommitSha ?? manifest?.engineCommitSha ?? null,
         root: appDir,
-        manifestGeneratedAt: manifest?.generatedAt ?? null
+        manifestSchemaVersion: manifest?.schemaVersion ?? null
       },
       target: engine.PRODUCTION_POLICY.target,
       sourceConnector: engine.PRODUCTION_POLICY.source,
