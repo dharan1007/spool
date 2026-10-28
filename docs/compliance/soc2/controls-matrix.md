@@ -1,4 +1,4 @@
-# SPOOL Enterprise — SOC 2 Type I Controls Matrix
+# SPOOL Enterprise — SOC 2 Trust Services Criteria: internal control mapping
 
 > Internal mapping document. Not an audit, not an attestation, not a SOC 2 report —
 > no independent auditor has reviewed it. See `README.md` in this directory and
