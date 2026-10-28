@@ -1,6 +1,7 @@
 {
   "register": "SPOOL-BLOCKERS",
   "updatedAt": "2026-10-28",
+  "branch": "engineering/spool-enterprise-production-hardening",
   "blockers": [
     {
       "id": "B001",

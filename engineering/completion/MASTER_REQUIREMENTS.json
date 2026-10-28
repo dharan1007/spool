@@ -3,7 +3,7 @@
   "updatedAt": "2026-10-28",
   "branch": "engineering/spool-enterprise-production-hardening",
   "pullRequest": "https://github.com/dharan1007/spool/pull/99",
-  "statusVocabulary": ["LOCAL_UNCOMMITTED", "LOCAL_COMMITTED", "REMOTE_PUSHED", "TESTED", "INTEGRATION_VERIFIED", "PRODUCTION_QUALIFIED", "EXTERNALLY_BLOCKED"],
+  "statusVocabulary": ["LOCAL_UNCOMMITTED", "LOCAL_COMMITTED", "REMOTE_PUSHED", "TESTED", "INTEGRATION_VERIFIED", "PRODUCTION_QUALIFIED", "EXTERNALLY_BLOCKED", "PARTIAL"],
   "domains": [
     {
       "id": "enterprise-api-v2",
@@ -147,14 +147,15 @@
       "id": "release-integrity-signing",
       "requirement": "Release integrity, signed artifacts, reproducible build evidence",
       "status": "TESTED",
+      "verifiedResults": "Release gate verified fail-closed: unsigned builds terminate with UNSIGNED_BUILD after binding the exact SHA, running both reproducible builds and verifying the chain; signed-path verification is covered by tests/release-contract.test.js using an injectable gate. Reproducible build evidence is identical across independent builds of the same commit.",
       "notes": "Gate verified fail-closed; actual signing requires authorized release keys (EXTERNALLY_BLOCKED for production signing material)"
     },
     {
       "id": "deployment-qualification",
       "requirement": "Production deployment qualification",
       "status": "EXTERNALLY_BLOCKED",
-      "verifiedResults": "Candidate qualification matrix produced (engineering/completion/PRODUCTION_QUALIFICATION.md): 17 gates executed, 14 PASS, 2 FAILED CLOSED (UNSIGNED_BUILD, dependency audit), 1 NOT EXECUTED (image build, B005). Chart renders with fail-closed guards; no image and no deployment exist to verify",
-      "notes": "RELEASE NOT QUALIFIED. Blocked on container image build (B005, no working Docker engine), cluster apply (B006, no API server), signing material (B003), dependency advisory (B007), real providers (B001/B002) and independent audit (B004)."
+      "verifiedResults": "Candidate qualification matrix produced (engineering/completion/PRODUCTION_QUALIFICATION.md update 3): 24 gates executed and reconciled at the current candidate. PASS: full suite, container image build + in-container lifecycle + restart persistence + loopback-only + non-root + fail-closed config, PostgreSQL 55/55 live, MySQL 7/7 live, backup drill, browser Studio, build, benchmark, static check, model, package, Helm render, dependency audit (0 vulnerabilities, B007 resolved as R007). FAIL CLOSED by design: release chain UNSIGNED_BUILD (B003). Not run: SQL Server live (host capacity, B002), cluster deployment (host capacity, B006), independent audit (B004), BigQuery (B001)",
+      "notes": "RELEASE NOT QUALIFIED. Remaining external material: signing material (B003), BigQuery credentials (B001) and independent audit (B004). Remaining host-capacity limits: SQL Server live qualification (B002, CAPACITY_RELOCATION.md prepared) and cluster apply (B006)."
     }
   ]
 }

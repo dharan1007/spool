@@ -4,6 +4,7 @@
   "workingDirectory": "C:\\temp\\spool-console",
   "branch": "engineering/spool-enterprise-production-hardening",
   "baseCommit": "38370a6da3004202edd82bd5f2b9d6dca1f0f63d",
+  "testedCommitSha": "37290fea141e7fb328e4a82e24fcdd90720a0ac8",
   "remoteHeadAtRegisterTime": "PENDING_FINAL_BATCH (this register batch is committed and pushed after the last verification run; the exact SHA is verified with git ls-remote and recorded in the handover message)",
   "pushedCommitSha": "e855353c50bb8cc37f615098fdee8822a493587f (head at the time of the final gate run; verified with git ls-remote and PR #99 headRefOid; the commit that carries this register adds evidence notes only and is pushed after it). The code commit verified by every run in this batch is d2c1b945725ae934115840c2faa2f23a9d363ac5, and the container image was built from exactly that tree.",
   "environmentConstraints": {
@@ -43,13 +44,13 @@
     "staticCheck": "PASS at e855353 (inside npm run check; 21 required artifacts, stable SQLite runtime, no source-network primitives, JS syntax valid)",
     "build": "PASS at e855353 - dist artifact root df77ec64ff822f29dbc97dc82c1973210babdc47b561de1281ea2b36ae5f25cd, 133 artifacts, commit-bound",
     "npmRunCheck": "completed 2026-10-27 at e855353: embedded FULL npm test 597/533 pass/0 fail/64 provider-gated skips/0 todo; check:model PASS (tests 532-536 include the intentional-unsafe and stale-writer counterexamples); release-gate bound SHA e855353, benchmark evidence to E:\\temp\\spool-qual\\bench-check\\..., static check PASS, reproducible-build-evidence reproducible=true with both builds at df77ec64… (133 artifacts), then failed CLOSED with UNSIGNED_BUILD — the designed terminal state without signing material (BLOCKERS B003); exit code 1; working tree stayed clean",
-    "boundedReleaseQualification": "EXTERNALLY_BLOCKED at 6bedad3: dependency_install PASS, security_audit FAIL (2 high GHSA-xcx6-jx8p-x3h5 in @azure/msal-node 5.6.0), runbook stopped by design; evidence in TEST_RESULTS runs[scripts/qualify-bounded-release.js] and BLOCKERS B007",
+    "boundedReleaseQualification": "HISTORICAL (pre-fix, at 6bedad3): dependency_install PASS, security_audit FAIL (2 high GHSA-xcx6-jx8p-x3h5 in @azure/msal-node 5.6.0), runbook stopped by design; evidence in TEST_RESULTS runs[scripts/qualify-bounded-release.js]. The advisory was subsequently resolved as R007 (optional drivers scoped out of the core closure); this run is retained as history and is NOT evidence for the current candidate.",
     "requiredSqliteSuite": "30/30 PASS at 06df51a (tap, concurrency 1)",
     "modelAndPackage": "check-svmp-model PASS (counterexamples detected), pack:verify PASS at 06df51a",
     "browserStudio": "PASS at e855353 against the dist built from that commit (artifact root df77ec64…): 6 routes, 25000 rows (24955 valid / 45 invalid), phase COMPLETE, WebMCP tool surface, recovery PASS, explicit Studio workflow PASS, 0 runtime exceptions, 0 failed network loads; earlier 3 consecutive runs at 06df51a also PASS",
     "releaseGate": "FAILED CLOSED UNSIGNED_BUILD at e855353 after reproducible build PASS (df77ec64..., 133 artifacts) - BLOCKERS B003",
     "securityAudit": "PASS at a1cdaa9 - 0 vulnerabilities found by npm audit --omit=dev --audit-level=high after scoping optional drivers (mssql, snowflake-sdk) to devDependencies with lazy driver loading (src/connectors/driver-loader.js). B007 resolved.",
-    "candidateVerdict": "NO-GO - EXTERNALLY BLOCKED, plus host execution-capacity limits for SQL Server live qualification (B002) and cluster deployment (B006). External material: BigQuery credentials (B001), release signing keys (B003), independent audit (B004). B007 eliminated.",
+    "candidateVerdict": "NO-GO - EXTERNALLY BLOCKED, plus host execution-capacity limits for SQL Server live qualification (B002) and cluster deployment (B006). External material: BigQuery credentials (B001), release signing keys (B003), independent audit (B004). The dependency advisory is resolved (see BLOCKERS resolvedThisSession R007)."
   },
   "externalBlocks": "See BLOCKERS.json: BigQuery credentials (B001), SQL Server live host capacity (B002), release signing keys (B003), independent audit (B004), Kubernetes cluster capacity (B006)",
   "remainingWork": "See REMAINING_TASKS.json T008-T011, T014, T016"
