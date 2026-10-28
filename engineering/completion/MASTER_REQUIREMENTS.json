@@ -67,7 +67,7 @@
       "requirement": "Full npm test suite green with exact reconciled counts (total/passed/failed/skipped/cancelled/todo)",
       "implementation": [],
       "tests": ["package.json scripts.test"],
-      "verifiedResults": "595 tests: 531 pass, 0 fail, 64 provider-gated skips (live-provider conformance, honestly skipped), 0 cancelled, 0 todo — reconciliation exact",
+      "verifiedResults": "634 tests: 570 pass, 0 fail, 64 provider-gated skips (live-provider conformance, honestly skipped), 0 cancelled, 0 todo — reconciliation exact",
       "status": "TESTED"
     },
     {
@@ -99,15 +99,15 @@
       "id": "connector-conformance-cdc-cutover",
       "requirement": "Database connector conformance, exact verification, CDC, repair and cutover where required",
       "status": "EXTERNALLY_BLOCKED",
-      "verifiedResults": "SQLite target path qualified end to end (20 cases, 262599 assertions); BigQuery atomic/recovery semantics proven against the local contract (5/5); 64 live-provider conformance tests exist and are skipped only because endpoints/credentials are absent",
-      "notes": "Real PostgreSQL/MySQL/SQL Server CDC, repair, cutover and soak qualification needs live endpoints and credentials (BLOCKERS B002); BigQuery needs GCP service-account credentials (B001). Never report these as qualified."
+      "verifiedResults": "SQLite target path qualified end to end (20 cases, 262599 assertions); PostgreSQL 18.6 (TLS verify-full) 55/55 and MySQL 8.4.13 (TLS verify-full, non-UTC host) live conformance, CDC, repair, bulk and cutover suites pass at d2c1b94; BigQuery atomic/recovery semantics proven against the local contract (5/5); 64 live-provider conformance tests exist and are skipped only because endpoints/credentials are absent",
+      "notes": "SQL Server live conformance needs host capacity (BLOCKERS B002); BigQuery needs GCP service-account credentials (B001). PostgreSQL and MySQL live results are bound to d2c1b94 and must be re-run for any newer commit before being cited as current. Never report these as qualified."
     },
     {
       "id": "cicd",
       "requirement": "CI/CD pipeline provisioning and green runs",
       "status": "EXTERNALLY_BLOCKED",
       "implementation": ["scripts/qualify-bounded-release.js", "scripts/release-gate.js", "scripts/verify-deployment.js"],
-      "verifiedResults": "B007 resolved: core production dependencies report 0 high/critical vulnerabilities (npm audit --omit=dev --audit-level=high). Pinned installation PASS. Earlier steps verified: full suite, required SQLite suite, build, benchmark, static, model, package, reproducible build. Release gate fails closed on missing signing material (UNSIGNED_BUILD, B003).",
+      "verifiedResults": "At c5d3cc9: full suite 634 tests / 570 pass / 0 fail / 64 provider-gated skips / 0 todo (exit 0); model check PASS; build PASS (dist artifact root 344a1d89�?�, 65/65 build-time tests); reproducible build PASS (both builds 344a1d89�?�, 136 artifacts); pack:verify PASS (tarball sha256:7e901499�?�, installed run 5 rows -> 3 written / 2 rejected); benchmark PASS; static check PASS (22 required artifacts); per-artifact dependency audit: core PASS (npm audit --omit=dev --audit-level=high = 0 findings), optional-driver scope AFFECTED by the upstream MSAL advisory and reported as OPTIONAL_SCOPE_AFFECTED rather than as a pass. Release gate fails closed on missing signing material (UNSIGNED_BUILD, B003).",
       "notes": "Signing material (B003, UNSIGNED_BUILD) remains the blocking gate. GitHub Actions is deliberately not used (release contract)."
     },
     {
@@ -139,7 +139,7 @@
       "id": "threat-model-security",
       "requirement": "Threat model maintenance and security remediation",
       "implementation": ["docs/THREAT_MODEL.md"],
-      "verifiedResults": "Enterprise registry/API boundary added with assets, controls and explicit residual risks (per-process rate limits, no API key TTL, plain HTTP behind a TLS terminator, non-WORM journal)",
+      "verifiedResults": "Enterprise registry/API boundary, plus bounded SSRF resistance for the cloud HTTP transport (address classification, metadata/link-local always refused, loopback+private require an explicit operator allowlist, DNS-time enforcement with pinned address, redirects never followed, request/response ceilings, total deadline) and a pinned connector credential surface (SQL Server uses SQL auth only, Snowflake driver options rebuilt from an explicit key list, no Azure credential class under src/connectors). Explicit residual risks are recorded, including that this is bounded SSRF resistance and not complete SSRF protection.",
       "status": "TESTED",
       "notes": "Self-assessed against tests and code, NOT an independent audit (BLOCKERS B004)"
     },
@@ -154,7 +154,7 @@
       "id": "deployment-qualification",
       "requirement": "Production deployment qualification",
       "status": "EXTERNALLY_BLOCKED",
-      "verifiedResults": "Candidate qualification matrix produced (engineering/completion/PRODUCTION_QUALIFICATION.md update 3): 24 gates executed and reconciled at the current candidate. PASS: full suite, container image build + in-container lifecycle + restart persistence + loopback-only + non-root + fail-closed config, PostgreSQL 55/55 live, MySQL 7/7 live, backup drill, browser Studio, build, benchmark, static check, model, package, Helm render, dependency audit (0 vulnerabilities, B007 resolved as R007). FAIL CLOSED by design: release chain UNSIGNED_BUILD (B003). Not run: SQL Server live (host capacity, B002), cluster deployment (host capacity, B006), independent audit (B004), BigQuery (B001)",
+      "verifiedResults": "Candidate qualification matrix produced (engineering/completion/PRODUCTION_QUALIFICATION.md update 4, bound to c5d3cc94b012c80722715375fa409933a316bf1a): every gate that this host can exercise was executed and reconciled. PASS at c5d3cc9: full suite 634/570 pass/0 fail/64 provider-gated skips, container image build + in-container lifecycle + restart persistence + loopback-only + non-root + fail-closed config (d2c1b94 image; no src/ changes since, but the engine is now unresponsive so it was not rebuilt), PostgreSQL 55/55 live and MySQL 7/7 live (bound to d2c1b94), backup drill, browser Studio (e855353), build, reproducible build, benchmark, static check, model check, package verify, Helm render. Per-artifact dependency audit: core 0 vulnerabilities, optional-driver scope affected by the upstream MSAL advisory and reported as affected. FAIL CLOSED by design: release chain UNSIGNED_BUILD (B003). Not run: SQL Server live (host capacity, B002), cluster deployment (host capacity, B006), independent audit (B004), BigQuery (B001).",
       "notes": "RELEASE NOT QUALIFIED. Remaining external material: signing material (B003), BigQuery credentials (B001) and independent audit (B004). Remaining host-capacity limits: SQL Server live qualification (B002, CAPACITY_RELOCATION.md prepared) and cluster apply (B006)."
     }
   ]

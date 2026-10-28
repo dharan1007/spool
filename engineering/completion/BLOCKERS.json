@@ -15,7 +15,7 @@
       "id": "B002",
       "domain": "mssql-connector-live-qualification",
       "type": "ENVIRONMENT_CAPACITY",
-      "missingResource": "Host capacity to run SQL Server 2022 for Linux. Measured on 2026-10-27: C: has 1.12 GB free; the Docker data disk (docker_data.vhdx) is 34.90 GB against a 64 GB ceiling and its contents are essentially full (docker system df: 25.97 GB images of which 15.6 GB belongs to other projects, 2.061 GB containers of which 1.95 GB belongs to other projects, 2.26 GB volumes of which 396 MB is reclaimable, 3.435 GB build cache with 79 MB reclaimable after pruning). The SQL Server 2022 image is 0.63 GB compressed / about 1.6 GB extracted plus a writable data volume. After pruning our own build cache there is still under 0.6 GB of SPOOL-owned space, so the pull would need ~1.6 GB of vhdx growth into ~1.1 GB of host free space. Compaction needs elevation (diskpart/Optimize-VHD) and relocating the data root is a Docker Desktop GUI/admin operation; deleting other projects' images and manual vhdx moves are out of bounds.",
+      "missingResource": "Host capacity to run SQL Server 2022 for Linux. Re-measured on 2026-10-28: C: has 1.34 GB free; the Docker data disk (docker_data.vhdx) is 34.90 GB against a 64 GB ceiling and its contents are essentially full (docker system df: 25.97 GB images of which 15.6 GB belongs to other projects, 2.061 GB containers of which 1.95 GB belongs to other projects, 2.26 GB volumes of which 396 MB is reclaimable, 3.435 GB build cache with 79 MB reclaimable after pruning). The SQL Server 2022 image is 0.63 GB compressed / about 1.6 GB extracted plus a writable data volume. After pruning our own build cache there is still under 0.6 GB of SPOOL-owned space, so the pull would need ~1.6 GB of vhdx growth into ~1.3 GB of host free space. Compaction needs elevation (diskpart/Optimize-VHD) and relocating the data root is a Docker Desktop GUI/admin operation; deleting other projects' images and manual vhdx moves are out of bounds. On 2026-10-28 the Docker engine also stopped answering a bounded 25 s `docker info` probe (Docker Desktop processes present, com.docker.service Stopped), so even an image pull could not be attempted at c5d3cc9.",
       "alreadyQualified": "PostgreSQL 18.6 (TLS verify-full) 55/55 and MySQL 8.4.13 (TLS verify-full, non-UTC host) 7/7 conformance suites now pass live — see resolvedThisSession R003/R004. The SQL Server connector remains covered only by its provider-gated suite plus static verification that it defaults to encrypt=true with trustServerCertificate=false (src/connectors/mssql/connection.js:47-50).",
       "notPassedLabel": "REAL_PROVIDER_NOT_QUALIFIED — capacity-blocked, not a product defect"
     },
@@ -30,14 +30,14 @@
       "id": "B004",
       "domain": "independent-audit",
       "type": "EXTERNALLY_BLOCKED",
-      "missingResource": "Independent third-party security audit engagement",
+      "missingResource": "Independent third-party security audit engagement. Internal hardening is complete and reproducible but cannot substitute for an independent audit: tests/cloud-http-security.test.js 12/12 (address classes, DNS-time enforcement, redirects, deadlines, body ceilings), tests/connector-auth-surface.test.js 3/3, tests/dependency-artifacts.test.js 7/7 and scripts/audit-artifacts.js per-artifact audit at c5d3cc9, plus the register-validation suite. Evidence is audit-ready; no auditor has reviewed it.",
       "notPassedLabel": "NOT_AUDITED"
     },
     {
       "id": "B006",
       "domain": "cluster-deployment",
       "type": "ENVIRONMENT_CAPACITY",
-      "missingResource": "A reachable Kubernetes cluster. kubectl 1.36.1 is installed but no API server exists. Docker Desktop's bundled cluster reports Mode kind, State disabled; enabling it downloads control-plane images (kindest/node:v1.36.1 alone is 0.38 GB compressed) into the same C: drive that has 1.12 GB free while the Docker data disk is effectively full, so it was deliberately not attempted rather than risk filling the system drive.",
+      "missingResource": "A reachable Kubernetes cluster. Re-checked on 2026-10-28: kubectl v1.36.1 is installed and `kubectl config get-contexts` returns no contexts at all, so no API server is configured. Docker Desktop's bundled cluster was reported Mode kind, State disabled; enabling it downloads control-plane images (kindest/node alone is 0.38 GB compressed) into the same C: drive that has 1.34 GB free while the Docker data disk is effectively full and the engine was not answering `docker info` within 25 s, so it was deliberately not attempted rather than risk filling the system drive.",
       "evidenceWithoutResource": "Chart lints and renders; rendered object properties are asserted by scripts/check-deployment.js (8 objects) and tests/deployment-manifests.test.js 5/5 (non-root entrypoint, single-writer replica pin, proxy-only listener with Host rewrite, read-only rootfs, dropped capabilities, seccomp, NetworkPolicy both directions). The image the chart would deploy is now built and runtime-qualified (B005 resolved), so only a cluster is missing.",
       "notPassedLabel": "NOT_DEPLOYED"
     }

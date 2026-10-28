@@ -1,5 +1,9 @@
 # SPOOL Enterprise — SOC 2 Type I Controls Matrix
 
+> Internal mapping document. Not an audit, not an attestation, not a SOC 2 report —
+> no independent auditor has reviewed it. See `README.md` in this directory and
+> `engineering/completion/BLOCKERS.json` B004 (`NOT_AUDITED`).
+
 | Control ID | Trust Service Criteria | Control Description | Verification Evidence |
 |---|---|---|---|
 | **CC6.1** | Logical Access | User authentication required via API Key, Bearer Token, or SSO. | `src/daemon/spoold-v2.js`, `src/platform/api-keys.js` |

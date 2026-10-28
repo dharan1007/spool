@@ -1,23 +1,36 @@
 #!/usr/bin/env node
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 /**
- * SPOOL Enterprise Automated SOC 2 Compliance Evidence Collector
- * Evaluates core Trust Services Criteria controls directly against code and artifacts.
+ * SPOOL internal control self-assessment.
+ *
+ * This is a repeatable, code-level mapping of SPOOL's own controls onto the SOC 2
+ * Trust Services Criteria. It is NOT an audit, NOT an attestation and NOT a
+ * SOC 2 report: no independent auditor has reviewed these results, and a passing
+ * run says only that the mapped engineering checks still hold at this commit.
+ * The `attestation` field is hard-coded false and the report carries a
+ * disclaimer so a generated file can never be mistaken for an issued report.
+ *
+ * See docs/compliance/soc2/README.md and BLOCKERS.json B004.
  */
-async function collectAuditEvidence() {
-  console.log('=== SPOOL Enterprise SOC 2 Compliance Evidence Collector ===\n');
+export const REPORT_DISCLAIMER =
+  'Internal control self-assessment only. Not an audit, not an attestation and not a SOC 2 report. ' +
+  'No independent auditor has reviewed these results.';
 
+export async function collectAuditEvidence({ outPath } = {}) {
   const evidence = {
-    framework: 'SOC 2 Type I / Type II Automated Control Assessment',
+    report: 'INTERNAL_CONTROL_SELF_ASSESSMENT',
+    framework: 'SPOOL internal controls mapped to SOC 2 Trust Services Criteria',
+    attestation: false,
+    independentAudit: 'NOT_PERFORMED',
+    disclaimer: REPORT_DISCLAIMER,
     assessmentDate: new Date().toISOString(),
-    overallScore: 0,
-    totalControls: 8,
-    passedControls: 0,
-    controls: []
+    totalChecks: 8,
+    passedChecks: 0,
+    checks: []
   };
 
   function evaluate(id, name, criteria, checkFn) {
@@ -31,8 +44,8 @@ async function collectAuditEvidence() {
       passed = false;
       details = String(err?.message ?? err);
     }
-    if (passed) evidence.passedControls++;
-    evidence.controls.push({
+    if (passed) evidence.passedChecks++;
+    evidence.checks.push({
       id,
       name,
       criteria,
@@ -103,8 +116,8 @@ async function collectAuditEvidence() {
     return { pass: hasSha, details: 'Every completed migration produces SHA-256 bound immutable cryptographic receipt' };
   });
 
-  // CC1.1 - Complete SOC 2 Policy Suite Documentation
-  evaluate('CTRL-08', 'Formal Trust Services Criteria Policy Suite', 'CC1.1', () => {
+  // CC1.1 - Policy documentation present in the repository
+  evaluate('CTRL-08', 'Trust Services Criteria Policy Documents Present', 'CC1.1', () => {
     const policies = [
       '01-access-control-policy.md',
       '02-change-management-policy.md',
@@ -117,28 +130,33 @@ async function collectAuditEvidence() {
       '09-continuous-monitoring-logging-policy.md'
     ];
     const allExist = policies.every(p => existsSync(join('docs/compliance/soc2', p)));
-    return { pass: allExist, details: 'All 9 SOC 2 Trust Services Criteria policies fully documented and versioned' };
+    return { pass: allExist, details: 'All 9 mapped policy documents are present and versioned (presence only; not an auditor review)' };
   });
 
-  evidence.overallScore = (evidence.passedControls / evidence.totalControls) * 100;
-  console.log(`\nCompliance Score: ${evidence.overallScore}% (${evidence.passedControls}/${evidence.totalControls} Controls Verified)`);
+  console.log(`\nSelf-assessment checks passed: ${evidence.passedChecks}/${evidence.totalChecks} (not a compliance score, not an attestation)`);
 
-  await writeFile(
-    '.console-evidence/soc2-audit-report.json',
-    JSON.stringify(evidence, null, 2) + '\n',
-    'utf8'
-  );
-  console.log('Saved auditor evidence report to .console-evidence/soc2-audit-report.json\n');
+  const target = outPath ?? '.console-evidence/internal-control-self-assessment.json';
+  await mkdir(dirname(resolve(target)), { recursive: true });
+  await writeFile(target, JSON.stringify(evidence, null, 2) + '\n', 'utf8');
+  console.log(`Saved internal control self-assessment to ${target}\n`);
   return evidence;
 }
 
-collectAuditEvidence().then(res => {
-  if (res.overallScore !== 100) {
-    console.error('SOC 2 Audit Compliance Verification Failed');
+function outPathFromArgv(argv) {
+  const index = argv.indexOf('--out');
+  return index === -1 ? undefined : argv[index + 1];
+}
+
+const invoked = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null;
+if (invoked === import.meta.url) {
+  collectAuditEvidence({ outPath: outPathFromArgv(process.argv) }).then(res => {
+    if (res.passedChecks !== res.totalChecks) {
+      console.error('Internal control self-assessment has failing checks');
+      process.exit(1);
+    }
+    process.exit(0);
+  }).catch(err => {
+    console.error(err);
     process.exit(1);
-  }
-  process.exit(0);
-}).catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+  });
+}

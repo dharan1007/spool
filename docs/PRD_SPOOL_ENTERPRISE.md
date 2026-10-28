@@ -1031,7 +1031,7 @@ are invisible to B; billing reflects A's usage only.
 | scheduling | — | **PRODUCTION** |
 | horizontal-scaling | — | **PRODUCTION** |
 | managed-service | — | **PRODUCTION** |
-| soc2-type2 | — | **ACHIEVED** |
+| soc2-type2 | — | Auditor-issued report (not started; no engagement) |
 
 ### Appendix B: Organizational Requirements
 

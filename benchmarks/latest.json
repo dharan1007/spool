@@ -1,7 +1,7 @@
 {
   "suite": "SPOOL-Bench",
   "suiteVersion": 1,
-  "generatedAt": "2026-10-27T12:00:04.691Z",
+  "generatedAt": "2026-10-28T05:33:10.830Z",
   "environment": {
     "node": "v22.23.2",
     "platform": "win32",
@@ -10,25 +10,25 @@
   "migration": [
     {
       "rows": 1000,
-      "parseMs": 16.11,
-      "transformMs": 38.39,
-      "transformRowsPerSecond": 26050,
+      "parseMs": 16.75,
+      "transformMs": 39.25,
+      "transformRowsPerSecond": 25475,
       "validRows": 999,
       "invalidRows": 1
     },
     {
       "rows": 10000,
-      "parseMs": 68.41,
-      "transformMs": 229.64,
-      "transformRowsPerSecond": 43547,
+      "parseMs": 72.3,
+      "transformMs": 232.95,
+      "transformRowsPerSecond": 42928,
       "validRows": 9982,
       "invalidRows": 18
     },
     {
       "rows": 50000,
-      "parseMs": 193.86,
-      "transformMs": 1065.33,
-      "transformRowsPerSecond": 46934,
+      "parseMs": 203.2,
+      "transformMs": 1116.35,
+      "transformRowsPerSecond": 44789,
       "validRows": 49910,
       "invalidRows": 90
     }
@@ -84,22 +84,22 @@
     ]
   },
   "releaseIntegrity": {
-    "envelopeSignsPerSecond": 3968,
-    "envelopeVerificationsPerSecond": 3338,
-    "canonicalListHashesPerSecond": 159563
+    "envelopeSignsPerSecond": 3671,
+    "envelopeVerificationsPerSecond": 3455,
+    "canonicalListHashesPerSecond": 238895
   },
   "contentVerification": [
     {
       "rows": 1000,
-      "verifyMs": 319.24,
-      "verifyRowsPerSecond": 3132,
+      "verifyMs": 209.73,
+      "verifyRowsPerSecond": 4768,
       "rootHash": "sha256:5bc7438eacc255c656ac595faa9c24ea32e323dbb899245498fc89ad07fdf5e5",
       "merkleRoot": "sha256:493f38807cc9ca279072d6b526c0e31501566e309c62089da6371049bd8f59ba"
     },
     {
       "rows": 10000,
-      "verifyMs": 1989.58,
-      "verifyRowsPerSecond": 5026,
+      "verifyMs": 1397.65,
+      "verifyRowsPerSecond": 7155,
       "rootHash": "sha256:b167dca2daaa18ba958a87572242d4f69e8c5be8f5bcafde8023285c6b3ea579",
       "merkleRoot": "sha256:03e3ba92c0246d097f5272070b6e6909fed92d2b4f886f2146be341b1f03f7f3"
     }
@@ -107,14 +107,14 @@
   "merkle": [
     {
       "leaves": 1000,
-      "rootProveVerifyMs": 53.38,
-      "leavesPerSecond": 18733,
+      "rootProveVerifyMs": 36.66,
+      "leavesPerSecond": 27281,
       "root": "sha256:9ffa5858e57ef676d524754af44840b6d2f9d2dc836e1b9bcc3f29a264631ae3"
     },
     {
       "leaves": 10000,
-      "rootProveVerifyMs": 507.86,
-      "leavesPerSecond": 19690,
+      "rootProveVerifyMs": 365.77,
+      "leavesPerSecond": 27339,
       "root": "sha256:3742c96544cc08c181dcc4dca836706670cc12b1f7c49b10d4eefbac2aa5bee3"
     }
   ],
@@ -122,26 +122,26 @@
     {
       "missingRows": 10,
       "operations": 10,
-      "planMs": 8.75,
+      "planMs": 5.18,
       "repairPlanId": "sha256:9aa0fe2b70ba36c2107baf2b2cab94a037f8a9d00146b0c4ceb4c98cb2a4fb18"
     },
     {
       "missingRows": 100,
       "operations": 100,
-      "planMs": 23.46,
+      "planMs": 16.51,
       "repairPlanId": "sha256:44dad2c80b0f47ef9f7df1ffcf3cc04fc034f06f3b594c4966925f6685aaa135"
     }
   ],
   "sqliteEndToEnd": [
     {
       "rows": 1000,
-      "writeMs": 188.13,
-      "writeRowsPerSecond": 5315
+      "writeMs": 119.08,
+      "writeRowsPerSecond": 8398
     },
     {
       "rows": 10000,
-      "writeMs": 1409.21,
-      "writeRowsPerSecond": 7096
+      "writeMs": 1411.17,
+      "writeRowsPerSecond": 7086
     }
   ],
   "caveat": "These are local deterministic engine and serialized-schema measurements, not universal LLM success-rate claims."

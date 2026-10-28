@@ -62,4 +62,23 @@ Branch `engineering/spool-enterprise-production-hardening` (PR #99) was rebuilt 
 
 ### Blocking qualifications
 
-`B001` BigQuery real-provider credentials, `B002` PostgreSQL/MySQL/SQL Server endpoints, `B003` release signing material (`UNSIGNED_BUILD`), `B004` independent audit, `B005` Docker engine, `B006` Kubernetes cluster, `B007` high-severity transitive `@azure/msal-node` advisory with no compatible upstream fix. Details, exact missing resources and honest labels are in `engineering/completion/BLOCKERS.json`. None of these were worked around: the release gate, the dependency audit and the provider-gated suites all fail closed.
+Current state (updated 2026-10-28; `engineering/completion/BLOCKERS.json` is authoritative):
+
+- `B001` BigQuery real-provider credentials — `REAL_PROVIDER_NOT_QUALIFIED`.
+- `B002` SQL Server live conformance — host capacity (`ENVIRONMENT_CAPACITY`).
+  PostgreSQL and MySQL were qualified live and are no longer part of this blocker.
+- `B003` release signing material — the gate fails closed with `UNSIGNED_BUILD`.
+- `B004` independent audit — `NOT_AUDITED`. Internal hardening (bounded SSRF
+  resistance, per-artifact dependency audit, connector credential surfaces) is
+  complete and audit-ready, but it is not an audit.
+- `B006` Kubernetes cluster — `NOT_DEPLOYED` (`ENVIRONMENT_CAPACITY`).
+
+Earlier entries are resolved and must not be cited as open: `B005` container image
+(built and runtime-qualified 20/20), and the high-severity transitive
+`@azure/msal-node` advisory, which is resolved **for the core artifact only**
+(core `npm audit --omit=dev` reports 0 findings; the optional SQL Server/Snowflake
+driver scope is still affected and those connectors remain outside the production
+allowlist). `scripts/audit-artifacts.js` reports both scopes separately.
+
+None of the remaining blockers was worked around: the release gate, the dependency
+audit, the private-endpoint policy and the provider-gated suites all fail closed.

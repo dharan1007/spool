@@ -1,4 +1,4 @@
-# SPOOL production qualification — 2026-10-28 (update 3)
+# SPOOL production qualification — 2026-10-28 (updates 3–4)
 
 Candidate: branch `engineering/spool-enterprise-production-hardening` (PR #99),
 package version `1.1.2`.
@@ -210,3 +210,71 @@ node --test --test-concurrency=1 tests/conformance/mysql-*.test.js
 Qualification fixtures on this machine must run with `TEMP`/`TMP` and
 `SPOOL_QUALIFICATION_EVIDENCE_ROOT` on `E:`; the system drive has ~1.3 GiB free
 against the mandatory 10 GiB preflight of the SQLite qualifier.
+
+---
+
+## Update 4 - re-qualification at `c5d3cc94`
+
+Exact commit: `c5d3cc94b012c80722715375fa409933a316bf1a` (branch head, pushed).
+Two commits were added after the update-3 candidate and are covered here:
+
+- `6e270c8` - per-artifact dependency audit (`scripts/audit-artifacts.js`),
+  dependency/capability allowlist invariant, connector credential-surface tests.
+- `c5d3cc9` - bounded SSRF resistance for the cloud HTTP transport, with
+  adversarial regression tests and documented residual risk.
+
+Every result below was produced on a worktree whose only uncommitted change was
+regenerated evidence (see gate 6) at that SHA.
+
+| # | Gate | Command | Result at `c5d3cc9` |
+| --- | --- | --- | --- |
+| 1 | Full suite | `npm test` (TEMP/TMP on E:) | **PASS** - 634 tests, 570 pass, 0 fail, 64 provider-gated skips, 0 todo, 0 cancelled, 651 s, exit 0. Log `E:\temp\spool-qual\npm-test-c5d3cc9.log` |
+| 2 | Model check | `node scripts/check-svmp-model.js` | **PASS** - exhaustive exploration plus both counterexamples detected, exit 0 |
+| 3 | Build | `npm run build` | **PASS** - 65/65 build-time tests, dist root `344a1d89...`, release commit `unbound-local-build` (no signing material, B003) |
+| 4 | Reproducible build | `npm run release:reproduce` | **PASS** - both builds `344a1d8994f324f252b93e5a9a73ef8520fd139e1191c699c2976d441612a3d5`, 136 artifacts, `reproducible: true`, node v22.23.2, package-lock `e4963ca7...` |
+| 5 | Package verification | `npm run pack:verify` | **PASS** - tarball sha256 `7e901499...`, installed run: 5 source rows to 3 written, 2 rejected, 3 ledger entries |
+| 6 | Benchmark | `SPOOL_BENCHMARK_OUTPUT_DIR=E:\temp\spool-qual\bench-check npm run benchmark` | **PASS** - evidence in `SPOOL-Bench\2026-10-28T05-32-56-535Z`. The run regenerates the tracked summaries `benchmarks/latest.json` and `docs/BENCHMARKS.md` (timings only; row/valid/invalid counts identical), committed as evidence for this commit |
+| 7 | Static release check | `node scripts/static-check.js` | **PASS** - 22 required artifacts, no source-network primitives, optional drivers load lazily |
+| 8 | Per-artifact dependency audit | `node scripts/audit-artifacts.js` | **core PASS** (0 findings). **optional-drivers AFFECTED** - GHSA-xcx6-jx8p-x3h5 via `@azure/msal-node@5.6.0`. Overall `OPTIONAL_SCOPE_AFFECTED`, `productionAllowlist: allowed`. Exit 0 only because the core artifact gates the release; the optional scope is never labelled a pass |
+| 9 | Cloud HTTP security | `node --test tests/cloud-http-security.test.js` | **PASS 12/12** - address classes incl. IPv4-mapped/hex/octal/decimal, metadata and link-local refused even when configured, loopback+private require an explicit allowlist, DNS-time enforcement with pinned address, redirects never followed, request/response ceilings, hung and trickling responses hit the total deadline |
+| 10 | Connector credential surface | `node --test tests/connector-auth-surface.test.js` | **PASS 3/3** - SQL-only SQL Server config (`authentication=azure-active-directory` rejected), Snowflake driver options rebuilt from an explicit key list, no Azure credential class under `src/connectors` |
+| 11 | Dependency/capability invariant | `node --test tests/dependency-artifacts.test.js` | **PASS 7/7** - no affected-driver capability is `PRODUCTION`, affected capabilities still declared, optional closure still resolves the affected MSAL major (remediation trigger) |
+| 12 | Driver boundary | `node --test tests/connector-driver-boundary.test.js` | **PASS 7/7** |
+| 13 | Cloud wire staging | `node --test tests/cloud-network-staging.test.js` | **PASS 2/2** against a real loopback HTTP wire server, which must now be named in `SPOOL_CLOUD_PRIVATE_ENDPOINT_HOSTS` instead of relying on a permissive default |
+| 14 | Register validation | `node --test tests/completion-registers.test.js` | **PASS 8/8** |
+| 15 | Release chain | `node scripts/release-gate.js` | **FAIL CLOSED** `UNSIGNED_BUILD`, exit 1, after binding `c5d3cc9` and re-running both reproducible builds (`344a1d89...`, 136 artifacts) - B003. Not a pass |
+| 16 | Container image / cluster | - | **NOT RUN**: the Docker engine stopped answering a bounded 25 s `docker info` probe on 2026-10-28 (`com.docker.service` Stopped); `kubectl config get-contexts` has no contexts. The d2c1b94 image remains the last executed image qualification |
+
+Not re-executed at `c5d3cc9` and therefore still bound to their original commits:
+PostgreSQL 55/55 and MySQL 7/7 live conformance, container build + in-container
+acceptance, backup/restore drill, SQLite sustained qualifier, browser Studio smoke.
+That is a scope statement, not a claim that the older runs qualify the new HEAD;
+`src/connectors/cloud-http.js` and the Snowflake option builder did change, and
+both are covered by gates 9, 10 and 13.
+
+### Host state at this re-qualification
+
+- `C:` 1.34 GiB free; `E:` 421.56 GiB free.
+- Docker engine unresponsive to a 25 s bounded probe; `docker system df` could not
+  be refreshed.
+- `kubectl` v1.36.1 installed, zero contexts configured.
+
+### Verdict (unchanged)
+
+**NO-GO - EXTERNALLY BLOCKED**, with B002 and B006 additionally blocked by host
+execution capacity. The dependency advisory is resolved for the core artifact only;
+SQL Server and Snowflake remain affected, unqualified and outside the production
+allowlist. The `npm run check` terminal state is still `UNSIGNED_BUILD`.
+
+### Compliance-claim correction (same batch)
+
+`scripts/soc2-audit-collector.js` was an internal static check that emitted a file
+titled "SOC 2 Type I / Type II Automated Control Assessment" with a 100 percent
+"Compliance Score", and a test asserted that committed artifact said 100 percent.
+That is internal review presented as an attestation. It is now
+`scripts/internal-control-self-assessment.js`, which states `attestation: false`,
+`independentAudit: NOT_PERFORMED` and a disclaimer in every report, writes
+`.console-evidence/internal-control-self-assessment.json` (the stale SOC 2-labelled
+report is removed), and is executed at the current HEAD by
+`tests/internal-control-self-assessment.test.js` (2/2). The compliance domain stays
+`NOT_AUDITED` (B004).
